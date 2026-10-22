@@ -100,10 +100,22 @@ module internal ModelDiscovery =
         let visited = HashSet<string>(StringComparer.Ordinal)
         let models = ResizeArray<GeneratedModel>()
         let referenced = project.ProjectContext.GetReferencedAssemblies() |> Seq.toArray
+        let named (name: string) =
+            let path = name.Split('.') |> Array.toList
+            referenced |> Seq.choose(fun assembly -> assembly.Contents.FindEntityByPath(path))
         let sourceAssemblies = project.AssemblySignature.Entities |> Seq.map(fun entity -> entity.Assembly.SimpleName) |> Set.ofSeq
         use metadataResolver = new DefaultAssemblyResolver()
         for directory in referenced |> Seq.choose _.FileName |> Seq.map Path.GetDirectoryName |> Seq.distinct do
             metadataResolver.AddSearchDirectory(directory)
+        let images = Dictionary<string,AssemblyDefinition>(StringComparer.Ordinal)
+        use ownedImages = { new IDisposable with member _.Dispose() = for image in images.Values do image.Dispose() }
+        let image path =
+            match images.TryGetValue path with
+            | true, input -> input
+            | _ ->
+                let input = AssemblyDefinition.ReadAssembly(path,ReaderParameters(AssemblyResolver=metadataResolver))
+                images.Add(path,input)
+                input
         let arrayTemplates = Dictionary<int,FSharpType>()
         let arrayTemplate rank =
             match arrayTemplates.TryGetValue rank with
@@ -243,12 +255,10 @@ module internal ModelDiscovery =
                     if decision.GenericChildren || entity.IsArrayType then
                         for argument in typ.GenericArguments do queue.Enqueue argument
                     for child in decision.NamedChildren do
-                        let target = referenced |> Seq.collect(fun assembly -> entities assembly.Contents.Entities)
-                                     |> Seq.find(fun entity -> entity.TryFullName = Some child)
+                        let target = named child |> Seq.find(fun entity -> entity.TryFullName = Some child)
                         queue.Enqueue(target.AsType())
                     for child in TypeSupport.OptionalChildren shape do
-                        match referenced |> Seq.collect(fun assembly -> entities assembly.Contents.Entities)
-                              |> Seq.tryFind(fun entity -> entity.TryFullName = Some child) with
+                        match named child |> Seq.tryFind(fun entity -> entity.TryFullName = Some child) with
                         | Some target -> queue.Enqueue(target.AsType())
                         | None -> ()
                     let collectionArguments =
@@ -359,7 +369,7 @@ module internal ModelDiscovery =
                                         members.Add(GeneratedMember(valueType, null, null, FieldReference(field.Name, signature field.FieldType, actual), StaticField = field.IsStatic, QueryWritable = field.IsMutable))
                             else
                                 let path = entity.Assembly.FileName |> Option.defaultWith(fun () -> invalidOp ("The compiler field input has no metadata path: " + fullName))
-                                use input = AssemblyDefinition.ReadAssembly(path)
+                                let input = image path
                                 if input.Name.FullName <> entity.Assembly.QualifiedName then invalidOp ("The model input does not match its compiler identity: " + fullName)
                                 let source = input.MainModule.GetType(definition.FullName)
                                 if isNull source then invalidOp ("The model input has no original definition: " + definition.FullName)
@@ -422,7 +432,7 @@ module internal ModelDiscovery =
                                 else
                                     match declaringEntity.Assembly.FileName with
                                     | Some path ->
-                                        use input = AssemblyDefinition.ReadAssembly(path)
+                                        let input = image path
                                         if input.Name.FullName <> declaringEntity.Assembly.QualifiedName then invalidOp ("The model input does not match its compiler identity: " + fullName)
                                         let inputDefinition = input.MainModule.GetType(declaringDefinition.FullName)
                                         if isNull inputDefinition then invalidOp ("The model input has no original definition: " + declaringDefinition.FullName)
@@ -654,7 +664,7 @@ module internal ModelDiscovery =
                                 match entity.Assembly.FileName with
                                 | Some path ->
                                     // Only imported compiler inputs are read here; current-project models never need a prior output.
-                                    use input = AssemblyDefinition.ReadAssembly(path)
+                                    let input = image path
                                     if input.Name.FullName <> entity.Assembly.QualifiedName then
                                         invalidOp ("The enum input does not match its compiler identity: " + fullName)
                                     let definition = input.MainModule.GetType(actual.FullName)
@@ -688,7 +698,7 @@ module internal ModelDiscovery =
                     else
                         match entity.Assembly.FileName with
                         | Some path ->
-                            use input = AssemblyDefinition.ReadAssembly(path, ReaderParameters(AssemblyResolver = metadataResolver))
+                            let input = image path
                             if input.Name.FullName <> entity.Assembly.QualifiedName then invalidOp "Generic variance input differs from the compiler identity."
                             let actual = reference typ
                             let definition = match actual with :? GenericInstanceType as instance -> instance.ElementType | _ -> actual
@@ -700,11 +710,20 @@ module internal ModelDiscovery =
                         | None -> invalidOp ("The compiler generic variance input has no original metadata path: " + entity.BasicQualifiedName)
                 variances.Add(entity,values)
                 values
+        let parentTypes = Dictionary<FSharpType,FSharpType[]>()
+        let parents (typ: FSharpType) =
+            match parentTypes.TryGetValue typ with
+            | true, values -> values
+            | _ ->
+                let values =
+                    if typ.HasTypeDefinition || typ.IsAnonRecordType then
+                        Array.append (typ.BaseType |> Option.toArray) (typ.AllInterfaces |> Seq.toArray)
+                    else [||]
+                parentTypes.Add(typ,values)
+                values
         let assignment: CodecTypeAssignment<FSharpType> =
             { Equal = fun (a: FSharpType) b -> a.Equals b
-              Parents = fun typ ->
-                  if typ.HasTypeDefinition || typ.IsAnonRecordType then Array.append (typ.BaseType |> Option.toArray) (typ.AllInterfaces |> Seq.toArray)
-                  else [||]
+              Parents = parents
               Arguments = fun typ -> typ.GenericArguments |> Seq.toArray
               Definition = fun typ -> if typ.HasTypeDefinition then typ.TypeDefinition.AsType() else typ
               Variance = variance
