@@ -20,7 +20,7 @@
       <_SoloDBHelperSelection>$(SoloDBGeneratedHelperRoot)/implementation.xml</_SoloDBHelperSelection>
       <_SoloDBGeneratedKeyFile Condition="'$(SignAssembly)' == 'true'">$(AssemblyOriginatorKeyFile)</_SoloDBGeneratedKeyFile>
     </PropertyGroup>
-    <SoloDatabase.Metadata.Tools.GenerateHelper Output="$(SoloDBGeneratedContract)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" References="@(ReferenceCopyLocalPaths);@(ReferencePath)" />
+    <SoloDatabase.Metadata.Tools.GenerateHelper Output="$(SoloDBGeneratedContract)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" PublicSign="$(PublicSign)" DelaySign="$(DelaySign)" References="@(ReferenceCopyLocalPaths);@(ReferencePath)" />
     <GetAssemblyIdentity AssemblyFiles="$(SoloDBGeneratedContract)">
       <Output TaskParameter="Assemblies" ItemName="_SoloDBGeneratedContractIdentity" />
     </GetAssemblyIdentity>
@@ -47,7 +47,7 @@
     </ItemGroup>
     <SoloDatabase.Metadata.Tools.HelperImplementationInputs InputFile="$(_SoloDBHelperInputFile)" Stamp="$(_SoloDBHelperStamp)"
         Selection="$(_SoloDBHelperSelection)" Consumer="@(IntermediateAssembly)" Output="$(SoloDBGeneratedImplementation)"
-        Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" References="@(_SoloDBOriginalHelperReferences)"
+        Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" PublicSign="$(PublicSign)" DelaySign="$(DelaySign)" References="@(_SoloDBOriginalHelperReferences)"
         ImplementationInputs="@(_SoloDBHelperImplementationFiles)">
       <Output TaskParameter="Active" PropertyName="SoloDBGeneratedActive" />
     </SoloDatabase.Metadata.Tools.HelperImplementationInputs>
@@ -56,7 +56,7 @@
           Inputs="$(_SoloDBHelperInputFile);@(IntermediateAssembly);@(_SoloDBOriginalHelperReferences);$(_SoloDBGeneratedKeyFile);@(_SoloDBHelperImplementationFiles);$(MSBuildProjectFullPath);$(MSBuildAllProjects)"
           Outputs="$(_SoloDBHelperStamp)" Condition="'$(SoloDBGeneratedHelper)' == 'true' and '$(DesignTimeBuild)' != 'true'">
     <Delete Files="$(_SoloDBHelperStamp)" />
-    <SoloDatabase.Metadata.Tools.GenerateHelper Consumer="@(IntermediateAssembly)" Output="$(SoloDBGeneratedImplementation)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" References="@(_SoloDBOriginalHelperReferences)" Selection="$(_SoloDBHelperSelection)">
+    <SoloDatabase.Metadata.Tools.GenerateHelper Consumer="@(IntermediateAssembly)" Output="$(SoloDBGeneratedImplementation)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" PublicSign="$(PublicSign)" DelaySign="$(DelaySign)" References="@(_SoloDBOriginalHelperReferences)" Selection="$(_SoloDBHelperSelection)">
       <Output TaskParameter="Active" PropertyName="SoloDBGeneratedActive" />
     </SoloDatabase.Metadata.Tools.GenerateHelper>
     <Touch Files="$(_SoloDBHelperStamp)" AlwaysCreate="true" />

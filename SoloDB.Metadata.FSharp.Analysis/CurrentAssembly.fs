@@ -2,10 +2,10 @@ namespace SoloDatabase.Metadata.FSharp
 
 open System
 open System.IO
-open System.Security.Cryptography
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Symbols
 open Mono.Cecil
+open SoloDatabase.Metadata.Tools
 
 /// Acquires the current source identity before a compiler image exists.
 module internal CurrentAssembly =
@@ -100,20 +100,7 @@ module internal CurrentAssembly =
             let bytes = File.ReadAllBytes(path)
             identity.PublicKey <-
                 if publicSign || delaySign then bytes else
-                use rsa = new RSACryptoServiceProvider()
-                rsa.ImportCspBlob(bytes)
-                if rsa.PublicOnly then raise (CryptographicException("Full signing requires a private key pair."))
-                let publicKey = rsa.ExportCspBlob(false)
-                // CLR public keys frame the CAPI public blob with RSA-sign and SHA1 identifiers.
-                use buffer = new MemoryStream(12 + publicKey.Length)
-                use writer = new BinaryWriter(buffer)
-                writer.Write(0x2400)
-                writer.Write(0x8004)
-                writer.Write(publicKey.Length)
-                writer.Write(publicKey,0,4)
-                writer.Write(0x2400)
-                writer.Write(publicKey,8,publicKey.Length - 8)
-                buffer.ToArray()
+                HelperAssembly.SigningPublicKey(bytes)
         { Identity = identity
           FullSigningKeyFile = if publicSign || delaySign then "" else defaultArg keyFile ""
           Dependencies = dependencies.ToArray() }

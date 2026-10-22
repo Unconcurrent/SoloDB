@@ -17,6 +17,8 @@ public sealed class HelperImplementationInputs : ITask
     [Required] public string Output { get; set; } = "";
     [Required] public string Identity { get; set; } = "";
     public string? KeyFile { get; set; }
+    public bool PublicSign { get; set; }
+    public bool DelaySign { get; set; }
     public ITaskItem[] References { get; set; } = Array.Empty<ITaskItem>();
     public ITaskItem[] ImplementationInputs { get; set; } = Array.Empty<ITaskItem>();
     [Output] public bool Active { get; private set; }
@@ -28,6 +30,7 @@ public sealed class HelperImplementationInputs : ITask
         {
             HelperAssembly.Publish(InputFile, new XElement("inputs", new XAttribute("consumer", Consumer),
                 new XAttribute("output", Output), new XAttribute("identity", Identity), new XAttribute("key", KeyFile ?? ""),
+                new XAttribute("publicSign", PublicSign), new XAttribute("delaySign", DelaySign),
                 References.Select(reference => new XElement("reference", reference.ItemSpec)),
                 ImplementationInputs.Select(input => new XElement("implementation", input.ItemSpec))));
             if (!File.Exists(Stamp)) return true;

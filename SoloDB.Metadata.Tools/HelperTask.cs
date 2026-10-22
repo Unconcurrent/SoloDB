@@ -13,6 +13,8 @@ public sealed class GenerateHelper : ITask
     [Output] public bool Active { get; private set; }
     public string? Consumer { get; set; }
     public string? KeyFile { get; set; }
+    public bool PublicSign { get; set; }
+    public bool DelaySign { get; set; }
     public ITaskItem[] References { get; set; } = Array.Empty<ITaskItem>();
     public string Selection { get; set; } = "";
 
@@ -20,10 +22,10 @@ public sealed class GenerateHelper : ITask
     {
         try
         {
-            if (string.IsNullOrEmpty(Consumer)) HelperAssembly.WriteContract(Output, Identity, KeyFile, References);
+            if (string.IsNullOrEmpty(Consumer)) HelperAssembly.WriteContract(Output, Identity, KeyFile, References, PublicSign, DelaySign);
             else
             {
-                Active = HelperAssembly.WriteImplementation(Consumer!, Output, Identity, KeyFile, References);
+                Active = HelperAssembly.WriteImplementation(Consumer!, Output, Identity, KeyFile, References, PublicSign, DelaySign);
                 if (Selection.Length != 0)
                     HelperAssembly.Publish(Selection, new XElement("selection", new XAttribute("active", Active)));
             }

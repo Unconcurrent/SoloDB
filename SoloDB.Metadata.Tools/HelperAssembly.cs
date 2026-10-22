@@ -4,6 +4,7 @@ using System.Xml;
 using System.Xml.Linq;
 using System.Linq;
 using System.Collections.Generic;
+using System.Security.Cryptography;
 using Microsoft.Build.Framework;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
@@ -30,6 +31,9 @@ internal static class HelperAssembly
             entry.Directory.Type == ImageDebugType.EmbeddedPortablePdb);
 
     internal static void WriteContract(string output, string identity, string? keyFile, ITaskItem[] references)
+        => WriteContract(output,identity,keyFile,references,false,false);
+
+    internal static void WriteContract(string output, string identity, string? keyFile, ITaskItem[] references, bool publicSign, bool delaySign)
     {
         // The reference contract is immutable across implementation refreshes.
         using var assembly = Create(identity);
@@ -43,10 +47,13 @@ internal static class HelperAssembly
         constructor.Parameters.Add(new ParameterDefinition(module.TypeSystem.String));
         il.Emit(OpCodes.Newobj, constructor);
         il.Emit(OpCodes.Throw);
-        Write(assembly, output, keyFile);
+        Write(assembly, output, Signing(assembly,keyFile,publicSign,delaySign));
     }
 
     internal static bool WriteImplementation(string input, string output, string identity, string? keyFile, ITaskItem[] references)
+        => WriteImplementation(input,output,identity,keyFile,references,false,false);
+
+    internal static bool WriteImplementation(string input, string output, string identity, string? keyFile, ITaskItem[] references, bool publicSign, bool delaySign)
     {
         using var resolver = new DefaultAssemblyResolver();
         resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(input))!);
@@ -71,8 +78,41 @@ internal static class HelperAssembly
         CSharpQueryOperations.Register(definitions,consumer, product, module, entry.DeclaringType, il, name => access.Add(name));
         if (access.Count != 0) AllowAccess(module, access, entry.DeclaringType.BaseType.Scope);
         il.Emit(OpCodes.Ret);
-        Write(helper, output, keyFile);
+        Write(helper, output, Signing(helper,keyFile,publicSign,delaySign,consumer));
         return true;
+    }
+
+    private static string? Signing(AssemblyDefinition image,string? keyFile,bool publicSign,bool delaySign,AssemblyDefinition? consumer = null)
+    {
+        if (string.IsNullOrEmpty(keyFile) || (!publicSign && !delaySign)) return keyFile;
+        var key = consumer?.Name.PublicKey;
+        if (key == null)
+        {
+            key = File.ReadAllBytes(keyFile);
+            // CAPI PRIVATEKEYBLOB inputs are also accepted by the CSharp compiler.
+            if (key.Length >= 2 && key[0] == 7 && key[1] == 2) key = SigningPublicKey(key);
+        }
+        image.Name.PublicKey = key;
+        var signed = consumer == null ? publicSign : (consumer.MainModule.Attributes & ModuleAttributes.StrongNameSigned) != 0;
+        if (signed) image.MainModule.Attributes |= ModuleAttributes.StrongNameSigned;
+        else image.MainModule.Attributes &= ~ModuleAttributes.StrongNameSigned;
+        return null;
+    }
+
+    internal static byte[] SigningPublicKey(byte[] bytes)
+    {
+        using var rsa = new RSACryptoServiceProvider();
+        rsa.ImportCspBlob(bytes);
+        if (rsa.PublicOnly) throw new CryptographicException("Full signing requires a private key pair.");
+        var key = rsa.ExportCspBlob(false);
+        // CLR framing of the framework-acquired CAPI public key.
+        using var buffer = new MemoryStream(12 + key.Length);
+        using (var writer = new BinaryWriter(buffer,System.Text.Encoding.UTF8,true))
+        {
+            writer.Write(0x2400); writer.Write(0x8004); writer.Write(key.Length);
+            writer.Write(key,0,4); writer.Write(0x2400); writer.Write(key,8,key.Length - 8);
+        }
+        return buffer.ToArray();
     }
 
     internal static (PropertyDefinition Property,TypeReference Owner)? ParentProperty(PropertyDefinition property,TypeReference owner)
