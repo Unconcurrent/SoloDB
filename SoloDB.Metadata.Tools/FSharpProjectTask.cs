@@ -19,6 +19,7 @@ public sealed class PrepareFSharpProject : ICancelableTask
     [Required] public string Provider { get; set; } = "";
     [Required] public string Context { get; set; } = "";
     public string Project { get; set; } = "";
+    public bool ProfileBuild { get; set; }
     public ITaskItem[] Arguments { get; set; } = Array.Empty<ITaskItem>();
     [Required] public string AssemblyName { get; set; } = "";
     [Required] public string AttributeSource { get; set; } = "";
@@ -53,6 +54,7 @@ public sealed class PrepareFSharpProject : ICancelableTask
             var input = new XElement("project",
                 new XAttribute("context", Context), new XAttribute("assembly", AssemblyName),
                 new XAttribute("attributes", AttributeSource), new XAttribute("template", Template));
+            if (ProfileBuild) input.Add(new XAttribute("timings", "true"));
             if (Project.Length != 0)
             {
                 input.Add(new XAttribute("project", Project));
@@ -90,6 +92,11 @@ public sealed class PrepareFSharpProject : ICancelableTask
                     throw new InvalidOperationException("FSharp project analysis did not return diagnostics. Exit code: " +
                         process.ExitCode + Environment.NewLine + text);
                 var result = XDocument.Load(response).Root!;
+                if (ProfileBuild)
+                    foreach (var phase in result.Elements("phase"))
+                        BuildEngine.LogMessageEvent(new BuildMessageEventArgs("SoloDB build timing: " +
+                            (string?)phase.Attribute("name") + " " + (string?)phase.Attribute("seconds") + " seconds",
+                            null, nameof(PrepareFSharpProject), MessageImportance.Normal));
                 var failed = false;
                 foreach (var diagnostic in result.Elements("diagnostic"))
                 {

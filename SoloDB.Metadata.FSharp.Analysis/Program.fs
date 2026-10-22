@@ -2,6 +2,7 @@ namespace SoloDatabase.Metadata.FSharp
 
 open System
 open System.IO
+open System.Globalization
 open System.Xml
 open System.Xml.Linq
 
@@ -26,12 +27,17 @@ module internal Program =
                 contextPath <- field "context"
                 let workspace = Path.Combine(Path.GetDirectoryName(requestPath), "analysis")
                 let report = Action<string,int,int,string>(fun file line column message -> add "warning" file line column message)
+                let timing =
+                    if request.Attribute(XName.Get "timings") = null || request.Attribute(XName.Get "timings").Value <> "true" then null else
+                    Action<string,float>(fun phase seconds ->
+                        diagnostics.Add(XElement(XName.Get "phase", XAttribute(XName.Get "name", phase),
+                            XAttribute(XName.Get "seconds", seconds.ToString("R", CultureInfo.InvariantCulture)))))
                 let template =
                     match request.Attribute(XName.Get "project") with
-                    | null -> ProjectGeneration.Write(contextPath, field "assembly", field "attributes", field "template", workspace, report)
+                    | null -> ProjectGeneration.Write(contextPath, field "assembly", field "attributes", field "template", workspace, report, timing)
                     | project ->
                         let arguments = request.Element(XName.Get "arguments").Elements(XName.Get "argument") |> Seq.map(fun item -> item.Value) |> Seq.toArray
-                        ProjectGeneration.Write(contextPath, project.Value, arguments, field "assembly", field "attributes", field "template", workspace, report)
+                        ProjectGeneration.Write(contextPath, project.Value, arguments, field "assembly", field "attributes", field "template", workspace, report, timing)
                 diagnostics.Add(XAttribute(XName.Get "template", template))
                 true
             with error ->

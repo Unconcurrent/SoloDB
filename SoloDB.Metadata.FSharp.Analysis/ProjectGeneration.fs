@@ -2,6 +2,7 @@ namespace SoloDatabase.Metadata.FSharp
 
 open System
 open System.IO
+open System.Diagnostics
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Diagnostics
 open FSharp.Compiler.Syntax
@@ -13,14 +14,25 @@ open SoloDatabase.Metadata.Tools
 /// Produces the executable template and its final compiler inputs together.
 type ProjectGeneration private () =
     static member Write(contextPath: string, assemblyName: string, attributeSource: string, templatePath: string, workspace: string, report: Action<string,int,int,string>) =
+        ProjectGeneration.Write(contextPath, assemblyName, attributeSource, templatePath, workspace, report, null)
+
+    static member internal Write(contextPath: string, assemblyName: string, attributeSource: string, templatePath: string, workspace: string, report: Action<string,int,int,string>, timing: Action<string,float>) =
         let project, arguments =
             use context = AssemblyDefinition.ReadAssembly(contextPath)
             let typ = context.MainModule.GetType("SoloDatabase.Tooling.ProjectContext")
             let literal name = typ.Fields |> Seq.find(fun field -> field.Name = name) |> fun field -> field.Constant :?> string
             literal "Project", (literal "Arguments").Split([|'\000'|], StringSplitOptions.None)
-        ProjectGeneration.Write(contextPath, project, arguments, assemblyName, attributeSource, templatePath, workspace, report)
+        ProjectGeneration.Write(contextPath, project, arguments, assemblyName, attributeSource, templatePath, workspace, report, timing)
 
     static member Write(contextPath: string, project: string, arguments: string[], assemblyName: string, attributeSource: string, templatePath: string, workspace: string, report: Action<string,int,int,string>) =
+        ProjectGeneration.Write(contextPath, project, arguments, assemblyName, attributeSource, templatePath, workspace, report, null)
+
+    static member internal Write(contextPath: string, project: string, arguments: string[], assemblyName: string, attributeSource: string, templatePath: string, workspace: string, report: Action<string,int,int,string>, timing: Action<string,float>) =
+        let measure name work =
+            if isNull timing then work() else
+            let watch = Stopwatch.StartNew()
+            try work()
+            finally timing.Invoke(name, watch.Elapsed.TotalSeconds)
         try
             Directory.CreateDirectory(workspace) |> ignore
             let arguments = arguments |> Array.filter(CompilerContext.IsContextArgument >> not)
@@ -36,10 +48,11 @@ type ProjectGeneration private () =
             if parsing.SourceFiles.Length = 0 || diagnostics |> List.exists(fun diagnostic -> diagnostic.Severity = FSharpDiagnosticSeverity.Error) then
                 invalidOp "The current FSharp compiler inputs do not describe a valid source project."
             let parsedInputs = System.Collections.Generic.Dictionary<string,ParsedInput>(StringComparer.Ordinal)
-            for source in parsing.SourceFiles do
-                let source = Path.GetFullPath(if Path.IsPathRooted(source) then source else Path.Combine(Path.GetDirectoryName(project),source))
-                let parsed = checker.ParseFile(source, SourceText.ofString(File.ReadAllText(source)), parsing) |> Async.RunSynchronously
-                parsedInputs.Add(source, parsed.ParseTree)
+            measure "parse" (fun () ->
+                for source in parsing.SourceFiles do
+                    let source = Path.GetFullPath(if Path.IsPathRooted(source) then source else Path.Combine(Path.GetDirectoryName(project),source))
+                    let parsed = checker.ParseFile(source, SourceText.ofString(File.ReadAllText(source)), parsing) |> Async.RunSynchronously
+                    parsedInputs.Add(source, parsed.ParseTree))
             let candidate input =
                 ParsedInput.fold (fun found _ node ->
                     found ||
@@ -51,10 +64,10 @@ type ProjectGeneration private () =
                     | _ -> false) false input
             let checkedProject =
                 if not(parsedInputs.Values |> Seq.exists candidate) then None else
-                let result = checker.ParseAndCheckProject(options) |> Async.RunSynchronously
+                let result = measure "check" (fun () -> checker.ParseAndCheckProject(options) |> Async.RunSynchronously)
                 if result.HasCriticalErrors || result.Diagnostics |> Array.exists(fun diagnostic -> diagnostic.Severity = FSharpDiagnosticSeverity.Error) then
                     invalidOp ("SoloDB generation could not check the current source project:\n" + (result.Diagnostics |> Array.map string |> String.concat "\n"))
-                let uses = result.GetAllUsesOfAllSymbols()
+                let uses = measure "symbol-uses" (fun () -> result.GetAllUsesOfAllSymbols())
                 let providerIdentity = result.ProjectContext.GetReferencedAssemblies()
                                        |> Seq.find(fun assembly -> assembly.SimpleName = "SoloDB.Metadata.FSharp")
                                        |> fun assembly -> "SoloDatabase.SoloDBAOT, " + assembly.QualifiedName
@@ -93,7 +106,7 @@ type ProjectGeneration private () =
                 CompilerContext.Write(contextPath, project, "inactive", arguments)
                 ""
             | Some result ->
-                let current = CurrentAssembly.acquire result arguments (Path.GetDirectoryName(project)) assemblyName
+                let current = measure "assembly-facts" (fun () -> CurrentAssembly.acquire result arguments (Path.GetDirectoryName(project)) assemblyName)
                 let referencePaths =
                     arguments |> Array.choose(fun argument ->
                         let prefix = if argument.StartsWith("-r:", StringComparison.Ordinal) then 3 elif argument.StartsWith("--reference:", StringComparison.Ordinal) then 12 else 0
@@ -103,10 +116,10 @@ type ProjectGeneration private () =
                     |> function [|path|] -> path | _ -> invalidOp "SoloDB generation requires exactly one current runtime reference."
                 use product = AssemblyDefinition.ReadAssembly(productPath)
                 use references = ModuleDefinition.CreateModule("SoloDB.CompilerReferences", ModuleKind.Dll)
-                let queries, queryCalls, queryWitnesses, queryLambdas, inferredRoots, providerOperations, operationAccess, argumentSources = QueryDiscovery.collect result references current.Identity parsedInputs (Path.GetDirectoryName(project)) (fun location methodName ->
+                let queries, queryCalls, queryWitnesses, queryLambdas, inferredRoots, providerOperations, operationAccess, argumentSources = measure "query-discovery" (fun () -> QueryDiscovery.collect result references current.Identity parsedInputs (Path.GetDirectoryName(project)) (fun location methodName ->
                     report.Invoke(location.FileName,location.StartLine,location.StartColumn + 1,
-                        sprintf "Cannot infer closed types for SoloDB use '%s'. Supply explicit SoloDBAOT model roots and a closed query signature for any runtime-selected use." methodName))
-                let models = ModelDiscovery.collect result references current.Identity inferredRoots parsedInputs (Path.GetDirectoryName(project))
+                        sprintf "Cannot infer closed types for SoloDB use '%s'. Supply explicit SoloDBAOT model roots and a closed query signature for any runtime-selected use." methodName)))
+                let models = measure "model-discovery" (fun () -> ModelDiscovery.collect result references current.Identity inferredRoots parsedInputs (Path.GetDirectoryName(project)))
                 let queryWitnesses, queryCalls =
                     if queryWitnesses.Length = 0 then queryWitnesses, queryCalls else
                     let core = result.ProjectContext.GetReferencedAssemblies() |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core")
@@ -121,7 +134,7 @@ type ProjectGeneration private () =
                 source.AppendLine("namespace SoloDatabase.Generated\n") |> ignore
                 source.AppendLine("do ()") |> ignore
                 let attribute = if access.Length = 0 then null else ModelDiscovery.accessAttribute references current.Identity
-                GeneratedJsonAssembly.Write(templatePath, "SoloDB.Generated.FSharp", "Template", product, models, attribute, queries, queryCalls, queryWitnesses, queryLambdas, providerOperations, referencePaths, operationAccess, argumentSources)
+                measure "emit" (fun () -> GeneratedJsonAssembly.Write(templatePath, "SoloDB.Generated.FSharp", "Template", product, models, attribute, queries, queryCalls, queryWitnesses, queryLambdas, providerOperations, referencePaths, operationAccess, argumentSources))
                 writeSource (source.ToString())
                 // Publish the provider context only after all current outputs succeed.
                 CompilerContext.Write(contextPath, project, "execute", arguments, Path.GetFullPath(templatePath), current.FullSigningKeyFile)
