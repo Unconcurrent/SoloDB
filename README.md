@@ -2,9 +2,27 @@
 
 Store your C# and F# objects, query them with LINQ, and keep related documents and files together in one SQLite database. SoloDB runs inside your application, with transactions and SQL available when you need them.
 
+## Core Features
+
+SoloDB is packed with features that provide a seamless and powerful developer experience.
+
+- **SQLite Core**: Leverages the world's most deployed database engine, ensuring rock-solid stability, performance, and reliability.
+- **Serverless Architecture**: As a .NET library, it runs in-process with your application. No separate server or configuration is required.
+- **Hybrid NoSQL & SQL**: Store and query schemaless JSON documents with a familiar object-oriented API, or drop down to raw SQL for complex queries.
+- **Full LINQ Support**: Use the full power of LINQ and IQueryable<T> to build expressive, strongly-typed queries against your data.
+- **ACID Transactions**: Guarantees atomicity, consistency, isolation, and durability for all operations, thanks to SQLite's transactional nature.
+- **Expressive Indexing**: Create unique or non-unique indexes on document properties for lightning-fast queries, using simple attributes.
+- **Integrated File Storage**: A robust, hierarchical file system API (similar to System.IO) for storing and managing large files and binary data directly within the database.
+- **Polymorphic Collections**: Store objects of different derived types within a single collection and query them by their base or concrete type.
+- **Events API**: Subscribe to collection lifecycle events (`OnInserting`, `OnInserted`, `OnUpdating`, `OnUpdated`, `OnDeleting`, `OnDeleted`) with full transactional guarantees via SQLite triggers.
+- **Thread-Safe**: A built-in connection pool ensures safe, concurrent access from multiple threads.
+- **Customizable ID Generation**: Use the default long primary key, or implement your own custom ID generation strategy (e.g., string, Guid).
+- **.NET Standard 2.0 & 2.1**: Broad compatibility with .NET Framework, .NET Core, and modern .NET runtimes.
+- **Open Source**: Licensed under LGPL-3.0, with the bundling permission described below.
+- **Documentation**: See the [official documentation](https://solodb.org/docs.html) for detailed guides.
+
 ## Table of Contents
 
-- [Core Features](#core-features)
 - [Why SoloDB?](#why-solodb)
 - [Installation](#installation)
 - [Generated Metadata Registration](#generated-metadata-registration)
@@ -29,25 +47,6 @@ Store your C# and F# objects, query them with LINQ, and keep related documents a
   - [Backups](#backups)
   - [Optimization](#optimization)
 - [License](#license)
-
-## Core Features
-
-SoloDB is packed with features that provide a seamless and powerful developer experience.
-
-- **SQLite Core**: Leverages the world's most deployed database engine, ensuring rock-solid stability, performance, and reliability.
-- **Serverless Architecture**: As a .NET library, it runs in-process with your application. No separate server or configuration is required.
-- **Hybrid NoSQL & SQL**: Store and query schemaless JSON documents with a familiar object-oriented API, or drop down to raw SQL for complex queries.
-- **Full LINQ Support**: Use the full power of LINQ and IQueryable<T> to build expressive, strongly-typed queries against your data.
-- **ACID Transactions**: Guarantees atomicity, consistency, isolation, and durability for all operations, thanks to SQLite's transactional nature.
-- **Expressive Indexing**: Create unique or non-unique indexes on document properties for lightning-fast queries, using simple attributes.
-- **Integrated File Storage**: A robust, hierarchical file system API (similar to System.IO) for storing and managing large files and binary data directly within the database.
-- **Polymorphic Collections**: Store objects of different derived types within a single collection and query them by their base or concrete type.
-- **Events API**: Subscribe to collection lifecycle events (`OnInserting`, `OnInserted`, `OnUpdating`, `OnUpdated`, `OnDeleting`, `OnDeleted`) with full transactional guarantees via SQLite triggers.
-- **Thread-Safe**: A built-in connection pool ensures safe, concurrent access from multiple threads.
-- **Customizable ID Generation**: Use the default long primary key, or implement your own custom ID generation strategy (e.g., string, Guid).
-- **.NET Standard 2.0 & 2.1**: Broad compatibility with .NET Framework, .NET Core, and modern .NET runtimes.
-- **Open Source**: Licensed under LGPL-3.0, with the bundling permission described below.
-- **Documentation**: See the [official documentation](https://solodb.org/docs.html) for detailed guides.
 
 ## Why SoloDB?
 
