@@ -10,18 +10,6 @@ namespace SoloDatabase.Metadata.Tools;
 /// Completes assembly-level access after normal provider linking; compiler output remains pristine.
 public sealed class CompleteFSharpAssembly : ITask
 {
-    private sealed class CompletionSymbolWriterProvider : ISymbolWriterProvider
-    {
-        private readonly ISymbolWriterProvider provider;
-        private readonly string output;
-        public CompletionSymbolWriterProvider(ISymbolWriterProvider provider, string output)
-        { this.provider = provider; this.output = output; }
-        public ISymbolWriter GetSymbolWriter(ModuleDefinition module, string fileName) =>
-            provider.GetSymbolWriter(module, output);
-        public ISymbolWriter GetSymbolWriter(ModuleDefinition module, Stream stream) =>
-            provider.GetSymbolWriter(module, stream);
-    }
-
     public IBuildEngine BuildEngine { get; set; } = null!;
     public ITaskHost HostObject { get; set; } = null!;
     [Required] public string Input { get; set; } = "";
@@ -101,14 +89,14 @@ public sealed class CompleteFSharpAssembly : ITask
             {
                 WriteSymbols = consumer.MainModule.HasSymbols,
                 SymbolWriterProvider = consumer.MainModule.HasSymbols
-                    ? new CompletionSymbolWriterProvider(consumer.MainModule.SymbolReader.GetWriterProvider(), output) : null,
+                    ? new HelperAssembly.OutputSymbolWriterProvider(consumer.MainModule.SymbolReader.GetWriterProvider(), output) : null,
                 SymbolStream = symbols
             };
             var fullSigningKeyFile = Literal("FullSigningKeyFile");
             if (fullSigningKeyFile.Length != 0) writer.StrongNameKeyBlob = File.ReadAllBytes(fullSigningKeyFile);
             consumer.Write(image, writer);
-            if (symbols != null) Publish(Path.ChangeExtension(output, ".pdb"), symbols.ToArray());
-            Publish(output, image.ToArray());
+            if (symbols != null) HelperAssembly.Publish(Path.ChangeExtension(output, ".pdb"), symbols.ToArray());
+            HelperAssembly.Publish(output, image.ToArray());
             Assembly = output;
             Symbols = sidecarSymbols ? Path.ChangeExtension(output, ".pdb") : "";
             Changed = true;
@@ -122,8 +110,4 @@ public sealed class CompleteFSharpAssembly : ITask
         }
     }
 
-    private static void Publish(string path, byte[] content)
-    {
-        if (!File.Exists(path) || !File.ReadAllBytes(path).SequenceEqual(content)) File.WriteAllBytes(path, content);
-    }
 }

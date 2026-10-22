@@ -107,7 +107,18 @@ public sealed class PrepareNativeUnionMetadata : ITask
                         if (tokens.Contains(method.MetadataToken.ToInt32())) method.IsSpecialName = true;
                 Directory.CreateDirectory(OutputDirectory);
                 var output = Path.Combine(OutputDirectory, Path.GetFileName(item.Key));
-                corrected.Write(output, new WriterParameters { WriteSymbols = corrected.MainModule.HasSymbols, SymbolWriterProvider = corrected.MainModule.HasSymbols ? new DefaultSymbolWriterProvider() : null });
+                using var image = new MemoryStream();
+                using var symbols = corrected.MainModule.SymbolReader is PortablePdbReader ? new MemoryStream() : null;
+                corrected.Write(image, new WriterParameters
+                {
+                    DeterministicMvid = true, Timestamp = 0,
+                    WriteSymbols = corrected.MainModule.HasSymbols,
+                    SymbolWriterProvider = corrected.MainModule.HasSymbols
+                        ? new HelperAssembly.OutputSymbolWriterProvider(corrected.MainModule.SymbolReader.GetWriterProvider(), output) : null,
+                    SymbolStream = symbols
+                });
+                if (symbols != null) HelperAssembly.Publish(Path.ChangeExtension(output, ".pdb"), symbols.ToArray());
+                HelperAssembly.Publish(output, image.ToArray());
                 replacements.Add(item.Key, output);
             }
             void Replace(ITaskItem item)

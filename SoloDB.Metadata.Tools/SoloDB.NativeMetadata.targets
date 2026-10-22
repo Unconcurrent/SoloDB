@@ -37,4 +37,10 @@
       <IlcCompileInput Include="@(_SoloDBNativeInputs)" />
     </ItemGroup>
   </Target>
+  <!-- Native publication runs after the SDK saves its Build file list. Keep cleanup
+       on CoreClean and limited to this matching configuration's owned directory;
+       late FileWrites registration cannot preserve cleanup across invocations. -->
+  <Target Name="SoloDBCleanNativeMetadata" AfterTargets="CoreClean" Condition="'$(DesignTimeBuild)' != 'true'">
+    <RemoveDir Directories="$(IntermediateOutputPath)SoloDB.Generated/native-models" />
+  </Target>
 </Project>

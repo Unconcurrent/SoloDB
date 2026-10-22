@@ -11,6 +11,18 @@ namespace SoloDatabase.Metadata.Tools;
 
 internal static class HelperAssembly
 {
+    internal sealed class OutputSymbolWriterProvider : ISymbolWriterProvider
+    {
+        private readonly ISymbolWriterProvider provider;
+        private readonly string output;
+        public OutputSymbolWriterProvider(ISymbolWriterProvider provider, string output)
+        { this.provider = provider; this.output = output; }
+        public ISymbolWriter GetSymbolWriter(ModuleDefinition module, string fileName) =>
+            provider.GetSymbolWriter(module, output);
+        public ISymbolWriter GetSymbolWriter(ModuleDefinition module, Stream stream) =>
+            provider.GetSymbolWriter(module, stream);
+    }
+
     internal static bool HasCompilerSymbols(ModuleDefinition module) => module.HasDebugHeader &&
         module.GetDebugHeader().Entries.Any(entry => entry.Directory.Type == ImageDebugType.CodeView ||
             entry.Directory.Type == ImageDebugType.EmbeddedPortablePdb);
@@ -190,6 +202,11 @@ internal static class HelperAssembly
         using var bytes = new MemoryStream();
         assembly.Write(bytes, parameters);
         var content = bytes.ToArray();
+        Publish(path, content);
+    }
+    internal static void Publish(string path, byte[] content)
+    {
         if (!File.Exists(path) || !File.ReadAllBytes(path).SequenceEqual(content)) File.WriteAllBytes(path, content);
     }
+
 }
