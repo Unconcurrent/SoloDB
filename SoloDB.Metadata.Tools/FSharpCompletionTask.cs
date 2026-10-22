@@ -1,4 +1,6 @@
 using System;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Xml.Linq;
@@ -18,6 +20,7 @@ public sealed class CompleteFSharpAssembly : ITask
     [Required] public string OutputDirectory { get; set; } = "";
     public ITaskItem[] References { get; set; } = Array.Empty<ITaskItem>();
     public string Selection { get; set; } = "";
+    public bool ProfileBuild { get; set; }
     [Output] public string Assembly { get; private set; } = "";
     [Output] public string Symbols { get; private set; } = "";
     [Output] public string CompilerSymbols { get; private set; } = "";
@@ -27,6 +30,17 @@ public sealed class CompleteFSharpAssembly : ITask
     {
         Assembly = Symbols = CompilerSymbols = "";
         Changed = false;
+        var watch = ProfileBuild ? Stopwatch.StartNew() : null;
+        void Timing(string name, double seconds) =>
+            BuildEngine.LogMessageEvent(new BuildMessageEventArgs("SoloDB build timing: completion-" + name + " " +
+                seconds.ToString("R", CultureInfo.InvariantCulture) + " seconds", null,
+                nameof(CompleteFSharpAssembly), MessageImportance.Normal));
+        void Phase(string name)
+        {
+            if (watch == null) return;
+            Timing(name, watch.Elapsed.TotalSeconds);
+            watch.Restart();
+        }
         try
         {
             using var context = AssemblyDefinition.ReadAssembly(Context);
@@ -38,6 +52,7 @@ public sealed class CompleteFSharpAssembly : ITask
             if (mode == "inactive")
             {
                 Assembly = Input;
+                Phase("inputs");
                 return Success();
             }
             using var resolver = new DefaultAssemblyResolver();
@@ -56,8 +71,10 @@ public sealed class CompleteFSharpAssembly : ITask
             if (missing.Length == 0 && !GeneratedSchemaIndexes.HasUncompleted(consumer.MainModule,product) && !GeneratedSchemaIndexes.HasUncompleted(template.MainModule,product))
             {
                 Assembly = Input;
+                Phase("inputs");
                 return Success();
             }
+            Phase("inputs");
             if (HelperAssembly.HasCompilerSymbols(consumer.MainModule))
             {
                 var reader = new DefaultSymbolReaderProvider(false).GetSymbolReader(consumer.MainModule, Input);
@@ -67,8 +84,11 @@ public sealed class CompleteFSharpAssembly : ITask
                     catch { reader.Dispose(); throw; }
                 }
             }
+            Phase("symbols");
             var completedTargets = new System.Collections.Generic.HashSet<string>(targets,StringComparer.Ordinal);
-            GeneratedSchemaIndexes.Complete(consumer,product,template,name => completedTargets.Add(name));
+            GeneratedSchemaIndexes.Complete(consumer,product,template,name => completedTargets.Add(name),
+                ProfileBuild ? (name,seconds) => Timing("schema-" + name,seconds) : null);
+            Phase("schema");
             missing = completedTargets.Except(consumer.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == accessType)
                 .Select(attribute => (string)attribute.ConstructorArguments[0].Value),StringComparer.Ordinal).ToArray();
             var sidecarSymbols = consumer.MainModule.HasSymbols && consumer.MainModule.SymbolReader is not EmbeddedPortablePdbReader;
@@ -79,6 +99,7 @@ public sealed class CompleteFSharpAssembly : ITask
                 method.Parameters.Count == 1 && method.Parameters[0].ParameterType.FullName == "System.String");
             HelperAssembly.AllowAccess(consumer.MainModule, missing,
                 definition.BaseType.Scope, constructor);
+            Phase("access");
             Directory.CreateDirectory(OutputDirectory);
             var output = Path.Combine(OutputDirectory, Path.GetFileName(Input));
             using var image = new MemoryStream();
@@ -94,6 +115,7 @@ public sealed class CompleteFSharpAssembly : ITask
             var fullSigningKeyFile = Literal("FullSigningKeyFile");
             if (fullSigningKeyFile.Length != 0) writer.StrongNameKeyBlob = File.ReadAllBytes(fullSigningKeyFile);
             consumer.Write(image, writer);
+            Phase("serialize");
             if (symbols != null) HelperAssembly.Publish(Path.ChangeExtension(output, ".pdb"), symbols.ToArray());
             HelperAssembly.Publish(output, image.ToArray());
             Assembly = output;
@@ -127,6 +149,7 @@ public sealed class CompleteFSharpAssembly : ITask
                     new XAttribute("symbols", Symbols), new XAttribute("compilerSymbols", CompilerSymbols),
                     new XAttribute("changed", Changed)));
             }
+            Phase("publish");
             return true;
         }
     }

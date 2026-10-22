@@ -131,7 +131,7 @@
           Outputs="$(_SoloDBCompletionStamp)" Condition="'$(DesignTimeBuild)' != 'true'">
     <Delete Files="$(_SoloDBCompletionStamp)" />
     <SoloDatabase.Metadata.Tools.CompleteFSharpAssembly Input="@(IntermediateAssembly)" Context="$(_SoloDBCompletionContext)"
-        OutputDirectory="$(_SoloDBFSharpRoot)/consumer" Selection="$(_SoloDBCompletionSelection)"
+        OutputDirectory="$(_SoloDBFSharpRoot)/consumer" Selection="$(_SoloDBCompletionSelection)" ProfileBuild="$(SoloDBBuildTiming)"
         References="@(ReferencePath);@(ReferenceCopyLocalPaths)">
       <Output TaskParameter="Assembly" PropertyName="_SoloDBCompletedAssembly" />
       <Output TaskParameter="Symbols" PropertyName="_SoloDBCompletedSymbols" />

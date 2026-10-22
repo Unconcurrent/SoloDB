@@ -71,8 +71,16 @@ internal static class GeneratedSchemaIndexes
         call.DeclaringType.Scope is AssemblyNameReference assembly && assembly.FullName == product.Name.FullName);
 
     // Only explicit compiler placeholders are completed, from actual emitted property metadata.
-    internal static void Complete(AssemblyDefinition consumer,AssemblyDefinition product,AssemblyDefinition template,System.Action<string> access)
+    internal static void Complete(AssemblyDefinition consumer,AssemblyDefinition product,AssemblyDefinition template,System.Action<string> access,
+        System.Action<string,double>? timing = null)
     {
+        var watch = timing == null ? null : System.Diagnostics.Stopwatch.StartNew();
+        void Phase(string name)
+        {
+            if (watch == null) return;
+            timing!(name,watch.Elapsed.TotalSeconds);
+            watch.Restart();
+        }
         System.Collections.Generic.IEnumerable<MethodDefinition> Factories(TypeDefinition type) =>
             type.Methods.Where(method => Pending(method,product)).Concat(type.NestedTypes.SelectMany(Factories));
         string Signature(MethodReference method,System.Func<TypeReference,string> identity) =>
@@ -119,10 +127,12 @@ internal static class GeneratedSchemaIndexes
             return signature;
         }
         var expected = template.MainModule.Types.SelectMany(Factories).Select(method => Source(method).Key).ToArray();
+        Phase("expected");
         // Snapshot source operands before replacing factory bodies. Original
         // property signatures stay immutable throughout this completion.
         var actual = consumer.MainModule.Types.SelectMany(Factories)
             .Select(method => (Method: method, Source: Source(method))).ToArray();
+        Phase("actual");
         var actualKeys = actual.Select(factory => factory.Source.Key).ToArray();
         if (expected.Except(actualKeys,System.StringComparer.Ordinal).Any() || actualKeys.Except(expected,System.StringComparer.Ordinal).Any())
             throw new System.InvalidOperationException("Current generated schema factories do not match the compiler template.");
@@ -158,6 +168,8 @@ internal static class GeneratedSchemaIndexes
             factory.Method.Body = new Mono.Cecil.Cil.MethodBody(factory.Method);
             Emit(consumer.MainModule,product,factory.Method,facts);
         }
+        Phase("factories");
         if (HasUncompleted(consumer.MainModule,product)) throw new System.InvalidOperationException("Generated schema factories remain incomplete.");
+        Phase("validation");
     }
 }
