@@ -136,28 +136,38 @@ module internal CodecNameEmitter =
                         at <- item.Value
                     else more <- false
                 result.ToArray(),at
+            // Each suffix retains its fast entry, sharing one unrolled literal
+            // body instead of emitting every remaining suffix at every node.
+            let chains = ResizeArray<(Node * int * Node)[] * Node * int[]>()
+            let chainEntries = Dictionary<Node,struct(int * int)>(HashIdentity.Reference)
+            for currentNode,_,_ in nodes do
+                if not(chainEntries.ContainsKey currentNode) then
+                    let run,finishNode = chain currentNode
+                    if run.Length >= 2 then
+                        let index = chains.Count
+                        chains.Add(run,finishNode,Array.init run.Length (fun _ -> il.Label()))
+                        for offset = 0 to run.Length - 1 do
+                            let at,_,_ = run[offset]
+                            chainEntries.Add(at,struct(index,offset))
+            let basePosition = il.Local api.Int32
             for currentNode,entry,loaded in nodes do
                 il.Mark entry
                 let first = obj.ReferenceEquals(currentNode,root)
                 if not first || not initial then
-                    let run,finishNode = chain currentNode
-                    if run.Length >= 2 then
-                        let short = il.Label()
-                        il.EmitLocal(OpCodes.Ldloc,length)
-                        il.EmitLocal(OpCodes.Ldloc,position); il.Emit OpCodes.Ldind_I4; il.Emit OpCodes.Sub
-                        il.EmitInt(OpCodes.Ldc_I4,run.Length); il.EmitBranch(OpCodes.Blt,short)
-                        let failures = run |> Array.mapi(fun offset (at,expected,_) -> offset,at,expected,il.Label())
-                        for offset,_,expected,failed in failures do
-                            currentAt offset
-                            il.EmitLocal(OpCodes.Ldloc,point); il.EmitInt(OpCodes.Ldc_I4,expected)
-                            il.EmitBranch(OpCodes.Bne_Un,failed)
-                        advance run.Length
-                        il.EmitBranch(OpCodes.Br,fst labels[finishNode])
-                        for offset,at,_,failed in failures do
-                            il.Mark failed
-                            if offset > 0 then advance offset
-                            il.EmitBranch(OpCodes.Br,snd labels[at])
-                        il.Mark short
+                    match chainEntries.TryGetValue currentNode with
+                    | true,struct(index,offset) ->
+                        let run,_,entries = chains[index]
+                        if run.Length - offset >= 2 then
+                            let short = il.Label()
+                            il.EmitLocal(OpCodes.Ldloc,length)
+                            il.EmitLocal(OpCodes.Ldloc,position); il.Emit OpCodes.Ldind_I4; il.Emit OpCodes.Sub
+                            il.EmitInt(OpCodes.Ldc_I4,run.Length - offset); il.EmitBranch(OpCodes.Blt,short)
+                            il.EmitLocal(OpCodes.Ldloc,position); il.Emit OpCodes.Ldind_I4
+                            if offset <> 0 then il.EmitInt(OpCodes.Ldc_I4,offset); il.Emit OpCodes.Sub
+                            il.EmitLocal(OpCodes.Stloc,basePosition)
+                            il.EmitBranch(OpCodes.Br,entries[offset])
+                            il.Mark short
+                    | _ -> ()
                 if quoted || currentNode.Keyword.IsNone then
                     let exact =
                         currentNode.Children
@@ -192,6 +202,29 @@ module internal CodecNameEmitter =
                     il.EmitLocal(OpCodes.Ldloc,point); il.EmitInt(OpCodes.Ldc_I4,pair.Key)
                     il.EmitBranch(OpCodes.Beq,fst labels[pair.Value])
                 il.EmitBranch(OpCodes.Br,unknownLoop)
+            let publish offset =
+                il.EmitLocal(OpCodes.Ldloc,position); il.EmitLocal(OpCodes.Ldloc,basePosition)
+                if offset <> 0 then il.EmitInt(OpCodes.Ldc_I4,offset); il.Emit OpCodes.Add
+                il.Emit OpCodes.Stind_I4
+            for run,finishNode,entries in chains do
+                let failures = Array.init run.Length (fun _ -> il.Label())
+                for offset = 0 to run.Length - 1 do
+                    let _,expected,_ = run[offset]
+                    il.Mark entries[offset]
+                    il.EmitLocal(OpCodes.Ldloc,source); il.EmitLocal(OpCodes.Ldloc,basePosition)
+                    if offset <> 0 then il.EmitInt(OpCodes.Ldc_I4,offset); il.Emit OpCodes.Add
+                    CodecAddressEmitter.offset il api.OffsetByte (if api.Utf16 then 2 else 1) 0
+                    il.Emit(if api.Utf16 then OpCodes.Ldind_U2 else OpCodes.Ldind_U1)
+                    il.EmitLocal(OpCodes.Stloc,point)
+                    il.EmitLocal(OpCodes.Ldloc,point); il.EmitInt(OpCodes.Ldc_I4,expected)
+                    il.EmitBranch(OpCodes.Bne_Un,failures[offset])
+                publish run.Length
+                il.EmitBranch(OpCodes.Br,fst labels[finishNode])
+                for offset = 0 to run.Length - 1 do
+                    let at,_,_ = run[offset]
+                    il.Mark failures[offset]
+                    publish offset
+                    il.EmitBranch(OpCodes.Br,snd labels[at])
             il.Mark unknownLoop
             unit quoted false false None
             il.EmitLocal(OpCodes.Ldloc,point); il.Emit OpCodes.Ldc_I4_M1; il.EmitBranch(OpCodes.Bne_Un,unknownLoop)
