@@ -136,7 +136,7 @@ type ProjectGeneration private () =
                         match entity.DeclaringEntity with
                         | Some parent when not parent.IsNamespace -> compiledName parent + "/" + entity.CompiledName
                         | _ -> (entity.Namespace |> Option.map(fun name -> name + ".") |> Option.defaultValue "") + entity.CompiledName
-                    Some(result,paths,aliases |> Seq.map compiledName |> Seq.distinct |> Seq.toArray)
+                    Some(result,uses,paths,aliases |> Seq.map compiledName |> Seq.distinct |> Seq.toArray)
                 else None
             match checkedProject with
             | None ->
@@ -149,7 +149,7 @@ type ProjectGeneration private () =
                     if File.Exists(templatePath) then File.Delete(templatePath)
                     if File.Exists(attributeSource) then File.Delete(attributeSource)
                 ""
-            | Some(result,aliases,aliasNames) ->
+            | Some(result,uses,aliases,aliasNames) ->
                 let current = measure "assembly-facts" (fun () -> CurrentAssembly.acquire result inputs (Path.GetDirectoryName(project)) assemblyName)
                 let referencePaths =
                     result.ProjectContext.GetReferencedAssemblies()
@@ -163,7 +163,7 @@ type ProjectGeneration private () =
                     |> function [|path|] -> path | _ -> invalidOp "SoloDB generation requires exactly one current runtime reference."
                 use product = AssemblyDefinition.ReadAssembly(productPath)
                 use references = ModuleDefinition.CreateModule("SoloDB.CompilerReferences", ModuleKind.Dll)
-                let queries, queryCalls, queryWitnesses, queryLambdas, inferredRoots, providerOperations, operationAccess, argumentSources = measure "query-discovery" (fun () -> QueryDiscovery.collect result references current.Identity parsedInputs (Path.GetDirectoryName(project)) (fun location methodName ->
+                let queries, queryCalls, queryWitnesses, queryLambdas, inferredRoots, providerOperations, operationAccess, argumentSources = measure "query-discovery" (fun () -> QueryDiscovery.collect result uses references current.Identity parsedInputs (Path.GetDirectoryName(project)) (fun location methodName ->
                     report.Invoke(location.FileName,location.StartLine,location.StartColumn + 1,
                         sprintf "Cannot infer closed types for SoloDB use '%s'. Supply explicit SoloDBAOT model roots and a closed query signature for any runtime-selected use." methodName)))
                 let models = measure "model-discovery" (fun () -> ModelDiscovery.collect result references current.Identity inferredRoots parsedInputs (Path.GetDirectoryName(project)))

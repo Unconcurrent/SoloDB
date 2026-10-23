@@ -10,7 +10,7 @@ open Mono.Cecil
 open SoloDatabase.Metadata.Tools
 /// Checked substitutions own type facts; syntax bounds each supplied query call.
 module internal QueryDiscovery =
-    let collect (project: FSharpCheckProjectResults) (moduleDefinition: ModuleDefinition) currentIdentity (inputs: IDictionary<string, ParsedInput>) projectDirectory report =
+    let collect (project: FSharpCheckProjectResults) (uses: FSharpSymbolUse[]) (moduleDefinition: ModuleDefinition) currentIdentity (inputs: IDictionary<string, ParsedInput>) projectDirectory report =
         let file (path: string) = Path.GetFullPath(if Path.IsPathRooted(path) then path else Path.Combine(projectDirectory, path))
         let contains (outer: range) (inner: range) =
             file outer.FileName = file inner.FileName && (outer.StartLine, outer.StartColumn) <= (inner.StartLine, inner.StartColumn)
@@ -26,7 +26,6 @@ module internal QueryDiscovery =
             let mutable actual = typ.StripAbbreviations()
             for _ = 0 to substitutions.Length do actual <- actual.Instantiate(substitutions).StripAbbreviations()
             actual
-        let uses = project.GetAllUsesOfAllSymbols()
         let operations = ResizeArray<GeneratedQueryOperation>()
         let operationAccess = HashSet<string>(StringComparer.Ordinal)
         let calls = Dictionary<string, GeneratedQueryCall>(StringComparer.Ordinal)
