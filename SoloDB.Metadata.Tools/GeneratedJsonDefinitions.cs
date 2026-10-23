@@ -23,6 +23,8 @@ internal sealed class GeneratedJsonDefinitions
     { this.references = references ?? Array.Empty<string>(); methods = new(); }
     private GeneratedJsonDefinitions(GeneratedJsonDefinitions native)
     { this.native = native; references = native.references; methods = native.methods; Stored = true; }
+    internal List<GeneratedSchemaIndexes.Witness>? SchemaWitnesses { get; set; }
+    internal MethodDefinition? EmptyAttributes { get; set; }
     internal bool Stored { get; }
     internal string MethodName(string name) => Stored ? name + "Stored" : name;
     internal GeneratedJsonDefinitions NativeView => native ?? this;

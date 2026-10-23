@@ -9,7 +9,7 @@ namespace SoloDatabase.Metadata.Tools;
 
 internal static class GeneratedCustomIdentity
 {
-    internal static void Register(ModuleDefinition module, TypeDefinition owner, ILProcessor il,
+    internal static void Register(GeneratedJsonDefinitions definitions,ModuleDefinition module, TypeDefinition owner, ILProcessor il,
         AssemblyDefinition product, GeneratedModel model, int index, GeneratedModel[] models)
     {
         var metadata = product.MainModule.GetType("SoloDatabase.CustomIdMetadata");
@@ -64,7 +64,7 @@ internal static class GeneratedCustomIdentity
         }
         var register = new GenericInstanceMethod(module.ImportReference(metadata.Methods.Single(method => method.Name == "Register")));
         register.GenericArguments.Add(type); il.Emit(OpCodes.Call, register);
-        GeneratedSchemaIndexes.Register(module,owner,il,product,model,index);
+        GeneratedSchemaIndexes.Register(definitions,module,owner,il,product,model,index);
     }
     private static MethodDefinition Method(TypeDefinition owner, string name, TypeReference result, params TypeReference[] arguments)
     {

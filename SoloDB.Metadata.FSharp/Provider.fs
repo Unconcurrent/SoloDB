@@ -49,7 +49,7 @@ type ModelsProvider(config: TypeProviderConfig) =
             Directory.CreateDirectory(workspace) |> ignore
             try
                 let output = Path.Combine(workspace, "SoloDB.Generated.FSharp.dll")
-                GeneratedJsonAssembly.Surface(output, identity, name)
+                GeneratedJsonAssembly.Surface(output, identity, name, typePath)
                 // Registration retains assembly bytes and a fully read metadata reader.
                 helper.RegisterGeneratedTargetAssembly(output).GetType("SoloDatabase.Generated." + name)
             finally

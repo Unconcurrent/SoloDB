@@ -7,7 +7,7 @@ namespace SoloDatabase.Metadata.Tools;
 
 internal static class GeneratedRelations
 {
-    internal static void Register(ModuleDefinition module, TypeDefinition owner, ILProcessor il,
+    internal static void Register(GeneratedJsonDefinitions definitions,ModuleDefinition module, TypeDefinition owner, ILProcessor il,
         AssemblyDefinition product, GeneratedModel model, int index)
     {
         var type = module.ImportReference(model.Type);
@@ -40,9 +40,8 @@ internal static class GeneratedRelations
             if (member.Getter == null) il.Emit(OpCodes.Ldnull);
             else
             {
-                var read = Method(owner, "ReadReference" + index + "_" + ordinal, referenceType, type);
-                QueryOperationEmitter.memberRead(new CecilCodecIL(read),type,model.Facts.ValueType,false,
-                    codecMembers![pair.ordinal],member.Type.IsValueType,false,false);
+                var read = GeneratedJsonAssembly.MemberReader(definitions,module,owner,type,model.Facts.ValueType,false,
+                    codecMembers![pair.ordinal],false,false,"Reference" + index + "_" + ordinal);
                 Delegate(module, owner, il, "Func`2", type, referenceType, read);
             }
             if (member.Setter == null) il.Emit(OpCodes.Ldnull);

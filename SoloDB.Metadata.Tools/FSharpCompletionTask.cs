@@ -78,15 +78,7 @@ public sealed class CompleteFSharpAssembly : ITask
                 return Success();
             }
             Phase("inputs");
-            if (HelperAssembly.HasCompilerSymbols(consumer.MainModule))
-            {
-                var reader = new DefaultSymbolReaderProvider(false).GetSymbolReader(consumer.MainModule, Input);
-                if (reader != null)
-                {
-                    try { consumer.MainModule.ReadSymbols(reader); }
-                    catch { reader.Dispose(); throw; }
-                }
-            }
+            FSharpConsumerOutput.ReadSymbols(consumer,Input);
             Phase("symbols");
             var completedTargets = new System.Collections.Generic.HashSet<string>(targets,StringComparer.Ordinal);
             GeneratedSchemaIndexes.Complete(consumer,product,template,name => completedTargets.Add(name),
@@ -94,8 +86,6 @@ public sealed class CompleteFSharpAssembly : ITask
             Phase("schema");
             missing = completedTargets.Except(consumer.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == accessType)
                 .Select(attribute => (string)attribute.ConstructorArguments[0].Value),StringComparer.Ordinal).ToArray();
-            var sidecarSymbols = consumer.MainModule.HasSymbols && consumer.MainModule.SymbolReader is not EmbeddedPortablePdbReader;
-            CompilerSymbols = sidecarSymbols ? Path.ChangeExtension(Input, ".pdb") : "";
             var definition = consumer.MainModule.GetType(accessType)
                 ?? throw new InvalidOperationException("The current consumer has no access attribute definition.");
             var constructor = definition.Methods.Single(method => method.IsConstructor && !method.IsStatic && !method.IsPrivate &&
@@ -103,26 +93,10 @@ public sealed class CompleteFSharpAssembly : ITask
             HelperAssembly.AllowAccess(consumer.MainModule, missing,
                 definition.BaseType.Scope, constructor);
             Phase("access");
-            Directory.CreateDirectory(OutputDirectory);
-            var output = Path.Combine(OutputDirectory, Path.GetFileName(Input));
-            using var image = new MemoryStream();
-            // Native PDB providers require their original filename operation.
-            using var symbols = consumer.MainModule.SymbolReader is PortablePdbReader ? new MemoryStream() : null;
-            var writer = new WriterParameters
-            {
-                WriteSymbols = consumer.MainModule.HasSymbols,
-                SymbolWriterProvider = consumer.MainModule.HasSymbols
-                    ? new HelperAssembly.OutputSymbolWriterProvider(consumer.MainModule.SymbolReader.GetWriterProvider(), output) : null,
-                SymbolStream = symbols
-            };
-            var fullSigningKeyFile = Literal("FullSigningKeyFile");
-            if (fullSigningKeyFile.Length != 0) writer.StrongNameKeyBlob = File.ReadAllBytes(fullSigningKeyFile);
-            consumer.Write(image, writer);
-            Phase("serialize");
-            if (symbols != null) HelperAssembly.Publish(Path.ChangeExtension(output, ".pdb"), symbols.ToArray());
-            HelperAssembly.Publish(output, image.ToArray());
-            Assembly = output;
-            Symbols = sidecarSymbols ? Path.ChangeExtension(output, ".pdb") : "";
+            var output = FSharpConsumerOutput.Write(consumer,Input,OutputDirectory,Literal("FullSigningKeyFile"),() => Phase("serialize"));
+            Assembly = output.Assembly;
+            Symbols = output.Symbols;
+            CompilerSymbols = output.CompilerSymbols;
             Changed = true;
             return Success();
         }
@@ -156,5 +130,65 @@ public sealed class CompleteFSharpAssembly : ITask
             return true;
         }
     }
+
+}
+
+internal static class FSharpConsumerOutput
+{
+    internal static void ReadSymbols(AssemblyDefinition consumer,string input)
+    {
+        if (!HelperAssembly.HasCompilerSymbols(consumer.MainModule)) return;
+        var reader = new DefaultSymbolReaderProvider(false).GetSymbolReader(consumer.MainModule,input);
+        if (reader == null) return;
+        try { consumer.MainModule.ReadSymbols(reader); }
+        catch { reader.Dispose(); throw; }
+    }
+
+    internal static void Inactive(string input,string outputDirectory,string helper,string selection,string[] dependencies)
+    {
+        var obsolete = Path.Combine(outputDirectory,Path.GetFileName(input));
+        if (Path.GetFullPath(obsolete) != Path.GetFullPath(input))
+        {
+            if (File.Exists(obsolete)) File.Delete(obsolete);
+            if (File.Exists(Path.ChangeExtension(obsolete,".pdb"))) File.Delete(Path.ChangeExtension(obsolete,".pdb"));
+        }
+        if (File.Exists(helper)) File.Delete(helper);
+        Select(selection,input,"","",false,"",dependencies);
+    }
+
+    internal static void PublishConsumer(AssemblyDefinition consumer,string input,string outputDirectory,string selection,
+        string key,string helper,string[] dependencies)
+    {
+        var output = Write(consumer,input,outputDirectory,key);
+        Select(selection,output.Assembly,output.Symbols,output.CompilerSymbols,true,helper,dependencies);
+    }
+
+    internal static (string Assembly,string Symbols,string CompilerSymbols) Write(AssemblyDefinition consumer,string input,
+        string outputDirectory,string key,Action? serialized = null)
+    {
+        Directory.CreateDirectory(outputDirectory);
+        var output = Path.Combine(outputDirectory,Path.GetFileName(input));
+        var sidecar = consumer.MainModule.HasSymbols && consumer.MainModule.SymbolReader is not EmbeddedPortablePdbReader;
+        using var image = new MemoryStream();
+        using var symbols = consumer.MainModule.SymbolReader is PortablePdbReader ? new MemoryStream() : null;
+        var writer = new WriterParameters
+        {
+            WriteSymbols = consumer.MainModule.HasSymbols,
+            SymbolWriterProvider = consumer.MainModule.HasSymbols
+                ? new HelperAssembly.OutputSymbolWriterProvider(consumer.MainModule.SymbolReader.GetWriterProvider(),output) : null,
+            SymbolStream = symbols
+        };
+        if (key.Length != 0) writer.StrongNameKeyBlob = File.ReadAllBytes(key);
+        consumer.Write(image,writer);
+        serialized?.Invoke();
+        if (symbols != null) HelperAssembly.Publish(Path.ChangeExtension(output,".pdb"),symbols.ToArray());
+        HelperAssembly.Publish(output,image.ToArray());
+        return (output,sidecar ? Path.ChangeExtension(output,".pdb") : "",sidecar ? Path.ChangeExtension(input,".pdb") : "");
+    }
+
+    private static void Select(string selection,string assembly,string symbols,string compilerSymbols,bool changed,string helper,string[] dependencies)
+        => HelperAssembly.Publish(selection,new XElement("selection",new XAttribute("assembly",assembly),
+            new XAttribute("symbols",symbols),new XAttribute("compilerSymbols",compilerSymbols),new XAttribute("changed",changed),
+            new XAttribute("helper",helper),dependencies.Select(path => new XElement("dependency",path))));
 
 }

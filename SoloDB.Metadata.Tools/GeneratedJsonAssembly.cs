@@ -23,10 +23,16 @@ public static partial class GeneratedJsonAssembly
         HelperAssembly.Write(assembly, output, null);
     }
 
-    public static void Surface(string path, string identity, string name)
+    public static void Surface(string path, string identity, string name) => Surface(path,identity,name,null);
+
+    public static void Surface(string path,string identity,string name,string[]? originalPath)
     {
         using var assembly = HelperAssembly.Create(identity);
         var owner = Owner(assembly.MainModule, name);
+        if (originalPath != null)
+            owner.Fields.Add(new FieldDefinition("OriginalPath",FieldAttributes.Private | FieldAttributes.Static |
+                FieldAttributes.Literal | FieldAttributes.HasDefault,assembly.MainModule.TypeSystem.String)
+                { Constant = string.Join("\0",originalPath) });
         var entry = Method(owner, "register", assembly.MainModule.TypeSystem.Void);
         var il = entry.Body.GetILProcessor();
         il.Emit(OpCodes.Ldstr, "Checking-only SoloDB registration cannot execute. Build the project with executable compiler context.");
@@ -151,9 +157,9 @@ public static partial class GeneratedJsonAssembly
             GeneratedIdentity.Register(module, owner, il, product, model, index);
             GeneratedArgumentCapture.Register(definitions,module,owner,il,product,model);
             GeneratedSqlRows.Register(module, owner, il, product, model, index, models);
-            GeneratedRelations.Register(module, owner, il, product, model, index);
+            GeneratedRelations.Register(definitions,module, owner, il, product, model, index);
             GeneratedCloning.Register(module, owner, il, product, model, index);
-            GeneratedCustomIdentity.Register(module, owner, il, product, model, index,models);
+            GeneratedCustomIdentity.Register(definitions,module, owner, il, product, model, index,models);
             il.Emit(model.Facts.SealedType ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
             il.Emit(model.Facts.RequiresTypeInformation ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
             il.Emit(OpCodes.Call, api.Metadata("RegisterType", type));
@@ -261,7 +267,7 @@ public static partial class GeneratedJsonAssembly
         GeneratedStoredCodec.Register(definitions,module,owner,il,product,models,startIndex+models.Length);
     }
 
-    private static void GuardRegistration(ModuleDefinition module, TypeDefinition owner, MethodDefinition core)
+    private static void GuardRegistration(ModuleDefinition module, TypeDefinition owner, MethodDefinition core,MethodDefinition? entry = null,MethodReference? enter = null,MethodReference? exit = null)
     {
         core.Name = "RegisterCore";
         core.Attributes = MethodAttributes.Private | MethodAttributes.Static;
@@ -272,7 +278,7 @@ public static partial class GeneratedJsonAssembly
         initialize.Attributes = MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName;
         var constructor = new MethodReference(".ctor", module.TypeSystem.Void, owner.BaseType) { HasThis = true };
         RegistrationEmitter.initialize(new CecilCodecIL(initialize),constructor,gate);
-        var entry = Method(owner, "register", module.TypeSystem.Void);
+        entry ??= Method(owner, "register", module.TypeSystem.Void);
         var monitor = new TypeReference("System.Threading", "Monitor", module, owner.BaseType.Scope);
         MethodReference Lock(string name)
         {
@@ -280,7 +286,7 @@ public static partial class GeneratedJsonAssembly
             method.Parameters.Add(new ParameterDefinition(module.TypeSystem.Object));
             return method;
         }
-        RegistrationEmitter.once(new CecilCodecIL(entry),gate,complete,Lock("Enter"),Lock("Exit"),core);
+        RegistrationEmitter.once(new CecilCodecIL(entry),gate,complete,enter ?? Lock("Enter"),exit ?? Lock("Exit"),core);
     }
 
     private static TypeDefinition Owner(ModuleDefinition module, string name)

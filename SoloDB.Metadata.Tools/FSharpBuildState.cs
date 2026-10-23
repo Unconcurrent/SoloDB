@@ -18,7 +18,7 @@ internal static class FSharpBuildState
         var facts = context.MainModule.GetType("SoloDatabase.Tooling.ProjectContext");
         string Literal(string name) => (string)facts.Fields.Single(field => field.Name == name).Constant;
         var mode = Literal("Mode");
-        if (mode != "execute" && mode != "inactive")
+        if (mode != "execute" && mode != "inactive" && mode != "check")
             throw new InvalidOperationException("FSharp executable selection requires current executable compiler inputs.");
         var dependencies = facts.Fields.FirstOrDefault(field => field.Name == "Dependencies")?.Constant as string;
         return (mode, Literal("Template"), Literal("FullSigningKeyFile"),
@@ -95,6 +95,8 @@ public sealed class FSharpCompletionInputs : ITask
     [Required] public string OutputDirectory { get; set; } = "";
     public ITaskItem[] References { get; set; } = Array.Empty<ITaskItem>();
     public ITaskItem[] ImplementationInputs { get; set; } = Array.Empty<ITaskItem>();
+    public bool ReadSelectionOnly { get; set; }
+    [Output] public string Helper { get; private set; } = "";
     [Output] public string Template { get; private set; } = "";
     [Output] public string SigningKey { get; private set; } = "";
     [Output] public string Assembly { get; private set; } = "";
@@ -105,7 +107,7 @@ public sealed class FSharpCompletionInputs : ITask
 
     public bool Execute()
     {
-        Template = SigningKey = Assembly = Symbols = CompilerSymbols = "";
+        Helper = Template = SigningKey = Assembly = Symbols = CompilerSymbols = "";
         Changed = false;
         Dependencies = Array.Empty<string>();
         try
@@ -114,11 +116,10 @@ public sealed class FSharpCompletionInputs : ITask
             Template = context.Template;
             SigningKey = context.Key;
             Dependencies = context.Dependencies;
-            HelperAssembly.Publish(InputFile, new XElement("inputs", new XAttribute("input", Input),
+            if (!ReadSelectionOnly) HelperAssembly.Publish(InputFile, new XElement("inputs", new XAttribute("input", Input),
                 new XAttribute("context", Context), new XAttribute("output", OutputDirectory),
                 ImplementationInputs.Select(input => new XElement("implementation", input.ItemSpec)),
                 References.Select(reference => new XElement("reference", reference.ItemSpec))));
-            if (!File.Exists(Stamp)) return true;
             if (File.Exists(Selection))
             {
                 var state = XElement.Load(Selection);
@@ -126,7 +127,9 @@ public sealed class FSharpCompletionInputs : ITask
                 Symbols = FSharpBuildState.Value(state, "symbols");
                 CompilerSymbols = FSharpBuildState.Value(state, "compilerSymbols");
                 Changed = (bool)state.Attribute("changed")!;
-                if (File.Exists(Assembly) && (Symbols.Length == 0 || File.Exists(Symbols)) &&
+                Helper = (string?)state.Attribute("helper") ?? "";
+                Dependencies = Dependencies.Concat(state.Elements("dependency").Select(value => value.Value)).Distinct().ToArray();
+                if (File.Exists(Assembly) && (Helper.Length == 0 || File.Exists(Helper)) && (Symbols.Length == 0 || File.Exists(Symbols)) &&
                     (CompilerSymbols.Length == 0 || File.Exists(CompilerSymbols))) return true;
             }
             File.Delete(Stamp);

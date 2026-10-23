@@ -80,7 +80,17 @@ internal static class GeneratedSchemaIndexes
         internal void Rewritten(MethodDefinition method) => changed.Add(method);
     }
 
-    internal static void Register(ModuleDefinition module,TypeDefinition owner,ILProcessor il,
+    internal sealed class Witness
+    {
+        internal readonly MethodDefinition Factory;
+        internal readonly TypeReference Owner;
+        internal readonly MethodReference Accessor;
+        internal Instruction? Reference;
+        internal Witness(MethodDefinition factory,TypeReference owner,MethodReference accessor)
+        { Factory = factory; Owner = owner; Accessor = accessor; }
+    }
+
+    internal static void Register(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,ILProcessor il,
         AssemblyDefinition product,GeneratedModel model,int index)
     {
         var metadata = product.MainModule.GetType("SoloDatabase.SchemaMetadata");
@@ -96,22 +106,40 @@ internal static class GeneratedSchemaIndexes
             var factory = new MethodDefinition("CreateSchemaAttributes" + index + "_" + ordinal,
                 MethodAttributes.Private | MethodAttributes.Static,objectArray);
             owner.Methods.Add(factory);
+            Witness? witness = null;
             if (property.DeferredSchema)
             {
+                if (definitions.SchemaWitnesses != null)
+                {
+                    witness = new Witness(factory,property.Member.Getter?.Value.DeclaringType ?? property.Member.Setter!.Value.DeclaringType,
+                        property.Member.Getter?.Value ?? property.Member.Setter!.Value);
+                    definitions.SchemaWitnesses.Add(witness);
+                }
                 var body = factory.Body.GetILProcessor();
                 body.Emit(OpCodes.Ldtoken,module.ImportReference(property.Member.Getter?.Value.DeclaringType ?? property.Member.Setter!.Value.DeclaringType));
                 body.Emit(OpCodes.Ldtoken,module.ImportReference(property.Member.Getter?.Value ?? property.Member.Setter!.Value));
                 body.Emit(OpCodes.Call,module.ImportReference(metadata.Methods.Single(method => method.Name == "UncompletedAttributes")));
                 body.Emit(OpCodes.Ret);
             }
-            else Emit(module,product,factory,property.Attributes);
+            else if (definitions.SchemaWitnesses != null && property.Attributes.Length == 0 && definitions.EmptyAttributes != null)
+            {
+                owner.Methods.Remove(factory);
+                factory = definitions.EmptyAttributes;
+            }
+            else
+            {
+                Emit(module,product,factory,property.Attributes);
+                if (definitions.SchemaWitnesses != null && property.Attributes.Length == 0) definitions.EmptyAttributes = factory;
+            }
             il.Emit(OpCodes.Dup); il.Emit(OpCodes.Ldc_I4,ordinal); il.Emit(OpCodes.Ldstr,property.Member.Name);
             api.TypeToken(il,property.Member.Type);
             var function = api.Function(objectArray);
             var constructor = new MethodReference(".ctor",module.TypeSystem.Void,function) { HasThis = true };
             constructor.Parameters.Add(new ParameterDefinition(module.TypeSystem.Object));
             constructor.Parameters.Add(new ParameterDefinition(module.TypeSystem.IntPtr));
-            il.Emit(OpCodes.Ldnull); il.Emit(OpCodes.Ldftn,factory); il.Emit(OpCodes.Newobj,constructor);
+            il.Emit(OpCodes.Ldnull); il.Emit(OpCodes.Ldftn,factory);
+            if (witness != null) witness.Reference = il.Body.Instructions[il.Body.Instructions.Count - 1];
+            il.Emit(OpCodes.Newobj,constructor);
             il.Emit(OpCodes.Newobj,propertyConstructor); il.Emit(OpCodes.Stelem_Ref);
         }
         var register = new GenericInstanceMethod(module.ImportReference(metadata.Methods.Single(method => method.Name == "RegisterIndexFactories")));
@@ -145,6 +173,11 @@ internal static class GeneratedSchemaIndexes
     // Only explicit compiler placeholders are completed, from actual emitted property metadata.
     internal static void Complete(AssemblyDefinition consumer,AssemblyDefinition product,AssemblyDefinition template,System.Action<string> access,
         System.Action<string,double>? timing = null,Candidates? consumerCandidates = null,Candidates? templateCandidates = null)
+        => Complete(consumer,consumer,product,template,access,timing,consumerCandidates,templateCandidates,null);
+
+    internal static void Complete(AssemblyDefinition destination,AssemblyDefinition consumer,AssemblyDefinition product,
+        AssemblyDefinition? template,System.Action<string> access,System.Action<string,double>? timing,
+        Candidates? consumerCandidates,Candidates? templateCandidates,List<Witness>? witnesses,MethodDefinition? empty = null)
     {
         var watch = timing == null ? null : System.Diagnostics.Stopwatch.StartNew();
         void Phase(string name)
@@ -199,20 +232,24 @@ internal static class GeneratedSchemaIndexes
                 signatures.Add(method,signature = Signature(method,OriginalIdentity));
             return signature;
         }
-        var expected = template.MainModule.Types.SelectMany(type => Factories(type,templateCandidates)).Select(method => Source(method).Key).ToArray();
+        var expected = witnesses == null
+            ? template!.MainModule.Types.SelectMany(type => Factories(type,templateCandidates)).Select(method => Source(method).Key).ToArray()
+            : witnesses.Select(witness => witness.Factory.Name + ":" + OriginalIdentity(witness.Owner) + ":" + Signature(witness.Accessor,OriginalIdentity)).ToArray();
         Phase("expected");
         // Snapshot source operands before replacing factory bodies. Original
         // property signatures stay immutable throughout this completion.
-        var actual = consumer.MainModule.Types.SelectMany(type => Factories(type,consumerCandidates))
+        var actual = (witnesses == null ? destination.MainModule.Types.SelectMany(type => Factories(type,consumerCandidates))
+            : witnesses.Select(witness => witness.Factory))
             .Select(method => (Method: method, Source: Source(method))).ToArray();
         Phase("actual");
         var actualKeys = actual.Select(factory => factory.Source.Key).ToArray();
         if (expected.Except(actualKeys,System.StringComparer.Ordinal).Any() || actualKeys.Except(expected,System.StringComparer.Ordinal).Any())
             throw new System.InvalidOperationException("Current generated schema factories do not match the compiler template.");
         var properties = new Dictionary<TypeDefinition,Dictionary<string,List<PropertyDefinition>>>();
-        using var attributes = new OriginalAttributeFacts.Reader(consumer.MainModule,consumer.MainModule);
-        foreach (var factory in actual)
+        using var attributes = new OriginalAttributeFacts.Reader(destination.MainModule,consumer.MainModule);
+        for (var ordinal = 0; ordinal < actual.Length; ordinal++)
         {
+            var factory = actual[ordinal];
             var source = factory.Source;
             var owner = source.Owner;
             var root = owner is GenericInstanceType closed ? closed.ElementType : owner;
@@ -240,10 +277,19 @@ internal static class GeneratedSchemaIndexes
             var facts = attributes.Read(selected[0],access);
             consumerCandidates?.Rewritten(factory.Method);
             factory.Method.Body = new Mono.Cecil.Cil.MethodBody(factory.Method);
-            Emit(consumer.MainModule,product,factory.Method,facts);
+            if (witnesses != null && facts.Length == 0 && empty != null)
+            {
+                witnesses[ordinal].Reference!.Operand = empty;
+                factory.Method.DeclaringType.Methods.Remove(factory.Method);
+            }
+            else
+            {
+                Emit(destination.MainModule,product,factory.Method,facts);
+                if (facts.Length == 0) empty = factory.Method;
+            }
         }
         Phase("factories");
-        if (HasUncompleted(consumer.MainModule,product,consumerCandidates)) throw new System.InvalidOperationException("Generated schema factories remain incomplete.");
+        if (HasUncompleted(destination.MainModule,product,consumerCandidates)) throw new System.InvalidOperationException("Generated schema factories remain incomplete.");
         Phase("validation");
     }
 }

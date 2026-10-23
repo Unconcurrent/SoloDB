@@ -37,7 +37,11 @@ module internal Program =
                     | null -> ProjectGeneration.Write(contextPath, field "assembly", field "attributes", field "template", workspace, report, timing)
                     | project ->
                         let arguments = request.Element(XName.Get "arguments").Elements(XName.Get "argument") |> Seq.map(fun item -> item.Value) |> Seq.toArray
-                        ProjectGeneration.Write(contextPath, project.Value, arguments, field "assembly", field "attributes", field "template", workspace, report, timing)
+                        if request.Attribute(XName.Get "input") = null then
+                            ProjectGeneration.Write(contextPath, project.Value, arguments, field "assembly", field "attributes", field "template", workspace, report, timing)
+                        else
+                            ProjectGeneration.Complete(contextPath, project.Value, arguments, field "assembly", field "attributes", field "template", workspace, report, timing,
+                                field "input", field "outputDirectory", field "helper", field "selection")
                 diagnostics.Add(XAttribute(XName.Get "template", template))
                 true
             with error ->

@@ -205,9 +205,9 @@ internal static class HelperAssembly
         }
     }
 
-    internal static AssemblyDefinition Create(string identity,IAssemblyResolver? resolver = null)
+    internal static AssemblyDefinition Create(string identity,IAssemblyResolver? resolver = null,IReflectionImporterProvider? reflection = null)
     {
-        var parameters = new ModuleParameters { Kind = ModuleKind.Dll };
+        var parameters = new ModuleParameters { Kind = ModuleKind.Dll, ReflectionImporterProvider = reflection };
         if (resolver != null) parameters.AssemblyResolver = resolver;
         var assembly = AssemblyDefinition.CreateAssembly(new AssemblyNameDefinition(identity, new Version(1, 0, 0, 0)),
             identity + ".dll", parameters);
@@ -223,7 +223,7 @@ internal static class HelperAssembly
         return assembly;
     }
 
-    private static MethodDefinition EntryPoint(ModuleDefinition module)
+    internal static MethodDefinition EntryPoint(ModuleDefinition module)
     {
         var standard = module.AssemblyReferences.Single(reference => reference.Name == "netstandard");
         var owner = new TypeDefinition("SoloDatabase.Generated", "Registration",

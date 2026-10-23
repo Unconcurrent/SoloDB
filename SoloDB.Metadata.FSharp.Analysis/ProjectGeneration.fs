@@ -28,6 +28,14 @@ type ProjectGeneration private () =
         ProjectGeneration.Write(contextPath, project, arguments, assemblyName, attributeSource, templatePath, workspace, report, null)
 
     static member internal Write(contextPath: string, project: string, arguments: string[], assemblyName: string, attributeSource: string, templatePath: string, workspace: string, report: Action<string,int,int,string>, timing: Action<string,float>) =
+        ProjectGeneration.Generate(contextPath,project,arguments,assemblyName,attributeSource,templatePath,workspace,report,timing,"","","","")
+
+    static member internal Complete(contextPath,project,arguments,assemblyName,attributeSource,templatePath,workspace,report,timing,input,outputDirectory,helperPath,selection) =
+        ProjectGeneration.Generate(contextPath,project,arguments,assemblyName,attributeSource,templatePath,workspace,report,timing,input,outputDirectory,helperPath,selection)
+
+    static member private Generate(contextPath: string, project: string, arguments: string[], assemblyName: string, attributeSource: string,
+        templatePath: string, workspace: string, report: Action<string,int,int,string>, timing: Action<string,float>,
+        input: string, outputDirectory: string, helperPath: string, selection: string) =
         let measure name work =
             if isNull timing then work() else
             let watch = Stopwatch.StartNew()
@@ -124,20 +132,32 @@ type ProjectGeneration private () =
                                 | None -> invalidOp "The checked generated alias has no original enclosing compiler identity."
                             Array.ofList(parent @ [alias.LogicalName]))
                         |> Seq.distinct |> Seq.toArray
-                    Some(result,paths)
+                    let rec compiledName (entity: FSharpEntity) =
+                        match entity.DeclaringEntity with
+                        | Some parent when not parent.IsNamespace -> compiledName parent + "/" + entity.CompiledName
+                        | _ -> (entity.Namespace |> Option.map(fun name -> name + ".") |> Option.defaultValue "") + entity.CompiledName
+                    Some(result,paths,aliases |> Seq.map compiledName |> Seq.distinct |> Seq.toArray)
                 else None
             match checkedProject with
             | None ->
-                File.Delete(templatePath)
-                writeSource "namespace SoloDatabase.Generated\ndo ()\n"
-                CompilerContext.Write(contextPath, project, "inactive", arguments, "", "", dependencies.ToArray() |> Array.distinct)
+                if input.Length = 0 then
+                    File.Delete(templatePath)
+                    writeSource "namespace SoloDatabase.Generated\ndo ()\n"
+                    CompilerContext.Write(contextPath, project, "inactive", arguments, "", "", dependencies.ToArray() |> Array.distinct)
+                else
+                    FSharpConsumerOutput.Inactive(input,outputDirectory,helperPath,selection,dependencies.ToArray() |> Array.distinct)
+                    if File.Exists(templatePath) then File.Delete(templatePath)
+                    if File.Exists(attributeSource) then File.Delete(attributeSource)
                 ""
-            | Some(result,aliases) ->
+            | Some(result,aliases,aliasNames) ->
                 let current = measure "assembly-facts" (fun () -> CurrentAssembly.acquire result inputs (Path.GetDirectoryName(project)) assemblyName)
                 let referencePaths =
-                    arguments |> Array.choose(fun argument ->
-                        let prefix = if argument.StartsWith("-r:", StringComparison.Ordinal) then 3 elif argument.StartsWith("--reference:", StringComparison.Ordinal) then 12 else 0
-                        if prefix = 0 then None else Some(argument.Substring(prefix).Trim('"')))
+                    result.ProjectContext.GetReferencedAssemblies()
+                    |> Seq.choose(fun assembly ->
+                        match assembly.FileName with
+                        | Some file when not assembly.IsProviderGenerated && Path.GetFullPath(file) <> Path.GetFullPath(analysis) -> Some(Path.GetFullPath(file))
+                        | _ -> None)
+                    |> Seq.distinct |> Seq.toArray
                 let productPath =
                     referencePaths |> Array.filter(fun path -> Path.GetFileName(path) = "SoloDB.dll")
                     |> function [|path|] -> path | _ -> invalidOp "SoloDB generation requires exactly one current runtime reference."
@@ -154,35 +174,44 @@ type ProjectGeneration private () =
                     let struct(witnesses, calls) = QueryConstructionWitnesses.Read(path, references)
                     Array.append queryWitnesses witnesses, Array.append queryCalls calls
                 let hasAttribute = ModelDiscovery.hasAccessAttribute result
-                let access = Array.append [|product.Name.Name|] (models |> Array.collect(fun model -> model.AccessAssemblies |> Seq.toArray)) |> Array.distinct |> Array.sort
-                let source = Text.StringBuilder()
-                if access.Length > 0 && not hasAttribute then
-                    source.AppendLine("namespace System.Runtime.CompilerServices\nopen System\n[<Sealed; AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)>]\ntype internal IgnoresAccessChecksToAttribute(_target: string) =\n    inherit Attribute()\n") |> ignore
-                source.AppendLine("namespace SoloDatabase.Generated\n") |> ignore
-                source.AppendLine("do ()") |> ignore
-                let attribute = if access.Length = 0 then null else ModelDiscovery.accessAttribute references current.Identity
-                // The shared owner survives static linking beside original types.
-                let occupied = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
-                let rec originalNames declarations =
-                    for declaration in declarations do
-                        match declaration with
-                        | FSharpImplementationFileDeclaration.Entity(entity, children) ->
-                            if entity.Namespace = Some "SoloDatabase.Generated" &&
-                               (entity.DeclaringEntity |> Option.forall(fun parent -> parent.IsNamespace)) then
-                                occupied.Add(entity.CompiledName) |> ignore
-                            originalNames children
-                        | _ -> ()
-                for file in result.AssemblyContents.ImplementationFiles do originalNames file.Declarations
-                let mutable name = "Template"
-                let mutable ordinal = 0
-                while occupied.Contains(name) do
-                    ordinal <- ordinal + 1
-                    name <- "Template" + string ordinal
-                measure "emit" (fun () -> GeneratedJsonAssembly.Write(templatePath, "SoloDB.Generated.FSharp." + current.Identity.Name, name, product, models, attribute, queries, queryCalls, queryWitnesses, queryLambdas, providerOperations, referencePaths, operationAccess, argumentSources, aliases))
-                writeSource (source.ToString())
-                // Publish the provider context only after all current outputs succeed.
-                CompilerContext.Write(contextPath, project, "execute", arguments, Path.GetFullPath(templatePath), current.FullSigningKeyFile,
-                    Array.append (dependencies.ToArray()) current.Dependencies |> Array.distinct)
-                Path.GetFullPath(templatePath)
+                if input.Length = 0 then
+                    let access = Array.append [|product.Name.Name|] (models |> Array.collect(fun model -> model.AccessAssemblies |> Seq.toArray)) |> Array.distinct |> Array.sort
+                    let source = Text.StringBuilder()
+                    if access.Length > 0 && not hasAttribute then
+                        source.AppendLine("namespace System.Runtime.CompilerServices\nopen System\n[<Sealed; AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)>]\ntype internal IgnoresAccessChecksToAttribute(_target: string) =\n    inherit Attribute()\n") |> ignore
+                    source.AppendLine("namespace SoloDatabase.Generated\n") |> ignore
+                    source.AppendLine("do ()") |> ignore
+                    let attribute = if access.Length = 0 then null else ModelDiscovery.accessAttribute references current.Identity
+                    // The shared owner survives static linking beside original types.
+                    let occupied = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+                    let rec originalNames declarations =
+                        for declaration in declarations do
+                            match declaration with
+                            | FSharpImplementationFileDeclaration.Entity(entity, children) ->
+                                if entity.Namespace = Some "SoloDatabase.Generated" &&
+                                   (entity.DeclaringEntity |> Option.forall(fun parent -> parent.IsNamespace)) then
+                                    occupied.Add(entity.CompiledName) |> ignore
+                                originalNames children
+                            | _ -> ()
+                    for file in result.AssemblyContents.ImplementationFiles do originalNames file.Declarations
+                    let mutable name = "Template"
+                    let mutable ordinal = 0
+                    while occupied.Contains(name) do
+                        ordinal <- ordinal + 1
+                        name <- "Template" + string ordinal
+                    measure "emit" (fun () -> GeneratedJsonAssembly.Write(templatePath, "SoloDB.Generated.FSharp." + current.Identity.Name, name, product, models, attribute, queries, queryCalls, queryWitnesses, queryLambdas, providerOperations, referencePaths, operationAccess, argumentSources, aliases))
+                    writeSource (source.ToString())
+                    // Publish the provider context only after all current outputs succeed.
+                    CompilerContext.Write(contextPath, project, "execute", arguments, Path.GetFullPath(templatePath), current.FullSigningKeyFile,
+                        Array.append (dependencies.ToArray()) current.Dependencies |> Array.distinct)
+                    Path.GetFullPath(templatePath)
+                else
+                    measure "emit" (fun () -> GeneratedJsonAssembly.WriteCompanion(helperPath,input,outputDirectory,selection,
+                        product,models,queries,queryCalls,queryWitnesses,queryLambdas,providerOperations,referencePaths,
+                        operationAccess,argumentSources,aliases,aliasNames,current.Identity,current.FullSigningKeyFile,
+                        Array.append (dependencies.ToArray()) current.Dependencies |> Array.distinct))
+                    if File.Exists(templatePath) then File.Delete(templatePath)
+                    if File.Exists(attributeSource) then File.Delete(attributeSource)
+                    helperPath
         finally
             if Directory.Exists(workspace) then Directory.Delete(workspace, true)

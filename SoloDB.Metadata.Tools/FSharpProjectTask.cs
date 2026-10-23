@@ -19,6 +19,10 @@ public sealed class PrepareFSharpProject : ICancelableTask
     [Required] public string Provider { get; set; } = "";
     [Required] public string Context { get; set; } = "";
     public string Project { get; set; } = "";
+    public string Input { get; set; } = "";
+    public string OutputDirectory { get; set; } = "";
+    public string HelperOutput { get; set; } = "";
+    public string Selection { get; set; } = "";
     public bool ProfileBuild { get; set; }
     public ITaskItem[] Arguments { get; set; } = Array.Empty<ITaskItem>();
     [Required] public string AssemblyName { get; set; } = "";
@@ -54,6 +58,20 @@ public sealed class PrepareFSharpProject : ICancelableTask
             var input = new XElement("project",
                 new XAttribute("context", Context), new XAttribute("assembly", AssemblyName),
                 new XAttribute("attributes", AttributeSource), new XAttribute("template", Template));
+            if (Input.Length != 0)
+            {
+                input.Add(new XAttribute("input",Input),new XAttribute("outputDirectory",OutputDirectory),
+                    new XAttribute("helper",HelperOutput),new XAttribute("selection",Selection));
+                if (Project.Length == 0)
+                {
+                    using var context = Mono.Cecil.AssemblyDefinition.ReadAssembly(Context);
+                    var facts = context.MainModule.GetType("SoloDatabase.Tooling.ProjectContext");
+                    string Literal(string name) => (string)System.Linq.Enumerable.Single(facts.Fields,field => field.Name == name).Constant;
+                    Project = Literal("Project");
+                    Arguments = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(Literal("Arguments").Split('\0'),
+                        value => (ITaskItem)new ProjectArgument(value)));
+                }
+            }
             if (ProfileBuild) input.Add(new XAttribute("timings", "true"));
             if (Project.Length != 0)
             {
@@ -69,6 +87,7 @@ public sealed class PrepareFSharpProject : ICancelableTask
             {
                 StartInfo = new ProcessStartInfo(DotNetHost, Quote(worker) + " " + Quote(request))
                 {
+                    WorkingDirectory = Project.Length == 0 ? Environment.CurrentDirectory : Path.GetDirectoryName(Path.GetFullPath(Project))!,
                     UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
                     CreateNoWindow = true
                 }
@@ -144,6 +163,19 @@ public sealed class PrepareFSharpProject : ICancelableTask
         {
             if (Directory.Exists(directory)) Directory.Delete(directory, true);
         }
+    }
+
+    private sealed class ProjectArgument : ITaskItem
+    {
+        internal ProjectArgument(string value) { ItemSpec = value; }
+        public string ItemSpec { get; set; }
+        public int MetadataCount => 0;
+        public System.Collections.ICollection MetadataNames => Array.Empty<string>();
+        public string GetMetadata(string name) => "";
+        public void SetMetadata(string name,string value) => throw new NotSupportedException();
+        public void RemoveMetadata(string name) => throw new NotSupportedException();
+        public System.Collections.IDictionary CloneCustomMetadata() => new System.Collections.Hashtable();
+        public void CopyMetadataTo(ITaskItem target) { }
     }
 
     // ProcessStartInfo.Arguments uses the same quoted-argument grammar on supported hosts.
