@@ -13,8 +13,15 @@ public static partial class GeneratedJsonAssembly
         AssemblyDefinition product,GeneratedModel[] models,GeneratedQueryOperation[] queries,GeneratedQueryCall[] queryCalls,
         GeneratedQueryWitness[] queryWitnesses,GeneratedQueryLambda[] queryLambdas,GeneratedProviderOperation[] providerOperations,
         string[] references,string[] operationAccess,GeneratedArgumentSource[] argumentSources,string[][] aliases,string[] aliasNames,
-        AssemblyNameReference sourceIdentity,string key,string[] dependencies)
+        AssemblyNameReference sourceIdentity,string key,string[] dependencies,Action<string,double>? timing = null)
     {
+        var watch = timing == null ? null : System.Diagnostics.Stopwatch.StartNew();
+        void Phase(string name)
+        {
+            if (watch == null) return;
+            timing!("companion-" + name,watch.Elapsed.TotalSeconds);
+            watch.Restart();
+        }
         using var resolver = new DefaultAssemblyResolver();
         resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(input))!);
         foreach (var reference in references) resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(reference))!);
@@ -38,18 +45,23 @@ public static partial class GeneratedJsonAssembly
         entry.Body.GetILProcessor().Emit(OpCodes.Ret);
         var il = core.Body.GetILProcessor();
         var definitions = new GeneratedJsonDefinitions(references) { SchemaWitnesses = new List<GeneratedSchemaIndexes.Witness>() };
+        Phase("inputs");
         GeneratedQueries.Preserve(module,core,product,queryWitnesses);
         GeneratedQueries.RegisterExpressions(module,il,product,queryLambdas);
         GeneratedQueries.Register(module,il,product,queries);
         GeneratedQueries.RegisterProviders(module,il,product,providerOperations);
         GeneratedQueryCalls.Register(module,owner,il,product,queryCalls);
         foreach (var source in argumentSources) GeneratedArgumentCapture.Register(definitions,module,owner,il,product,source);
+        Phase("query-construction");
         RegisterModels(definitions,module,owner,il,product,models);
         il.Emit(OpCodes.Ret);
+        Phase("model-construction");
         var access = new HashSet<string>(models.SelectMany(model => model.AccessAssemblies)
             .Concat(argumentSources.SelectMany(source => source.AccessAssemblies)).Concat(operationAccess),StringComparer.Ordinal)
             { product.Name.Name, consumer.Name.Name };
-        GeneratedSchemaIndexes.Complete(helper,consumer,product,null,name => access.Add(name),null,null,null,definitions.SchemaWitnesses,definitions.EmptyAttributes);
+        GeneratedSchemaIndexes.Complete(helper,consumer,product,null,name => access.Add(name),
+            timing == null ? null : (name,seconds) => timing("companion-schema-" + name,seconds),null,null,definitions.SchemaWitnesses,definitions.EmptyAttributes);
+        Phase("schema");
         HelperAssembly.AllowAccess(module,access,owner.BaseType.Scope);
         var enter = module.ImportReference(typeof(System.Threading.Monitor).GetMethod("Enter",new[] { typeof(object) })!);
         var exit = module.ImportReference(typeof(System.Threading.Monitor).GetMethod("Exit",new[] { typeof(object) })!);
@@ -75,8 +87,11 @@ public static partial class GeneratedJsonAssembly
             // Existing call tokens must continue to denote the original public entry.
             GuardRegistration(consumer.MainModule,facade,call,method,consumer.MainModule.ImportReference(enter),consumer.MainModule.ImportReference(exit));
         }
+        Phase("aliases");
         HelperAssembly.Write(helper,output,key);
+        Phase("helper-write");
         FSharpConsumerOutput.PublishConsumer(consumer,input,outputDirectory,selection,key,output,dependencies);
+        Phase("consumer-write");
     }
 
 }

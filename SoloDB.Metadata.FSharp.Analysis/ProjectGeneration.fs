@@ -215,7 +215,7 @@ type ProjectGeneration private () =
                     measure "emit" (fun () -> GeneratedJsonAssembly.WriteCompanion(helperPath,input,outputDirectory,selection,
                         product,models,queries,queryCalls,queryWitnesses,queryLambdas,providerOperations,referencePaths,
                         operationAccess,argumentSources,aliases,aliasNames,current.Identity,current.FullSigningKeyFile,
-                        Array.append (dependencies.ToArray()) current.Dependencies |> Array.distinct))
+                        Array.append (dependencies.ToArray()) current.Dependencies |> Array.distinct,timing))
                     if File.Exists(templatePath) then File.Delete(templatePath)
                     if File.Exists(attributeSource) then File.Delete(attributeSource)
                     helperPath
