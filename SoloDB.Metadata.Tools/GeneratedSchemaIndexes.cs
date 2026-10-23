@@ -167,7 +167,7 @@ internal static class GeneratedSchemaIndexes
     }
     private static bool Pending(MethodDefinition method,AssemblyDefinition product) => method.HasBody && method.Body.Instructions.Any(instruction =>
         instruction.OpCode == OpCodes.Call && instruction.Operand is MethodReference call && !call.HasThis && call.GenericParameters.Count == 0 &&
-        call.FullName == "System.Object[] SoloDatabase.SchemaMetadata::UncompletedAttributes(System.RuntimeTypeHandle,System.RuntimeMethodHandle)" &&
+        call.Name == "UncompletedAttributes" && call.FullName == "System.Object[] SoloDatabase.SchemaMetadata::UncompletedAttributes(System.RuntimeTypeHandle,System.RuntimeMethodHandle)" &&
         call.DeclaringType.Scope is AssemblyNameReference assembly && assembly.FullName == product.Name.FullName);
 
     // Only explicit compiler placeholders are completed, from actual emitted property metadata.
