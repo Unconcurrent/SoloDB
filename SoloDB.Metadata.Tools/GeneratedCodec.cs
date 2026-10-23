@@ -89,7 +89,8 @@ internal static class GeneratedCodec
         CodecEmitter.readerCall(new CecilCodecIL(method),api.JsonMethod("get_IsNull"),operation);
     }
 
-    internal static void Writer(MethodDefinition method, GeneratedModel model, GeneratedJsonAssembly.Api api)
+    internal static void Writer(MethodDefinition method, GeneratedModel model, GeneratedJsonAssembly.Api api,
+        CodecModel<TypeReference,MethodReference,FieldReference>? codec = null)
     {
         var operation = CodecPreparation.treeWriter(model.Facts.Shape,model.Facts.NonGenericEnumerable,model.Facts.AbstractType);
         if (operation == CodecTreeOperation.Collection) { CollectionWriter(method,model,api); return; }
@@ -105,9 +106,10 @@ internal static class GeneratedCodec
             CodecEmitter.writerCall(new CecilCodecIL(method),api.JsonMethod("get_Null"),
                 new CodecWriterCall<TypeReference,MethodReference>(model.Type,false,false,getter,true));
         }
-        else CodecEmitter.writer(new CecilCodecIL(method), Api(api), Model(model));
+        else CodecEmitter.writer(new CecilCodecIL(method), Api(api), codec ?? Model(model));
     }
-    internal static void Reader(MethodDefinition method, GeneratedModel model, GeneratedJsonAssembly.Api api)
+    internal static void Reader(MethodDefinition method, GeneratedModel model, GeneratedJsonAssembly.Api api,
+        CodecModel<TypeReference,MethodReference,FieldReference>? codec = null)
     {
         var instance = model.Type as GenericInstanceType;
         var selected = TypeSupport.TreeValueReader(instance?.ElementType.FullName ?? model.Type.FullName,model.Type,
@@ -123,14 +125,12 @@ internal static class GeneratedCodec
         if (operation == CodecTreeOperation.Bson)
             CodecEmitter.readerCall(new CecilCodecIL(method),api.JsonMethod("get_IsNull"),
                 new CodecReaderCall<TypeReference,MethodReference>(model.Type,null!,null!,Some(model.Constructor),false,false));
-        else CodecEmitter.reader(new CecilCodecIL(method), Api(api), Model(model));
+        else CodecEmitter.reader(new CecilCodecIL(method), Api(api), codec ?? Model(model));
     }
     internal static void Construction(MethodDefinition method, GeneratedModel model, TypeReference[] arguments) =>
         CodecEmitter.construction(new CecilCodecIL(method),model.Type,model.Facts.ValueType,model.Constructor!,arguments);
     internal static void DefaultConstruction(MethodDefinition method, TypeReference type, MethodReference? constructor) =>
         CodecEmitter.defaultConstruction(new CecilCodecIL(method),type,true,Some(constructor),true);
-    internal static void Getter(MethodDefinition method, CodecModel<TypeReference, MethodReference, FieldReference> model, int member) =>
-        CodecEmitter.getter(new CecilCodecIL(method), model, member);
     internal static CodecTuple<TypeReference, MethodReference, FieldReference> Tuple(GeneratedModel model, GeneratedModel[] models)
     {
         var members = Model(model).Members;

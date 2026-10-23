@@ -71,8 +71,16 @@ internal static partial class GeneratedRawCodec
             var operation = CodecPreparation.reader(model.Type.FullName,TypeSupport.ForDefinition(shape,model.Type.FullName),definitions.Stored);
             if (operation == RawRootOperation.Bson)
             {
-                var create = Body("RawTreeConstruct" + suffix + index,model.Type,api.Json);
-                CodecEmitter.typedConstruction(new CecilCodecIL(create),module.ImportReference(model.Constructor!),1);
+                var constructor = module.ImportReference(model.Constructor!);
+                var policy = GeneratedJsonDefinitions.Identity(constructor.DeclaringType) + constructor.FullName +
+                    string.Concat(constructor.Parameters.Select(parameter => GeneratedJsonDefinitions.Identity(parameter.ParameterType)));
+                var shared = definitions.NativeView;
+                if (!shared.TryGet("raw-tree-construction",model.Type,api.Json,policy,out var create))
+                {
+                    create = Body("RawTreeConstruct" + suffix + index,model.Type,api.Json);
+                    CodecEmitter.typedConstruction(new CecilCodecIL(create),constructor,1);
+                    shared.Add("raw-tree-construction",model.Type,api.Json,policy,create);
+                }
                 Delegate(api.Function(api.Json,model.Type),create);
                 entry.Emit(OpCodes.Call,Method("JsonRawCollections","TreeReader",model.Type,reader));
                 return;

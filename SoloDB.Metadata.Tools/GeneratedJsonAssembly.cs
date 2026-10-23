@@ -158,7 +158,7 @@ public static partial class GeneratedJsonAssembly
             GeneratedArgumentCapture.Register(definitions,module,owner,il,product,model);
             GeneratedSqlRows.Register(module, owner, il, product, model, index, models);
             GeneratedRelations.Register(definitions,module, owner, il, product, model, index);
-            GeneratedCloning.Register(module, owner, il, product, model, index);
+            GeneratedCloning.Register(definitions,module, owner, il, product, model, index);
             GeneratedCustomIdentity.Register(definitions,module, owner, il, product, model, index,models);
             il.Emit(model.Facts.SealedType ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
             il.Emit(model.Facts.RequiresTypeInformation ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);

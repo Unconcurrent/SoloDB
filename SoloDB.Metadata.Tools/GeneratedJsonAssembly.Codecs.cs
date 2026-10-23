@@ -177,8 +177,8 @@ public static partial class GeneratedJsonAssembly
                 il.Emit(OpCodes.Call,module.ImportReference(product.MainModule.GetType("SoloDatabase.QueryValueMetadata").Methods.Single(method => method.Name == "RegisterGeneratedCase")));
             }
         }
-        var write = Writer(owner, model, index, api);
-        var read = Reader(owner, model, index, api);
+        var write = Writer(owner, model, index, api, codec);
+        var read = Reader(owner, model, index, api, codec);
         Delegate(il, api.Function(type, api.Json), write);
         Delegate(il, api.Function(api.Json, type), read);
         if (model.Facts.Shape == TypeShape.CustomSequence)
@@ -193,7 +193,7 @@ public static partial class GeneratedJsonAssembly
                 il.Emit(OpCodes.Call,api.ShapeMethod("DictionaryValues"));
             }
             else if (model.Facts.NonGenericEnumerable || model.Facts.Shape is TypeShape.BsonDocument or TypeShape.NonGenericDictionary) il.Emit(OpCodes.Call,api.ShapeMethod("get_Uninterpreted"));
-            else Shape(il, owner, model, index, api);
+            else Shape(definitions, il, owner, model, index, api, codec);
             il.Emit(OpCodes.Newobj, api.CodecConstructor(type));
         }
         il.Emit(OpCodes.Call, api.Metadata("RegisterGenerated", type));
@@ -258,31 +258,33 @@ public static partial class GeneratedJsonAssembly
         }
     }
 
-    private static MethodDefinition Writer(TypeDefinition owner, GeneratedModel model, int index, Api api)
+    private static MethodDefinition Writer(TypeDefinition owner, GeneratedModel model, int index, Api api,
+        CodecModel<TypeReference,MethodReference,FieldReference> codec)
     {
         var method = Method(owner, "Write" + index, api.Json, api.Module.ImportReference(model.Type));
-        GeneratedCodec.Writer(method, model, api);
+        GeneratedCodec.Writer(method, model, api, codec);
         return method;
     }
 
-    private static MethodDefinition Reader(TypeDefinition owner, GeneratedModel model, int index, Api api)
+    private static MethodDefinition Reader(TypeDefinition owner, GeneratedModel model, int index, Api api,
+        CodecModel<TypeReference,MethodReference,FieldReference> codec)
     {
         var method = Method(owner, "Read" + index, api.Module.ImportReference(model.Type), api.Json);
-        GeneratedCodec.Reader(method, model, api);
+        GeneratedCodec.Reader(method, model, api, codec);
         return method;
     }
 
-    private static void Shape(ILProcessor il, TypeDefinition owner, GeneratedModel model, int index, Api api)
+    private static void Shape(GeneratedJsonDefinitions definitions, ILProcessor il, TypeDefinition owner, GeneratedModel model,
+        int index, Api api, CodecModel<TypeReference,MethodReference,FieldReference> codec)
     {
         var type = api.Module.ImportReference(model.Type);
-        var codec = GeneratedCodec.Model(model);
         var included = CodecEmitter.writtenMembers(codec);
         il.Emit(OpCodes.Ldc_I4, included.Length); il.Emit(OpCodes.Newarr, api.StoredMember);
         for (var position = 0; position < included.Length; position++)
         {
             var i = included[position]; var fact = model.Facts.Members[i]; var member = model.Members[i];
-            var getter = Method(owner, "Member" + index + "_" + i, api.Module.ImportReference(member.Type), type);
-            GeneratedCodec.Getter(getter, codec, i);
+            var getter = MemberReader(definitions,api.Module,owner,type,model.Facts.ValueType,false,
+                codec.Members[i],false,false,index + "_" + i);
             il.Emit(OpCodes.Dup); il.Emit(OpCodes.Ldc_I4, position);
             api.TypeToken(il, member.Field?.DeclaringType ?? member.Getter!.DeclaringType);
             il.Emit(OpCodes.Ldstr, fact.Name); il.Emit(OpCodes.Ldstr, fact.Name); il.Emit(fact.Field ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
