@@ -53,22 +53,23 @@ internal static class HelperAssembly
     internal static bool WriteImplementation(string input, string output, string identity, string? keyFile, ITaskItem[] references)
         => WriteImplementation(input,output,identity,keyFile,references,false,false);
 
-    internal static bool WriteImplementation(string input, string output, string identity, string? keyFile, ITaskItem[] references, bool publicSign, bool delaySign)
+    internal static bool WriteImplementation(string input, string output, string identity, string? keyFile, ITaskItem[] references, bool publicSign, bool delaySign, ITaskItem[]? compilerReferences = null)
     {
         using var resolver = new DefaultAssemblyResolver();
         resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(input))!);
-        foreach (var reference in references) resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(reference.ItemSpec))!);
+        foreach (var reference in references.Concat(compilerReferences ?? Array.Empty<ITaskItem>())) resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(reference.ItemSpec))!);
         using var consumer = AssemblyDefinition.ReadAssembly(input, new ReaderParameters { ReadingMode = ReadingMode.Immediate, AssemblyResolver = resolver });
         if (!consumer.CustomAttributes.Any(attribute => attribute.AttributeType.FullName == "SoloDatabase.Generated.MetadataActivationAttribute"))
         {
             if (File.Exists(output)) File.Delete(output);
             return false;
         }
-        using var helper = Create(identity,resolver);
-        var module = helper.MainModule;
-        var entry = EntryPoint(module);
         var runtimePath = references.Select(reference => reference.ItemSpec).First(path => Path.GetFileName(path) == "SoloDB.dll");
         using var product = AssemblyDefinition.ReadAssembly(runtimePath);
+        using var imports = new TargetReflectionImports((compilerReferences ?? references).Select(reference => reference.ItemSpec).ToArray(),resolver,product.MainModule);
+        using var helper = Create(identity,resolver,imports);
+        var module = helper.MainModule;
+        var entry = EntryPoint(module);
         var runtime = product.Name.Name;
         var il = entry.Body.GetILProcessor();
         var access = new HashSet<string>(StringComparer.Ordinal) { runtime };

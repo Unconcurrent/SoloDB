@@ -8,4 +8,39 @@
     </Reference>
   </ItemGroup>
   <Import Project="$(MSBuildThisFileDirectory)SoloDB.FSharp.Context.targets" Condition="'$(MSBuildProjectExtension)' == '.fsproj'" />
+  <Target Name="SoloDBFrameworkNativeAssets" BeforeTargets="AssignTargetPaths"
+          DependsOnTargets="ResolvePackageAssets;AdjustDefaultPlatformTargetForNetFrameworkExeWithNoNativeCopyLocalItems"
+          Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework' and '$(DesignTimeBuild)' != 'true' and
+                     ('$(OS)' == 'Windows_NT' or $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('win')))">
+    <!-- Framework AnyCPU can retain an implicit x86 RID. Preserve process selection
+         and let the existing native loader choose from the restored architectures. -->
+    <ResolvePackageAssets Condition="'$(PlatformTarget)' == 'AnyCPU'"
+        ProjectAssetsFile="$(ProjectAssetsFile)" ProjectAssetsCacheFile="$(IntermediateOutputPath)SoloDB.framework-native.assets.cache"
+        ProjectPath="$(MSBuildProjectFullPath)" TargetFramework="$(TargetFramework)" RuntimeIdentifier=""
+        ProjectLanguage="$(Language)" DotNetAppHostExecutableNameWithoutExtension="$(_DotNetAppHostExecutableNameWithoutExtension)"
+        DefaultImplicitPackages="$(DefaultImplicitPackages)">
+      <Output TaskParameter="RuntimeTargets" ItemName="_SoloDBFrameworkRuntimeTargets" />
+    </ResolvePackageAssets>
+    <ItemGroup Condition="'$(PlatformTarget)' == 'AnyCPU'">
+      <_SoloDBFrameworkNative Include="@(_SoloDBFrameworkRuntimeTargets)"
+          Condition="'%(_SoloDBFrameworkRuntimeTargets.NuGetPackageId)' == 'SQLitePCLRaw.lib.e_sqlite3' and
+                     '%(_SoloDBFrameworkRuntimeTargets.AssetType)' == 'native' and
+                     $([System.String]::Copy('%(_SoloDBFrameworkRuntimeTargets.RuntimeIdentifier)').StartsWith('win-'))">
+        <NativeTargetsOwner>$([MSBuild]::NormalizePath('%(RootDir)%(Directory)', '../../..', 'buildTransitive/net461/SQLitePCLRaw.lib.e_sqlite3.targets'))</NativeTargetsOwner>
+      </_SoloDBFrameworkNative>
+    </ItemGroup>
+    <PropertyGroup>
+      <_SoloDBFrameworkNativeTargetsOwner>@(_SoloDBFrameworkNative->'%(NativeTargetsOwner)'->Distinct())</_SoloDBFrameworkNativeTargetsOwner>
+    </PropertyGroup>
+    <ItemGroup Condition="'$(PlatformTarget)' == 'AnyCPU'">
+      <Content Remove="@(Content)" Condition="'%(Content.DefiningProjectFullPath)' == '$(_SoloDBFrameworkNativeTargetsOwner)'" />
+      <Content Include="@(_SoloDBFrameworkNative)">
+        <Link>%(_SoloDBFrameworkNative.PathInPackage)</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <Pack>false</Pack>
+      </Content>
+      <FileWrites Include="$(IntermediateOutputPath)SoloDB.framework-native.assets.cache" />
+    </ItemGroup>
+  </Target>
 </Project>

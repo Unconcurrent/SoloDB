@@ -16,6 +16,7 @@ public sealed class GenerateHelper : ITask
     public bool PublicSign { get; set; }
     public bool DelaySign { get; set; }
     public ITaskItem[] References { get; set; } = Array.Empty<ITaskItem>();
+    public ITaskItem[]? CompilerReferences { get; set; }
     public string Selection { get; set; } = "";
 
     public bool Execute()
@@ -25,7 +26,7 @@ public sealed class GenerateHelper : ITask
             if (string.IsNullOrEmpty(Consumer)) HelperAssembly.WriteContract(Output, Identity, KeyFile, References, PublicSign, DelaySign);
             else
             {
-                Active = HelperAssembly.WriteImplementation(Consumer!, Output, Identity, KeyFile, References, PublicSign, DelaySign);
+                Active = HelperAssembly.WriteImplementation(Consumer!, Output, Identity, KeyFile, References, PublicSign, DelaySign, CompilerReferences);
                 if (Selection.Length != 0)
                     HelperAssembly.Publish(Selection, new XElement("selection", new XAttribute("active", Active)));
             }

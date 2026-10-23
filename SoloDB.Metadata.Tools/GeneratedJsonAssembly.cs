@@ -52,7 +52,17 @@ public static partial class GeneratedJsonAssembly
         GeneratedQueryWitness[]? queryWitnesses, GeneratedQueryLambda[]? queryLambdas, GeneratedProviderOperation[]? providerOperations,
         string[]? references, string[]? operationAccessAssemblies, GeneratedArgumentSource[]? argumentSources, string[][]? aliases)
     {
-        using var assembly = HelperAssembly.Create(identity);
+        using var ownedResolver = references == null ? null : new DefaultAssemblyResolver();
+        var resolver = (IAssemblyResolver?)ownedResolver ?? product.MainModule.AssemblyResolver;
+        if (ownedResolver != null)
+        {
+            if (!string.IsNullOrEmpty(product.MainModule.FileName))
+                ownedResolver.AddSearchDirectory(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(product.MainModule.FileName))!);
+            foreach (var reference in references!)
+                ownedResolver.AddSearchDirectory(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(reference))!);
+        }
+        using var imports = new TargetReflectionImports(references ?? Array.Empty<string>(),resolver,product.MainModule);
+        using var assembly = HelperAssembly.Create(identity,resolver,imports);
         var module = assembly.MainModule;
         var owner = Owner(module, name);
         if (aliases != null) owner.Attributes = TypeAttributes.NotPublic | TypeAttributes.Abstract | TypeAttributes.Sealed;
