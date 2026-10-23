@@ -151,6 +151,7 @@ internal static partial class GeneratedSequenceCodec
                 var body = Writer(writes,module,owner,product,target,element,encoding,output,valueType,element.FullName == "System.Byte",name+(encoding.FullName == "System.Char" ? "Utf16" : "Utf8"),models);
                 Delegate(entry,module,product,"JsonDirectWriter`2",body,target,encoding);
             }
+            GeneratedJsonAssembly.BoxedWriters(definitions,module,owner,entry,product,target);
             entry.Emit(OpCodes.Call,api.Metadata("RegisterSequenceOutputs",target,element,writes.OutputType(module,product,module.TypeSystem.Byte),writes.OutputType(module,product,module.TypeSystem.Char)));
         }
     }
@@ -199,7 +200,7 @@ internal static partial class GeneratedSequenceCodec
             module.ImportReference(typeof(IEnumerator).GetMethod("MoveNext")!), current,
             module.ImportReference(typeof(IDisposable).GetMethod("Dispose")!),
             nonGeneric ? FSharpOption<TypeReference>.Some(module.ImportReference(typeof(IDisposable))) : null!,
-            api.Operation("JsonRawCollections", "CaptureSequenceBytes"),
+            binary && valueType ? Snapshot(definitions,module,owner,target) : api.Operation("JsonRawCollections", "CaptureSequenceBytes"),
             binary ? GeneratedOutputCodec.Bytes(definitions, module, owner, product, new ArrayType(module.TypeSystem.Byte), encoding, name + "Bytes") : null!);
         var serial = 0;
         var il = new CecilCodecIL(method);
@@ -210,6 +211,53 @@ internal static partial class GeneratedSequenceCodec
                         definitions, module, owner, product, child, encoding, output, name + "Element" + serial++, models)))),
             null!, GeneratedOutputCodec.LiteralAction(definitions,module,product,encoding,il), null!, null!, null!, null!, null!, null!);
         CodecSequenceEmitter.writer(il, outputApi, sequence, target, element, valueType, binary);
+        return method;
+    }
+
+    private static MethodDefinition Snapshot(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,
+        TypeReference target)
+    {
+        definitions = definitions.NativeView;
+        const string role = "sequence-byte-capture";
+        if(definitions.TryGet(role,target,module.TypeSystem.Byte,"",out var prepared)) return prepared;
+        var method = new MethodDefinition(definitions.MethodName("CaptureSequenceBytes"),
+            MethodAttributes.Assembly | MethodAttributes.Static | MethodAttributes.HideBySig,new ArrayType(module.TypeSystem.Byte));
+        method.Body.InitLocals = true;
+        method.Parameters.Add(new ParameterDefinition(new ByReferenceType(module.ImportReference(target))));
+        owner.Methods.Add(method);
+        definitions.Add(role,target,module.TypeSystem.Byte,"",method);
+        var enumerable = Closed(module,module.ImportReference(typeof(IEnumerable<>)),module.TypeSystem.Byte);
+        var enumerator = Closed(module,module.ImportReference(typeof(IEnumerator<>)),module.TypeSystem.Byte);
+        MethodReference Bind(System.Reflection.MethodBase original,TypeReference declaring)
+        {
+            var call = original is System.Reflection.ConstructorInfo constructor ? module.ImportReference(constructor)
+                : module.ImportReference((System.Reflection.MethodInfo)original);
+            call.DeclaringType = declaring;
+            return call;
+        }
+        var sequence = new CodecSequenceWriterApi<TypeReference,MethodReference>(new ArrayType(module.TypeSystem.Byte),enumerator,
+            Bind(typeof(IEnumerable<>).GetMethod("GetEnumerator")!,enumerable),
+            module.ImportReference(typeof(IEnumerator).GetMethod("MoveNext")!),
+            Bind(typeof(IEnumerator<>).GetProperty("Current")!.GetMethod!,enumerator),
+            module.ImportReference(typeof(IDisposable).GetMethod("Dispose")!),null!,null!,null!);
+        var list = Closed(module,module.ImportReference(typeof(List<>)),module.TypeSystem.Byte);
+        var contract = Closed(module,module.ImportReference(typeof(ICollection<>)),module.TypeSystem.Byte);
+        TypeReference? Collection(TypeReference type)
+        {
+            if(SourceTypeIdentity.SameSignature(type,contract,module.AssemblyResolver)) return type;
+            foreach(var implemented in type.Resolve().Interfaces) {
+                var found = Collection(OriginalArgumentSources.Close(implemented.InterfaceType,type));
+                if(found != null) return found;
+            }
+            return null;
+        }
+        var collection = Collection(target);
+        var capture = new CodecSequenceCaptureApi<TypeReference,MethodReference>(module.TypeSystem.Byte,list,
+            Bind(typeof(List<>).GetConstructor(Type.EmptyTypes)!,list),Bind(typeof(List<>).GetMethod("Add")!,list),
+            Bind(typeof(List<>).GetMethod("ToArray")!,list),
+            collection == null ? null! : FSharpOption<Tuple<MethodReference,MethodReference>>.Some(Tuple.Create(
+                Bind(typeof(ICollection<>).GetProperty("Count")!.GetMethod!,collection),Bind(typeof(ICollection<>).GetMethod("CopyTo")!,collection))));
+        CodecSequenceEmitter.snapshot(new CecilCodecIL(method),sequence,capture,target);
         return method;
     }
 }

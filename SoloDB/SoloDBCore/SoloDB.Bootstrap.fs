@@ -41,7 +41,12 @@ module internal Bootstrap =
     [<Literal>]
     let private setupSql = "PRAGMA recursive_triggers = ON; PRAGMA foreign_keys = on; PRAGMA cache_size = -65536;"
 
-    let createSetups (eventSystem: EventSystem) =
+    let createSetups location (eventSystem: EventSystem) =
+        // Set once before TEMP objects exist; changing temp_store destroys them.
+        let connectionSetupSql =
+            match location with
+            | SoloDBLocation.Memory _ -> "PRAGMA temp_store = MEMORY; " + setupSql
+            | SoloDBLocation.File _ -> setupSql
         let usCultureInfo = CultureInfo.GetCultureInfo("en-us")
         let lower (value: string) = value.ToLower(usCultureInfo)
         let regexpTimeout = TimeSpan.FromMilliseconds(100)
@@ -85,14 +90,14 @@ module internal Bootstrap =
         // Lock waiting belongs to each native command budget, including cold setup.
         let setup (connection: NativeSqliteConnection) =
             register connection
-            let mutable execution = connection.AcquireScript(NativeStatementSource.Text setupSql, null)
+            let mutable execution = connection.AcquireScript(NativeStatementSource.Text connectionSetupSql, null)
             try
                 execution.Consume() |> ignore
                 execution.Dispose()
             with error -> execution.Abort(error); reraise()
         let setupAsync (connection: NativeSqliteConnection) = task {
             register connection
-            let! _ = connection.ExecuteScriptAsync(setupSql)
+            let! _ = connection.ExecuteScriptAsync(connectionSetupSql)
             return ()
         }
         struct (setup, setupAsync)

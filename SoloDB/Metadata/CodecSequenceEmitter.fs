@@ -15,6 +15,15 @@ type internal CodecSequenceWriterApi<'T,'M> = {
     Bytes: 'M
 }
 
+type internal CodecSequenceCaptureApi<'T,'M> = {
+    Byte: 'T
+    Buffer: 'T
+    Construct: 'M
+    Add: 'M
+    Finish: 'M
+    Collection: ('M * 'M) option
+}
+
 /// Original range and construction operands after pure sequence policy selection.
 type internal CodecSequenceReaderApi<'T,'M> = {
     Context: 'T
@@ -61,6 +70,56 @@ type internal CodecGroupingReaderApi<'T,'M> = {
 }
 
 module internal CodecSequenceEmitter =
+    let snapshot (il: CodecIL<'T,'M,'F>) (sequence: CodecSequenceWriterApi<'T,'M>)
+                 (capture: CodecSequenceCaptureApi<'T,'M>) target =
+        match capture.Collection with
+        | Some(count,copy) ->
+            let bytes = il.Local sequence.BytesType
+            il.InputAddress()
+            il.EmitType(OpCodes.Constrained,target)
+            il.EmitMethod(OpCodes.Callvirt,count)
+            il.EmitType(OpCodes.Newarr,capture.Byte)
+            il.EmitLocal(OpCodes.Stloc,bytes)
+            il.InputAddress()
+            il.EmitLocal(OpCodes.Ldloc,bytes)
+            il.Emit OpCodes.Ldc_I4_0
+            il.EmitType(OpCodes.Constrained,target)
+            il.EmitMethod(OpCodes.Callvirt,copy)
+            il.EmitLocal(OpCodes.Ldloc,bytes)
+        | None ->
+            let buffer = il.Local capture.Buffer
+            let iterator = il.Local sequence.Enumerator
+            il.EmitMethod(OpCodes.Newobj,capture.Construct)
+            il.EmitLocal(OpCodes.Stloc,buffer)
+            il.InputAddress()
+            il.EmitType(OpCodes.Constrained,target)
+            il.EmitMethod(OpCodes.Callvirt,sequence.GetEnumerator)
+            il.EmitLocal(OpCodes.Stloc,iterator)
+            il.BeginException()
+            let loop = il.Label()
+            let test = il.Label()
+            il.EmitBranch(OpCodes.Br,test)
+            il.Mark loop
+            il.EmitLocal(OpCodes.Ldloc,buffer)
+            il.EmitLocal(OpCodes.Ldloc,iterator)
+            il.EmitMethod(OpCodes.Callvirt,sequence.Current)
+            il.EmitMethod(OpCodes.Callvirt,capture.Add)
+            il.Mark test
+            il.EmitLocal(OpCodes.Ldloc,iterator)
+            il.EmitMethod(OpCodes.Callvirt,sequence.MoveNext)
+            il.EmitBranch(OpCodes.Brtrue,loop)
+            il.Finally()
+            let disposed = il.Label()
+            il.EmitLocal(OpCodes.Ldloc,iterator)
+            il.EmitBranch(OpCodes.Brfalse,disposed)
+            il.EmitLocal(OpCodes.Ldloc,iterator)
+            il.EmitMethod(OpCodes.Callvirt,sequence.Dispose)
+            il.Mark disposed
+            il.EndException()
+            il.EmitLocal(OpCodes.Ldloc,buffer)
+            il.EmitMethod(OpCodes.Callvirt,capture.Finish)
+        il.Emit OpCodes.Ret
+
     let missingConstructor (il: CodecIL<'T,'M,'F>) constructor name =
         il.EmitString("Type " + name + " must have a parameterless constructor")
         il.EmitMethod(OpCodes.Newobj,constructor)
@@ -240,8 +299,8 @@ module internal CodecSequenceEmitter =
             il.Mark present
         if binary then
             let bytes = il.Local sequence.BytesType
-            il.InputValue()
-            if valueType then il.EmitType(OpCodes.Box,target)
+            if il.ByRefParameter(sequence.Snapshot,0) then il.InputAddress()
+            else il.InputValue()
             il.EmitMethod(OpCodes.Call,sequence.Snapshot)
             il.EmitLocal(OpCodes.Stloc,bytes)
             CodecEmitter.callLocal il sequence.Bytes 0 bytes
@@ -252,8 +311,10 @@ module internal CodecSequenceEmitter =
             let iterator = il.Local sequence.Enumerator
             let current = il.Local element
             output.Literal "["
-            il.InputValue()
-            if valueType then il.EmitType(OpCodes.Box,target)
+            if valueType then
+                il.InputAddress()
+                il.EmitType(OpCodes.Constrained,target)
+            else il.InputValue()
             il.EmitMethod(OpCodes.Callvirt,sequence.GetEnumerator)
             il.EmitLocal(OpCodes.Stloc,iterator)
             il.BeginException()

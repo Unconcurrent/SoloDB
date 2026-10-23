@@ -1351,15 +1351,15 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         JsonMetadata.RegisterSequenceOutputBodiesCore<'Element,'O8,'O16,JsonStoredContract>(utf8,utf16)
 
     static member internal RegisterSequenceOutputs<'Sequence,'Element,'O8,'O16 when 'O8 : struct and 'O8 :> IJsonValueOutput<byte> and 'O16 : struct and 'O16 :> IJsonValueOutput<char>>
-        (utf8: JsonDirectWriter<'Sequence,byte>, utf16: JsonDirectWriter<'Sequence,char>): unit =
-        JsonMetadata.RegisterOutputWritersCore<'Sequence,'O8,'O16,JsonNativeContract>(utf8,utf16)
+        (utf8: JsonDirectWriter<'Sequence,byte>, utf16: JsonDirectWriter<'Sequence,char>, runtime8: JsonDirectRuntimeWriter<byte>, runtime16: JsonDirectRuntimeWriter<char>): unit =
+        JsonMetadata.PublishOutputWriters<'Sequence,'O8,'O16,JsonNativeContract>(utf8,utf16,runtime8,runtime16)
         let role = JsonOperationPolicy<JsonNativeContract>.Name(if typeof<'Element>.Equals(typeof<byte>) then "sequence-binary-write" else "sequence-write")
         JsonDefaultMethods.publish typeof<'Sequence> typeof<byte> typeof<'O8> role utf8
         JsonDefaultMethods.publish typeof<'Sequence> typeof<char> typeof<'O16> role utf16
 
     static member internal RegisterStoredSequenceOutputs<'Sequence,'Element,'O8,'O16 when 'O8 : struct and 'O8 :> IJsonValueOutput<byte> and 'O16 : struct and 'O16 :> IJsonValueOutput<char>>
-        (utf8: JsonDirectWriter<'Sequence,byte>, utf16: JsonDirectWriter<'Sequence,char>): unit =
-        JsonMetadata.RegisterOutputWritersCore<'Sequence,'O8,'O16,JsonStoredContract>(utf8,utf16)
+        (utf8: JsonDirectWriter<'Sequence,byte>, utf16: JsonDirectWriter<'Sequence,char>, runtime8: JsonDirectRuntimeWriter<byte>, runtime16: JsonDirectRuntimeWriter<char>): unit =
+        JsonMetadata.PublishOutputWriters<'Sequence,'O8,'O16,JsonStoredContract>(utf8,utf16,runtime8,runtime16)
         let role = JsonOperationPolicy<JsonStoredContract>.Name(if typeof<'Element>.Equals(typeof<byte>) then "sequence-binary-write" else "sequence-write")
         JsonDefaultMethods.publish typeof<'Sequence> typeof<byte> typeof<'O8> role utf8
         JsonDefaultMethods.publish typeof<'Sequence> typeof<char> typeof<'O16> role utf16
@@ -4198,7 +4198,7 @@ and private JsonRawCollections<'Contract> =
               Current = enumerator.GetProperty("Current").GetMethod :> MethodBase
               Dispose = typeof<IDisposable>.GetMethod("Dispose") :> MethodBase
               DisposeType = if nonGeneric then Some typeof<IDisposable> else None
-              Snapshot = typeof<JsonRawCollections<'Contract>>.GetMethod("CaptureSequenceBytes",flags) :> MethodBase
+              Snapshot = if binary then JsonWriterRuntime.sequenceSnapshot typeof<'Sequence> (typeof<JsonRawCollections<'Contract>>.GetMethod("CaptureSequenceBytes",flags) :> MethodBase) else null
               Bytes = if binary then JsonWriterRuntime.bytes typeof<'E> typeof<'O> :> MethodBase else null }
         let il = RuntimeCodecIL(method.GetILGenerator(),parameters[0])
         CodecSequenceEmitter.writer il (JsonRawOutput<'E,'O,'Contract>.ForwardApi(il,typeof<'Sequence>))
@@ -4368,7 +4368,7 @@ and private JsonRawCollections<'Contract> =
 
     static member private DictionaryKeyFormat<'Key>(): MethodBase =
         JsonDefaultMethods.methodWithContract typeof<'Key> typeof<string> typeof<string> "dictionary-key-format" (fun () ->
-            let method = DynamicMethod("FormatDictionaryKey",typeof<string>,[|typeof<'Key>|],typeof<JsonValue>.Module,true)
+            let method = DynamicMethod("FormatDictionaryKey",typeof<string>,[|typeof<'Key>.MakeByRefType()|],typeof<JsonValue>.Module,true)
             let nullable = not(isNull(Nullable.GetUnderlyingType typeof<'Key>))
             let formattable = typeof<IFormattable>.IsAssignableFrom typeof<'Key>
             let api =
@@ -4376,7 +4376,7 @@ and private JsonRawCollections<'Contract> =
                   Invariant = typeof<CultureInfo>.GetProperty("InvariantCulture").GetMethod :> MethodBase
                   Format = typeof<IFormattable>.GetMethod("ToString") :> MethodBase
                   ToString = typeof<obj>.GetMethod("ToString") :> MethodBase }
-            CodecDictionaryEmitter.formatKey (RuntimeCodecIL(method.GetILGenerator())) api typeof<'Key> typeof<'Key>.IsValueType formattable
+            CodecDictionaryEmitter.formatKey (RuntimeCodecIL(method.GetILGenerator(),typeof<'Key>.MakeByRefType())) api typeof<'Key> typeof<'Key>.IsValueType formattable
                 (TypeSupport.DictionaryFormatProbe(formattable,typeof<'Key>.IsSealed,nullable)) (typeof<'Key>.Equals(typeof<string>))
             method :> MethodBase)
 

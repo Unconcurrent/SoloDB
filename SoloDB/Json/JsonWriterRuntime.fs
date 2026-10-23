@@ -4,6 +4,8 @@ open System
 open System.Text
 open System.Reflection
 open System.Reflection.Emit
+open System.Collections
+open System.Collections.Generic
 open System.Runtime.CompilerServices
 open SoloDatabase
 open SoloDatabase.Metadata.CodecGeneration
@@ -243,9 +245,50 @@ module internal JsonWriterRuntime =
     let bytes element output =
         JsonDefaultMethods.withContract typeof<byte[]> element output "bytes-write" (fun () -> createBytes element output false)
 
-    let sequenceBytes<'E,'O>() =
-        JsonDefaultMethods.callable<JsonDirectWriter<byte[],'E>> typeof<byte[]> typeof<'E> typeof<'O> "sequence-bytes-write"
-            (fun () -> createBytes typeof<'E> typeof<'O> true :> MethodBase)
+    let private byteSequence snapshot bytes =
+        { BytesType = typeof<byte[]>; Enumerator = typeof<IEnumerator<byte>>
+          GetEnumerator = typeof<IEnumerable<byte>>.GetMethod("GetEnumerator") :> MethodBase
+          MoveNext = typeof<IEnumerator>.GetMethod("MoveNext") :> MethodBase
+          Current = typeof<IEnumerator<byte>>.GetProperty("Current").GetMethod :> MethodBase
+          Dispose = typeof<IDisposable>.GetMethod("Dispose") :> MethodBase
+          DisposeType = None; Snapshot = snapshot; Bytes = bytes }
+
+    let sequenceSnapshot (target: Type) (fallback: MethodBase) =
+        if not target.IsValueType then fallback
+        else
+            JsonDefaultMethods.methodWithContract target typeof<byte> typeof<byte> "sequence-byte-capture" (fun () ->
+                if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "direct byte sequence capture" target
+                let input = target.MakeByRefType()
+                let method = DynamicMethod("CaptureSequenceBytes",typeof<byte[]>,[|input|],typeof<JsonWriterRegion>.Module,true)
+                let collection = typeof<ICollection<byte>>
+                let capture =
+                    { Byte = typeof<byte>; Buffer = typeof<ResizeArray<byte>>
+                      Construct = typeof<ResizeArray<byte>>.GetConstructor(Type.EmptyTypes) :> MethodBase
+                      Add = typeof<ResizeArray<byte>>.GetMethod("Add") :> MethodBase
+                      Finish = typeof<ResizeArray<byte>>.GetMethod("ToArray") :> MethodBase
+                      Collection = if collection.IsAssignableFrom target then
+                                       Some(collection.GetProperty("Count").GetMethod :> MethodBase,collection.GetMethod("CopyTo") :> MethodBase)
+                                   else None }
+                CodecSequenceEmitter.snapshot (RuntimeCodecIL(method.GetILGenerator(),input)) (byteSequence null null) capture target
+                method :> MethodBase)
+
+    let sequenceBytes<'T,'E,'O>() =
+        JsonDefaultMethods.callable<JsonDirectWriter<'T,'E>> typeof<'T> typeof<'E> typeof<'O> "sequence-byte-source-write" (fun () ->
+            if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "direct byte sequence write" typeof<'T>
+            let parameters = Array.append [|typeof<'T>.MakeByRefType()|] (signature typeof<'E>)
+            let method = DynamicMethod("WriteSequenceBytes",typeof<Void>,parameters,typeof<JsonWriterRegion>.Module,true)
+            let il = RuntimeCodecIL(method.GetILGenerator(),parameters[0])
+            let fallback = typeof<list<byte>>.Assembly.GetType("Microsoft.FSharp.Collections.SeqModule").GetMethod("ToArray").MakeGenericMethod(typeof<byte>) :> MethodBase
+            let snapshot = sequenceSnapshot typeof<'T> fallback
+            let bytes = JsonDefaultMethods.methodWithContract typeof<byte[]> typeof<'E> typeof<'O> "sequence-bytes-write"
+                            (fun () -> createBytes typeof<'E> typeof<'O> true :> MethodBase)
+            let output =
+                { Boolean = typeof<bool>; Operation = (fun _ -> None); Polymorphic = Unchecked.defaultof<_>
+                  Literal = inlineLiteral typeof<'E> typeof<'O> il
+                  SerializeActual = null; Property = Unchecked.defaultof<_>; TypeLiteral = Unchecked.defaultof<_>
+                  OmitId = null; Discard = Unchecked.defaultof<_>; Serialize = Unchecked.defaultof<_> }
+            CodecSequenceEmitter.writer il output (byteSequence snapshot bytes) typeof<'T> typeof<byte> typeof<'T>.IsValueType true
+            method :> MethodBase)
 
     let writer<'T,'E,'O>() =
         (number typeof<'T> typeof<'E> typeof<'O>).CreateDelegate(typeof<JsonDirectWriter<'T,'E>>) :?> JsonDirectWriter<'T,'E>

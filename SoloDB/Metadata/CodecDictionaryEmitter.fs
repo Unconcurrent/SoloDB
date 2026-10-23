@@ -45,17 +45,17 @@ module internal CodecDictionaryEmitter =
         let finish = il.Label()
         let empty = il.Label()
         let format () =
-            if valueType then il.EmitInt(OpCodes.Ldarga,0) else il.Emit OpCodes.Ldarg_0
+            if valueType then il.InputAddress() else il.InputValue()
             il.Emit OpCodes.Ldnull
             il.EmitMethod(OpCodes.Call,api.Invariant)
             if valueType then il.EmitType(OpCodes.Constrained,target)
             il.EmitMethod(OpCodes.Callvirt,api.Format)
         if stringKey then
-            il.Emit OpCodes.Ldarg_0
+            il.InputValue()
         elif probe then
             let boxed = il.Local api.Object
             let receiver = il.Local api.Formattable
-            il.Emit OpCodes.Ldarg_0
+            il.InputValue()
             if valueType then il.EmitType(OpCodes.Box,target)
             il.EmitLocal(OpCodes.Stloc,boxed)
             il.EmitLocal(OpCodes.Ldloc,boxed); il.EmitBranch(OpCodes.Brfalse,empty)
@@ -68,14 +68,14 @@ module internal CodecDictionaryEmitter =
             il.EmitMethod(OpCodes.Callvirt,api.Format)
             il.EmitLocal(OpCodes.Stloc,result); il.EmitBranch(OpCodes.Br,finish)
             il.Mark ordinary
-            il.EmitInt(OpCodes.Ldarga,0); il.EmitType(OpCodes.Constrained,target)
+            il.InputAddress(); il.EmitType(OpCodes.Constrained,target)
             il.EmitMethod(OpCodes.Callvirt,api.ToString)
         else
             if not valueType then
-                il.Emit OpCodes.Ldarg_0; il.EmitBranch(OpCodes.Brfalse,empty)
+                il.InputValue(); il.EmitBranch(OpCodes.Brfalse,empty)
             if knownFormattable then format()
             else
-                il.EmitInt(OpCodes.Ldarga,0); il.EmitType(OpCodes.Constrained,target)
+                il.InputAddress(); il.EmitType(OpCodes.Constrained,target)
                 il.EmitMethod(OpCodes.Callvirt,api.ToString)
         il.EmitLocal(OpCodes.Stloc,result)
         il.Mark finish
@@ -181,16 +181,16 @@ module internal CodecDictionaryEmitter =
 
     let writer (il: CodecIL<'T,'M,'F>) (output: CodecRawWriterApi<'T,'M>)
                (api: CodecDictionaryWriterApi<'T,'M>) target valueType nonGeneric =
-        let present = il.Label()
-        il.InputValue()
-        if valueType then il.EmitType(OpCodes.Box,target)
         let boxed = il.Local api.Object
-        il.EmitLocal(OpCodes.Stloc,boxed)
-        il.EmitLocal(OpCodes.Ldloc,boxed)
-        il.EmitBranch(OpCodes.Brtrue,present)
-        output.Literal "null"
-        il.Emit OpCodes.Ret
-        il.Mark present
+        if not valueType then
+            let present = il.Label()
+            il.InputValue()
+            il.EmitLocal(OpCodes.Stloc,boxed)
+            il.EmitLocal(OpCodes.Ldloc,boxed)
+            il.EmitBranch(OpCodes.Brtrue,present)
+            output.Literal "null"
+            il.Emit OpCodes.Ret
+            il.Mark present
         output.Literal "{"
         let comma = il.Local api.Boolean
         let ownsType = il.Local api.Boolean
@@ -203,7 +203,8 @@ module internal CodecDictionaryEmitter =
         let name = il.Local api.String
         let emitContract (contract: CodecDictionaryContract<'T,'M>) receiver =
             let iterator = il.Local contract.Enumerator
-            il.EmitLocal(OpCodes.Ldloc,receiver)
+            receiver()
+            if valueType then il.EmitType(OpCodes.Constrained,target)
             il.EmitMethod(OpCodes.Callvirt,contract.Keys)
             il.EmitMethod(OpCodes.Callvirt,contract.GetEnumerator)
             il.EmitLocal(OpCodes.Stloc,iterator)
@@ -218,12 +219,14 @@ module internal CodecDictionaryEmitter =
             il.EmitMethod(OpCodes.Callvirt,contract.Current)
             il.EmitLocal(OpCodes.Stloc,key)
             let format () =
-                il.EmitLocal(OpCodes.Ldloc,key)
+                if api.NameVirtual then il.EmitLocal(OpCodes.Ldloc,key)
+                else CodecEmitter.callLocal il api.Name 0 key
                 il.EmitMethod((if api.NameVirtual then OpCodes.Callvirt else OpCodes.Call),api.Name)
                 il.EmitLocal(OpCodes.Stloc,name)
             let fetch () =
-                il.EmitLocal(OpCodes.Ldloc,receiver)
+                receiver()
                 il.EmitLocal(OpCodes.Ldloc,key)
+                if valueType then il.EmitType(OpCodes.Constrained,target)
                 il.EmitMethod(OpCodes.Callvirt,contract.Indexer)
                 il.EmitLocal(OpCodes.Stloc,value)
             if nonGeneric then
@@ -293,17 +296,22 @@ module internal CodecDictionaryEmitter =
             il.EmitType((if test then OpCodes.Isinst else OpCodes.Castclass),contract.Type)
             il.EmitLocal(OpCodes.Stloc,receiver)
             receiver
+        let emitBound contract =
+            if valueType then emitContract contract (fun () -> il.InputAddress())
+            else
+                let receiver = bind contract false
+                emitContract contract (fun () -> il.EmitLocal(OpCodes.Ldloc,receiver))
         match api.ReadOnly,api.Mutable with
-        | Some readOnly,Some mutableContract when api.ProbeReadOnly ->
+        | Some readOnly,Some mutableContract when api.ProbeReadOnly && not valueType ->
             let receiver = bind readOnly true
             let mutablePath = il.Label()
             il.EmitLocal(OpCodes.Ldloc,receiver); il.EmitBranch(OpCodes.Brfalse,mutablePath)
-            emitContract readOnly receiver
+            emitContract readOnly (fun () -> il.EmitLocal(OpCodes.Ldloc,receiver))
             il.EmitBranch(OpCodes.Br,finish)
             il.Mark mutablePath
-            emitContract mutableContract (bind mutableContract false)
-        | Some readOnly,_ -> emitContract readOnly (bind readOnly false)
-        | _,Some mutableContract -> emitContract mutableContract (bind mutableContract false)
+            emitBound mutableContract
+        | Some readOnly,_ -> emitBound readOnly
+        | _,Some mutableContract -> emitBound mutableContract
         | _ -> invalidOp "A dictionary writer requires its original collection contract."
         il.Mark finish
         il.EmitLocal(OpCodes.Ldloc,comma); il.EmitLocal(OpCodes.Ldloc,ownsType)

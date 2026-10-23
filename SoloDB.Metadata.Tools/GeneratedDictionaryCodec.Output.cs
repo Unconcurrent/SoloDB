@@ -23,7 +23,7 @@ internal static partial class GeneratedDictionaryCodec
         var sealedType=model?.Facts.SealedType??false;
         var nullable=key is GenericInstanceType g && g.ElementType.FullName=="System.Nullable`1";
         var method=new MethodDefinition(definitions.MethodName(name),MethodAttributes.Assembly|MethodAttributes.Static|MethodAttributes.HideBySig,module.TypeSystem.String);
-        method.Parameters.Add(new ParameterDefinition(module.ImportReference(key)));method.Body.InitLocals=true;owner.Methods.Add(method);
+        method.Parameters.Add(new ParameterDefinition(new ByReferenceType(module.ImportReference(key))));method.Body.InitLocals=true;owner.Methods.Add(method);
         definitions.Add("dictionary-key-format",key,module.TypeSystem.String,"",method);
         var api=new CodecDictionaryKeyApi<TypeReference,MethodReference>(module.TypeSystem.Object,module.TypeSystem.String,module.ImportReference(typeof(IFormattable)),
             module.ImportReference(typeof(CultureInfo).GetProperty("InvariantCulture")!.GetMethod!),module.ImportReference(typeof(IFormattable).GetMethod("ToString")!),module.ImportReference(typeof(object).GetMethod("ToString")!));

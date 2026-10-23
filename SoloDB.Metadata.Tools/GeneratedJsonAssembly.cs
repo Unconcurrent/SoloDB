@@ -315,18 +315,6 @@ public static partial class GeneratedJsonAssembly
 
     internal static void Delegate(ILProcessor il, GenericInstanceType type, MethodReference method)
     {
-        if(type.ElementType.Name=="JsonDirectWriter`2" && method.Parameters[0].ParameterType is not ByReferenceType)
-        {
-            var module=il.Body.Method.Module;
-            var adapter=new MethodDefinition(method.Name+"Ref"+il.Body.Method.DeclaringType.Methods.Count,MethodAttributes.Assembly|MethodAttributes.Static|MethodAttributes.HideBySig,module.TypeSystem.Void);
-            adapter.Parameters.Add(new ParameterDefinition(new ByReferenceType(module.ImportReference(type.GenericArguments[0]))));
-            var arguments=method is GenericInstanceMethod closed?closed.GenericArguments.ToArray():Array.Empty<TypeReference>();
-            foreach(var parameter in method.Parameters.Skip(1))adapter.Parameters.Add(new ParameterDefinition(module.ImportReference(OriginalArgumentSources.Close(parameter.ParameterType,method.DeclaringType,arguments))));
-            il.Body.Method.DeclaringType.Methods.Add(adapter);
-            var body=adapter.Body.GetILProcessor();body.Emit(OpCodes.Ldarg_0);body.Emit(OpCodes.Ldobj,module.ImportReference(type.GenericArguments[0]));
-            body.Emit(OpCodes.Ldarg_1);body.Emit(OpCodes.Ldarg_2);body.Emit(OpCodes.Call,module.ImportReference(method));body.Emit(OpCodes.Ret);
-            method=adapter;
-        }
         il.Emit(OpCodes.Ldnull); il.Emit(OpCodes.Ldftn, method);
         var ctor = new MethodReference(".ctor", il.Body.Method.Module.TypeSystem.Void, type) { HasThis = true };
         ctor.Parameters.Add(new ParameterDefinition(il.Body.Method.Module.TypeSystem.Object));
