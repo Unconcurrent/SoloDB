@@ -16,7 +16,7 @@ module internal CurrentAssembly =
 
     type Inputs = { Arguments: string[]; Dependencies: string[] }
 
-    let inputs (arguments: string[]) projectDirectory =
+    let inputsWith (observe: Action<string>) (arguments: string[]) projectDirectory =
         let path (value: string) = Path.GetFullPath(if Path.IsPathRooted(value) then value else Path.Combine(projectDirectory,value))
         let dependencies = ResizeArray<string>()
         // FSharp response files contain one option per nonempty, noncomment line,
@@ -26,15 +26,22 @@ module internal CurrentAssembly =
                 if argument.StartsWith("@", StringComparison.Ordinal) then
                     let file = path (argument.TrimStart('@'))
                     dependencies.Add(file)
+                    if not(isNull observe) then observe.Invoke(file)
                     yield! File.ReadLines(file)
                            |> Seq.choose(fun line -> if String.IsNullOrWhiteSpace(line) || line.StartsWith("#", StringComparison.Ordinal) then None else Some(line.Trim()))
                            |> expanded
                 else yield argument
         }
         let expanded = expanded arguments |> Seq.toArray
+        if not(isNull observe) then
+            for argument in expanded do
+                let reference = CompilerContext.ReferenceArgument(argument)
+                if not(isNull reference) then observe.Invoke(path reference)
         { Arguments = expanded; Dependencies = dependencies.ToArray() }
 
-    let acquire (project: FSharpCheckProjectResults) (inputs: Inputs) projectDirectory assemblyName =
+    let inputs arguments projectDirectory = inputsWith null arguments projectDirectory
+
+    let acquireWith (observe: Action<string>) (project: FSharpCheckProjectResults) (inputs: Inputs) projectDirectory assemblyName =
         let path (value: string) = Path.GetFullPath(if Path.IsPathRooted(value) then value else Path.Combine(projectDirectory,value))
         let dependencies = ResizeArray<string>(inputs.Dependencies)
         let arguments =
@@ -75,6 +82,7 @@ module internal CurrentAssembly =
                         optionValue "versionfile" argument |> Option.map(fun file ->
                             let file = path file
                             dependencies.Add(file)
+                            if not(isNull observe) then observe.Invoke(file)
                             use reader = File.OpenText(file)
                             reader.ReadLine()))))
             |> Option.map(fun value ->
@@ -97,6 +105,7 @@ module internal CurrentAssembly =
         | None -> ()
         | Some path ->
             dependencies.Add(path)
+            if not(isNull observe) then observe.Invoke(path)
             let bytes = File.ReadAllBytes(path)
             identity.PublicKey <-
                 if publicSign || delaySign then bytes else
@@ -104,6 +113,8 @@ module internal CurrentAssembly =
         { Identity = identity
           FullSigningKeyFile = if publicSign || delaySign then "" else defaultArg keyFile ""
           Dependencies = dependencies.ToArray() }
+
+    let acquire project inputs projectDirectory assemblyName = acquireWith null project inputs projectDirectory assemblyName
 
     let reference (identity: AssemblyNameReference) (assembly: FSharpAssembly) =
         if not(String.IsNullOrEmpty assembly.QualifiedName) then AssemblyNameReference.Parse(assembly.QualifiedName)

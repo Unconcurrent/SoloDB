@@ -7,12 +7,15 @@ namespace SoloDatabase.Metadata.Tools;
 
 public static class CompilerContext
 {
-    public static bool IsContextArgument(string argument)
+    internal static string? ReferenceArgument(string argument)
     {
         var prefix = argument.StartsWith("-r:", StringComparison.Ordinal) ? 3 :
             argument.StartsWith("--reference:", StringComparison.Ordinal) ? 12 : 0;
-        return prefix != 0 && Path.GetFileName(argument.Substring(prefix).Trim('"')) == "SoloDB.ProjectContext.dll";
+        return prefix == 0 ? null : argument.Substring(prefix).Trim('"');
     }
+
+    public static bool IsContextArgument(string argument) => ReferenceArgument(argument) is { } path &&
+        Path.GetFileName(path) == "SoloDB.ProjectContext.dll";
 
     public static void Write(string output, string project, string mode, string[] arguments, string template = "")
         => Write(output, project, mode, arguments, template, "");

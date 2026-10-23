@@ -1,18 +1,23 @@
 using System;
+using System.Collections;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Linq;
 using Microsoft.Build.Framework;
 
 namespace SoloDatabase.Metadata.Tools;
 
+[RunInMTA]
 public sealed class PrepareFSharpProject : ICancelableTask
 {
     private readonly object gate = new();
     private Process? child;
+    private string? compilerInput;
     private bool canceled;
     public IBuildEngine BuildEngine { get; set; } = null!;
     public ITaskHost HostObject { get; set; } = null!;
@@ -24,12 +29,33 @@ public sealed class PrepareFSharpProject : ICancelableTask
     public string HelperOutput { get; set; } = "";
     public string Selection { get; set; } = "";
     public bool ProfileBuild { get; set; }
+    public string[] CompilerTargets { get; set; } = Array.Empty<string>();
+    public bool Prepare { get; set; } = true;
+    public ITaskItem[] AcquisitionInputs { get; set; } = Array.Empty<ITaskItem>();
     public ITaskItem[] Arguments { get; set; } = Array.Empty<ITaskItem>();
     [Required] public string AssemblyName { get; set; } = "";
     [Required] public string AttributeSource { get; set; } = "";
     [Required] public string Template { get; set; } = "";
     [Required] public string DotNetHost { get; set; } = "";
     [Output] public string ActiveTemplate { get; private set; } = "";
+    [Output] public bool Prepared { get; private set; }
+    [Output] public ITaskItem[] CompilerArguments { get; private set; } = Array.Empty<ITaskItem>();
+
+    private bool Compile()
+    {
+        lock (gate) { if (canceled) return false; }
+        if (BuildEngine is not IBuildEngine3 engine)
+            throw new InvalidOperationException("Current-project compilation requires the standard MSBuild task engine.");
+        // Match CallTarget's current-project request, including requested outputs.
+        var result = engine.BuildProjectFilesInParallel(new string[] { null! }, CompilerTargets,
+            new IDictionary[] { null! }, null!, new string[] { null! }, true);
+        if (result.TargetOutputsPerProject.Count != 0 &&
+            result.TargetOutputsPerProject[0].TryGetValue("CoreCompile",out var arguments)) CompilerArguments = arguments;
+        if (result.TargetOutputsPerProject.Count != 0 &&
+            result.TargetOutputsPerProject[0].TryGetValue("SoloDBFSharpCompiledOutput",out var inputs) && inputs.Length == 1)
+            compilerInput = inputs[0].ItemSpec;
+        lock (gate) { return !canceled && result.Result; }
+    }
 
     public void Cancel()
     {
@@ -47,11 +73,15 @@ public sealed class PrepareFSharpProject : ICancelableTask
     public bool Execute()
     {
         ActiveTemplate = "";
+        Prepared = false;
+        CompilerArguments = Array.Empty<ITaskItem>();
+        compilerInput = null;
         var directory = Path.Combine(Path.GetDirectoryName(Context)!, Guid.NewGuid().ToString("N"));
         var request = Path.Combine(directory, "project.xml");
         var response = request + ".result";
         try
         {
+            var retained = CompilerTargets.Length != 0;
             Directory.CreateDirectory(directory);
             if ((Project.Length == 0) != (Arguments.Length == 0))
                 throw new InvalidOperationException("Current FSharp project and compiler arguments must be supplied together.");
@@ -72,7 +102,20 @@ public sealed class PrepareFSharpProject : ICancelableTask
                         value => (ITaskItem)new ProjectArgument(value)));
                 }
             }
+            if (retained && !Prepare) return Compile();
             if (ProfileBuild) input.Add(new XAttribute("timings", "true"));
+            if (retained)
+            {
+                input.Add(new XAttribute("awaitCompiler", "true"));
+                var files = new XElement("acquisitionInputs");
+                foreach (var file in AcquisitionInputs)
+                {
+                    var path = file.ItemSpec;
+                    if (!Path.IsPathRooted(path)) path = Path.Combine(Path.GetDirectoryName(Project)!,path);
+                    files.Add(new XElement("file",Path.GetFullPath(path)));
+                }
+                input.Add(files);
+            }
             if (Project.Length != 0)
             {
                 input.Add(new XAttribute("project", Project));
@@ -89,6 +132,7 @@ public sealed class PrepareFSharpProject : ICancelableTask
                 {
                     WorkingDirectory = Project.Length == 0 ? Environment.CurrentDirectory : Path.GetDirectoryName(Path.GetFullPath(Project))!,
                     UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+                    RedirectStandardInput = retained,
                     CreateNoWindow = true
                 }
             };
@@ -98,10 +142,31 @@ public sealed class PrepareFSharpProject : ICancelableTask
                 process.Start();
                 child = process;
             }
+            Task<string>? output = null, errors = null;
             try
             {
-                var output = process.StandardOutput.ReadToEndAsync();
-                var errors = process.StandardError.ReadToEndAsync();
+                output = process.StandardOutput.ReadToEndAsync();
+                errors = process.StandardError.ReadToEndAsync();
+                if (retained)
+                {
+                    if (!Compile()) return false;
+                    try
+                    {
+                        if (!process.HasExited)
+                        {
+                            var actual = CompilerArguments.Length == 0 ? Arguments : CompilerArguments;
+                            string FullPath(string path) => Path.GetFullPath(Path.IsPathRooted(path) ? path :
+                                Path.Combine(Path.GetDirectoryName(Project)!,path));
+                            new XElement("compiler",new XAttribute("captured",CompilerArguments.Length != 0),
+                                new XAttribute("sameOutput",compilerInput != null && FullPath(compilerInput) == FullPath(Input)),
+                                actual.Select(argument => new XElement("argument",argument.ItemSpec)))
+                                .Save(process.StandardInput);
+                            process.StandardInput.Close();
+                        }
+                    }
+                    catch (IOException) when (process.HasExited) { }
+                    catch (InvalidOperationException) when (process.HasExited) { }
+                }
                 process.WaitForExit();
                 var text = output.GetAwaiter().GetResult() + errors.GetAwaiter().GetResult();
                 lock (gate) { if (canceled) return false; }
@@ -139,7 +204,11 @@ public sealed class PrepareFSharpProject : ICancelableTask
                         process.ExitCode + Environment.NewLine + text);
                     return false;
                 }
-                if (!failed) ActiveTemplate = (string?)result.Attribute("template") ?? "";
+                if (!failed)
+                {
+                    ActiveTemplate = (string?)result.Attribute("template") ?? "";
+                    Prepared = (bool?)result.Attribute("deferred") != true;
+                }
                 return !failed;
             }
             finally
@@ -151,10 +220,13 @@ public sealed class PrepareFSharpProject : ICancelableTask
                     child = null;
                 }
                 process.WaitForExit();
+                if (output != null) output.GetAwaiter().GetResult();
+                if (errors != null) errors.GetAwaiter().GetResult();
             }
         }
         catch (Exception error)
         {
+            lock (gate) { if (canceled) return false; }
             BuildEngine.LogErrorEvent(new BuildErrorEventArgs("SoloDB", "SOLO003", Context, 0, 0, 0, 0,
                 error.ToString(), null, nameof(PrepareFSharpProject)));
             return false;

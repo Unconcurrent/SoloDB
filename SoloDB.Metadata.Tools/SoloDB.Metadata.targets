@@ -68,7 +68,7 @@
   </Target>
   <Target Name="SoloDBGenerateHelperImplementation" AfterTargets="CoreCompile" BeforeTargets="GenerateBuildDependencyFile;CopyFilesToOutputDirectory;_ComputeResolvedCopyLocalPublishAssets;ComputeResolvedFilesToPublishList;BuiltProjectOutputGroup;DebugSymbolsProjectOutputGroup"
           DependsOnTargets="$(_SoloDBHelperImplementationDependsOn)"
-          Condition="'$(SoloDBGeneratedHelper)' == 'true' and '$(DesignTimeBuild)' != 'true'">
+          Condition="'$(SoloDBGeneratedHelper)' == 'true' and '$(DesignTimeBuild)' != 'true' and '$(_SoloDBRetainedCompilation)' != 'true'">
     <!-- Binding and dependency shape always run after a work skip. Compiler aliases
          keep the immutable contract; runtime copy selects the actual implementation. -->
     <GetAssemblyIdentity AssemblyFiles="$(SoloDBGeneratedImplementation)" Condition="'$(SoloDBGeneratedActive)' == 'true'">

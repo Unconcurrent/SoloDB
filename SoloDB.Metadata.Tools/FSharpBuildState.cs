@@ -95,7 +95,9 @@ public sealed class FSharpCompletionInputs : ITask
     [Required] public string OutputDirectory { get; set; } = "";
     public ITaskItem[] References { get; set; } = Array.Empty<ITaskItem>();
     public ITaskItem[] ImplementationInputs { get; set; } = Array.Empty<ITaskItem>();
+    public ITaskItem[] AdditionalInputs { get; set; } = Array.Empty<ITaskItem>();
     public bool ReadSelectionOnly { get; set; }
+    [Output] public bool NeedsWork { get; private set; } = true;
     [Output] public string Helper { get; private set; } = "";
     [Output] public string Template { get; private set; } = "";
     [Output] public string SigningKey { get; private set; } = "";
@@ -109,6 +111,7 @@ public sealed class FSharpCompletionInputs : ITask
     {
         Helper = Template = SigningKey = Assembly = Symbols = CompilerSymbols = "";
         Changed = false;
+        NeedsWork = true;
         Dependencies = Array.Empty<string>();
         try
         {
@@ -130,7 +133,20 @@ public sealed class FSharpCompletionInputs : ITask
                 Helper = (string?)state.Attribute("helper") ?? "";
                 Dependencies = Dependencies.Concat(state.Elements("dependency").Select(value => value.Value)).Distinct().ToArray();
                 if (File.Exists(Assembly) && (Helper.Length == 0 || File.Exists(Helper)) && (Symbols.Length == 0 || File.Exists(Symbols)) &&
-                    (CompilerSymbols.Length == 0 || File.Exists(CompilerSymbols))) return true;
+                    (CompilerSymbols.Length == 0 || File.Exists(CompilerSymbols)))
+                {
+                    if (File.Exists(Stamp))
+                    {
+                        var stamp = File.GetLastWriteTimeUtc(Stamp);
+                        NeedsWork = new[] { InputFile, Input, Context, Template, SigningKey }
+                            .Concat(References.Select(item => item.ItemSpec))
+                            .Concat(ImplementationInputs.Select(item => item.ItemSpec))
+                            .Concat(AdditionalInputs.Select(item => item.ItemSpec)).Concat(Dependencies)
+                            .Where(path => path.Length != 0)
+                            .Any(path => !File.Exists(path) || File.GetLastWriteTimeUtc(path) > stamp);
+                    }
+                    return true;
+                }
             }
             File.Delete(Stamp);
             return true;
