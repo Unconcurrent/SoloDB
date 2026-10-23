@@ -106,7 +106,7 @@ This example activates generation in Release and omits it in Debug. Any user-def
 
 When generation is inactive, ordinary JIT execution discovers supported type operations lazily at runtime. Registered generated operations take precedence when present. NativeAOT needs generated coverage; runtime discovery is not a substitute for missing operations. PublishAot belongs on the consuming executable project, including when its models live in a .NET Standard library.
 
-The compiler and provider tooling are build-time dependencies and are not copied into application output. Keep generated runtime helper assemblies delivered by the package build integration: those contain application operations rather than the compiler tooling.
+Both C# and F# builds emit application operations into a project-specific runtime helper assembly. Package build integration generates and delivers the helper during normal builds and publishing. Keep it with managed application output; NativeAOT consumes it during native compilation. The generator and provider tooling are build-time dependencies and are not deployed with the application.
 
 The build integration supports .NET SDK 8 and later; installing SDK 10 separately is unnecessary. F# analysis uses the installed SDK's .NET host. The runtime library requires FSharp.Core 8.0.100 or later, and projects can retain a newer FSharp.Core version.
 
