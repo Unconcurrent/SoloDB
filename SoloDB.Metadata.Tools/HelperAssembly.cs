@@ -238,6 +238,13 @@ internal static class HelperAssembly
 
     internal static void Write(AssemblyDefinition assembly, string path, string? keyFile)
     {
+        void Compact(TypeDefinition type)
+        {
+            foreach (var method in type.Methods)
+                if (method.HasBody) CompactBranches(method.Body);
+            foreach (var nested in type.NestedTypes) Compact(nested);
+        }
+        foreach (var type in assembly.MainModule.Types) Compact(type);
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         var parameters = new WriterParameters { DeterministicMvid = true, Timestamp = 0 };
         if (!string.IsNullOrEmpty(keyFile)) parameters.StrongNameKeyBlob = File.ReadAllBytes(keyFile);
@@ -245,6 +252,32 @@ internal static class HelperAssembly
         assembly.Write(bytes, parameters);
         var content = bytes.ToArray();
         Publish(path, content);
+    }
+
+    private static void CompactBranches(MethodBody body)
+    {
+        var offset = 0;
+        foreach (var instruction in body.Instructions)
+        {
+            instruction.Offset = offset;
+            offset += instruction.GetSize();
+        }
+        // Use the original offsets throughout. Other contractions only reduce
+        // these spans, so every admitted short branch remains in range.
+        foreach (var instruction in body.Instructions)
+        {
+            if (instruction.OpCode.OperandType != OperandType.InlineBrTarget) continue;
+            var distance = ((Instruction)instruction.Operand).Offset - (instruction.Offset + instruction.OpCode.Size + 4);
+            if (distance < sbyte.MinValue || distance > sbyte.MaxValue) continue;
+            instruction.OpCode = instruction.OpCode.Code switch {
+                Code.Br => OpCodes.Br_S, Code.Brfalse => OpCodes.Brfalse_S, Code.Brtrue => OpCodes.Brtrue_S,
+                Code.Beq => OpCodes.Beq_S, Code.Bge => OpCodes.Bge_S, Code.Bgt => OpCodes.Bgt_S,
+                Code.Ble => OpCodes.Ble_S, Code.Blt => OpCodes.Blt_S, Code.Bne_Un => OpCodes.Bne_Un_S,
+                Code.Bge_Un => OpCodes.Bge_Un_S, Code.Bgt_Un => OpCodes.Bgt_Un_S,
+                Code.Ble_Un => OpCodes.Ble_Un_S, Code.Blt_Un => OpCodes.Blt_Un_S,
+                Code.Leave => OpCodes.Leave_S, _ => instruction.OpCode
+            };
+        }
     }
     internal static void Publish(string path, byte[] content)
     {
