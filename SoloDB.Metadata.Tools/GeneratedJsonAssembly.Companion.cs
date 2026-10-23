@@ -46,7 +46,7 @@ public static partial class GeneratedJsonAssembly
         var il = core.Body.GetILProcessor();
         var definitions = new GeneratedJsonDefinitions(references) { SchemaWitnesses = new List<GeneratedSchemaIndexes.Witness>() };
         Phase("inputs");
-        GeneratedQueries.Preserve(module,core,product,queryWitnesses);
+        GeneratedQueries.Preserve(definitions,module,core,product,queryWitnesses);
         GeneratedQueries.RegisterExpressions(module,il,product,queryLambdas);
         GeneratedQueries.Register(module,il,product,queries);
         GeneratedQueries.RegisterProviders(module,il,product,providerOperations);

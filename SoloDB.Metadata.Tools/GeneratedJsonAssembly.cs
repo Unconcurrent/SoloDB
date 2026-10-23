@@ -58,12 +58,12 @@ public static partial class GeneratedJsonAssembly
         if (aliases != null) owner.Attributes = TypeAttributes.NotPublic | TypeAttributes.Abstract | TypeAttributes.Sealed;
         var entry = Method(owner, "register", module.TypeSystem.Void);
         var il = entry.Body.GetILProcessor();
-        if (queryWitnesses != null) GeneratedQueries.Preserve(module, entry, product, queryWitnesses);
+        var definitions = new GeneratedJsonDefinitions(references);
+        if (queryWitnesses != null) GeneratedQueries.Preserve(definitions,module, entry, product, queryWitnesses);
         if (queryLambdas != null) GeneratedQueries.RegisterExpressions(module, il, product, queryLambdas);
         if (queries != null) GeneratedQueries.Register(module, il, product, queries);
         if (providerOperations != null) GeneratedQueries.RegisterProviders(module, il, product, providerOperations);
         if (queryCalls != null) GeneratedQueryCalls.Register(module, owner, il, product, queryCalls);
-        var definitions = new GeneratedJsonDefinitions(references);
         if (argumentSources != null)
             foreach (var source in argumentSources) GeneratedArgumentCapture.Register(definitions,module,owner,il,product,source);
         RegisterModels(definitions,module,owner,il,product,models);
@@ -206,7 +206,7 @@ public static partial class GeneratedJsonAssembly
             var definition = type is GenericInstanceType original ? original.ElementType.FullName : type.FullName;
             var constructionWitnesses = TypeSupport.QueryConstructionMembers(model.Facts.Shape,definition)
                 .Select(name => new GeneratedQueryWitness(name,type));
-            GeneratedQueries.Preserve(module,il.Body.Method,product,memberWitnesses.Concat(constructionWitnesses).ToArray());
+            GeneratedQueries.Preserve(definitions,module,il.Body.Method,product,memberWitnesses.Concat(constructionWitnesses).ToArray());
             var decision = TypeSupport.ForDefinition(model.Facts.Shape,type.FullName);
             var preparation = CodecPreparation.factory(definition,decision,model.Facts.AbstractType);
             var arguments = preparation.Arguments switch {

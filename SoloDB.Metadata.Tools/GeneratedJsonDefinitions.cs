@@ -12,6 +12,7 @@ namespace SoloDatabase.Metadata.Tools;
 internal sealed class GeneratedJsonDefinitions
 {
     private readonly Dictionary<(string Role,string Target,string Representation,string Policy),MethodDefinition> methods;
+    private readonly Dictionary<MethodDefinition,GeneratedQueries.Preservation> preservation;
     private readonly GeneratedJsonDefinitions? native;
     private readonly string[] references;
     private bool utf8VectorPrepared;
@@ -20,9 +21,9 @@ internal sealed class GeneratedJsonDefinitions
     private FSharpOption<CodecBase64VectorApi<TypeReference,MethodReference>> utf16Vector = null!;
 
     internal GeneratedJsonDefinitions(string[]? references = null)
-    { this.references = references ?? Array.Empty<string>(); methods = new(); }
+    { this.references = references ?? Array.Empty<string>(); methods = new(); preservation = new(); }
     private GeneratedJsonDefinitions(GeneratedJsonDefinitions native)
-    { this.native = native; references = native.references; methods = native.methods; Stored = true; }
+    { this.native = native; references = native.references; methods = native.methods; preservation = native.preservation; Stored = true; }
     internal List<GeneratedSchemaIndexes.Witness>? SchemaWitnesses { get; set; }
     internal MethodDefinition? EmptyAttributes { get; set; }
     internal bool Stored { get; }
@@ -30,6 +31,16 @@ internal sealed class GeneratedJsonDefinitions
     internal GeneratedJsonDefinitions NativeView => native ?? this;
     internal GeneratedJsonDefinitions StoredView() => new(this);
     private string Role(string role) => TypeSupport.OperationRole(Stored,role);
+
+    internal GeneratedQueries.Preservation Preservation(ModuleDefinition module,MethodDefinition entry,AssemblyDefinition product)
+    {
+        if (!preservation.TryGetValue(entry,out var value))
+        {
+            value = new GeneratedQueries.Preservation(module,entry,product);
+            preservation.Add(entry,value);
+        }
+        return value;
+    }
 
     internal FSharpOption<CodecBase64VectorApi<TypeReference,MethodReference>> Base64Vector(ModuleDefinition module,bool utf16)
     {

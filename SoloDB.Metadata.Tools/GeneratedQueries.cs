@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
@@ -128,22 +129,45 @@ internal static class GeneratedQueries
         entry.CustomAttributes.Add(dependency);
     }
 
-    internal static void Preserve(ModuleDefinition module, MethodDefinition entry, AssemblyDefinition product, GeneratedQueryWitness[] witnesses)
+    internal sealed class Preservation
     {
-        var attribute = product.MainModule.GetType("System.Diagnostics.CodeAnalysis.DynamicDependencyAttribute");
-        var constructor = module.ImportReference(attribute.Methods.Single(method => method.IsConstructor && method.Parameters.Count == 3 && method.Parameters[0].ParameterType.FullName == "System.String"));
-        foreach (var witness in witnesses)
+        private readonly ModuleDefinition module;
+        private readonly MethodDefinition entry;
+        private readonly MethodReference constructor;
+        private readonly HashSet<(object?,object?,object?)> values = new();
+
+        internal Preservation(ModuleDefinition module,MethodDefinition entry,AssemblyDefinition product)
         {
-            var dependency = new CustomAttribute(constructor);
-            dependency.ConstructorArguments.Add(new CustomAttributeArgument(module.TypeSystem.String, witness.Signature));
-            WitnessTarget(dependency,module,witness.Type);
-            if (!entry.CustomAttributes.Any(existing => existing.Constructor.FullName == constructor.FullName &&
-                existing.Constructor.DeclaringType.Scope.ToString() == constructor.DeclaringType.Scope.ToString() &&
-                existing.ConstructorArguments.Select(argument => argument.Value)
-                    .SequenceEqual(dependency.ConstructorArguments.Select(argument => argument.Value))))
+            this.module = module;
+            this.entry = entry;
+            var attribute = product.MainModule.GetType("System.Diagnostics.CodeAnalysis.DynamicDependencyAttribute");
+            constructor = module.ImportReference(attribute.Methods.Single(method => method.IsConstructor && method.Parameters.Count == 3 && method.Parameters[0].ParameterType.FullName == "System.String"));
+            var signature = constructor.FullName;
+            var scope = constructor.DeclaringType.Scope.ToString();
+            foreach (var existing in entry.CustomAttributes)
+                if (existing.Constructor.FullName == signature && existing.Constructor.DeclaringType.Scope.ToString() == scope &&
+                    existing.ConstructorArguments.Count == 3)
+                    values.Add((existing.ConstructorArguments[0].Value,existing.ConstructorArguments[1].Value,existing.ConstructorArguments[2].Value));
+        }
+
+        internal void Add(GeneratedQueryWitness[] witnesses)
+        {
+            foreach (var witness in witnesses)
+            {
+                var dependency = new CustomAttribute(constructor);
+                dependency.ConstructorArguments.Add(new CustomAttributeArgument(module.TypeSystem.String,witness.Signature));
+                WitnessTarget(dependency,module,witness.Type);
+                var key = (dependency.ConstructorArguments[0].Value,dependency.ConstructorArguments[1].Value,dependency.ConstructorArguments[2].Value);
+                if (values.Contains(key)) continue;
                 entry.CustomAttributes.Add(dependency);
+                values.Add(key);
+            }
         }
     }
+
+    internal static void Preserve(GeneratedJsonDefinitions definitions,ModuleDefinition module,MethodDefinition entry,
+        AssemblyDefinition product,GeneratedQueryWitness[] witnesses)
+        => definitions.Preservation(module,entry,product).Add(witnesses);
 
     internal static void Register(ModuleDefinition module, ILProcessor il, AssemblyDefinition product, GeneratedQueryOperation[] operations)
     {

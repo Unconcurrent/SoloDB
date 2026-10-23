@@ -124,7 +124,7 @@ public static partial class GeneratedJsonAssembly
                 }
             }
         }
-        GeneratedQueries.Preserve(module,il.Body.Method,product,witnesses.ToArray());
+        GeneratedQueries.Preserve(definitions,module,il.Body.Method,product,witnesses.ToArray());
         if (model.UnionCases != null && model.UnionRoot == null)
         {
             var nullBacked = !model.Facts.Members.Any(member => member.Name == "Tag");
