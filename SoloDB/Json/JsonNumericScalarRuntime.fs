@@ -50,9 +50,9 @@ module internal JsonNumericScalarRuntime =
         admit target
         let signature = typeof<JsonDirectWriter<obj,byte>>.GetMethod("Invoke",BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance).GetParameters()
         let close index = signature[index].ParameterType.GetElementType().GetGenericTypeDefinition().MakeGenericType(element).MakeByRefType()
-        let method = DynamicMethod("WriteScalar",typeof<Void>,[|target;close 1;close 2|],typeof<JsonRawPrimitive>.Module,true)
+        let method = DynamicMethod("WriteScalar",typeof<Void>,[|target.MakeByRefType();close 1;close 2|],typeof<JsonRawPrimitive>.Module,true)
         let write = typeof<JsonRawPrimitive>.GetMethod("WriteSingle",flags).MakeGenericMethod(element,output) :> MethodBase
-        CodecScalarAdapterEmitter.rawWriter (RuntimeCodecIL(method.GetILGenerator())) (widen target) write
+        CodecScalarAdapterEmitter.rawWriter (RuntimeCodecIL(method.GetILGenerator(),target.MakeByRefType())) (widen target) write
         method
 
     let writerMethod target element output =

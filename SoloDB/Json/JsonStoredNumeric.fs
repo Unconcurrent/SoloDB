@@ -12,6 +12,14 @@ open SoloDatabase.Metadata.CodecGeneration
 type internal JsonStoredNumeric private () =
     static member internal PrepareDecimal(value: decimal) = NumericKey.prepare(ExactNumber.ofDecimal value)
     static member internal PrepareBigInteger(value: BigInteger) = NumericKey.prepareInteger value
+    static member internal ValidateDecimal(_value: decimal, _utf16: bool): unit = ()
+    static member internal ValidateBigInteger(value: BigInteger, utf16: bool) =
+        let struct(sign,_,count) = BigIntegerMagnitude.Read(value)
+        // At most five base-100 pairs per binary limb, plus header and quotes.
+        if sign <> 0 && int64 count * 10L + 26L > int64 Int32.MaxValue then
+            let prepared = NumericKey.prepareInteger value
+            let length = if utf16 then NumericKey.length prepared else NumericKey.utf8Length prepared
+            Checked.(+) length 2 |> ignore
     static member internal Length(value: NumericKeyDigits) = NumericKey.length value
     static member internal Utf8Length(value: NumericKeyDigits) = NumericKey.utf8Length value
     static member internal Unit(value: NumericKeyDigits, index: int) = NumericKey.unitAt value index

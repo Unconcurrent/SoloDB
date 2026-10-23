@@ -11,7 +11,7 @@ type internal CodecDecimalWriterApi<'Type,'Method,'Field> = {
 
 module internal CodecDecimalWriterEmitter =
     /// Emits the Win32 DECIMAL coefficient/sign/scale operations, not a formatted-text detour.
-    let writerFrom (il: CodecIL<'T,'M,'F>) (api: CodecDecimalWriterApi<'T,'M,'F>) utf16 address =
+    let private outputWriterFrom (il: CodecIL<'T,'M,'F>) (api: CodecDecimalWriterApi<'T,'M,'F>) utf16 address =
         let output = api.Digits.Output
         let low = il.Local output.UInt32
         let middle = il.Local output.UInt32
@@ -34,7 +34,6 @@ module internal CodecDecimalWriterEmitter =
         let remaining = il.Local output.Int32
         let reference = il.Local output.Reference
         let source = il.Local output.Reference
-        let mode = il.Local output.Int32
         let chunks = Array.init 4 (fun _ -> il.Local output.UInt32)
         let load local = il.EmitLocal(OpCodes.Ldloc,local)
         let save local = il.EmitLocal(OpCodes.Stloc,local)
@@ -93,9 +92,6 @@ module internal CodecDecimalWriterEmitter =
         let trimmed = il.Label()
         let trim = il.Label()
         let sized = il.Label()
-        let fitting = il.Label()
-        let list = il.Label()
-        let discarded = il.Label()
         let complete = il.Label()
         address(); il.EmitMethod(OpCodes.Call,api.Source); save source
         read 0 api.Read32; save flags
@@ -148,107 +144,108 @@ module internal CodecDecimalWriterEmitter =
         load scale; constant 0; il.Emit OpCodes.Cgt_Un; il.Emit OpCodes.Add; save length
         il.Mark coefficient
         let selected = CodecOutputEmitter.beginOperation il output state (fun () -> load length)
-        il.Emit OpCodes.Dup; il.EmitBranch(OpCodes.Brfalse,discarded)
-        save mode
-        captureChunks()
-        load mode; constant 1; il.EmitBranch(OpCodes.Bne_Un,list)
-        il.Mark fitting
-        CodecOutputEmitter.admitSpan il output selected destination state
-        destination(); il.EmitMethod(OpCodes.Call,output.Start); save reference
-        state(); il.EmitMethod(OpCodes.Call,output.Position); save position
-        let store offset value = CodecOutputEmitter.store il output utf16 reference offset value
-        let unsigned = il.Label()
-        load negative; il.EmitBranch(OpCodes.Brfalse,unsigned)
-        store (fun () -> load position) (fun () -> constant(int '-'))
-        il.Mark unsigned
-        let noFraction = il.Label()
-        let leading = il.Label()
-        load scale; il.EmitBranch(OpCodes.Brfalse,noFraction)
-        // Place the decimal point and leading zeros before the reverse coefficient loop.
-        let dotReady = il.Label()
-        load point; constant 0; il.EmitBranch(OpCodes.Ble,leading)
-        load position; load negative; il.Emit OpCodes.Add; load point; il.Emit OpCodes.Add; save dot
-        store (fun () -> load dot) (fun () -> constant(int '.'))
-        il.EmitBranch(OpCodes.Br,dotReady)
-        il.Mark leading
-        load position; load negative; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Add; save dot
-        store (fun () -> load dot; constant 1; il.Emit OpCodes.Sub) (fun () -> constant(int '0'))
-        store (fun () -> load dot) (fun () -> constant(int '.'))
-        load dot; constant 1; il.Emit OpCodes.Add; save index
-        let zeros = il.Label()
-        let zerosDone = il.Label()
-        constant 0; load point; il.Emit OpCodes.Sub; save remaining
-        il.Mark zeros
-        load remaining; il.EmitBranch(OpCodes.Brfalse,zerosDone)
-        store (fun () -> load index) (fun () -> constant(int '0'))
-        load index; constant 1; il.Emit OpCodes.Add; save index
-        load remaining; constant 1; il.Emit OpCodes.Sub; save remaining
-        il.EmitBranch(OpCodes.Br,zeros)
-        il.Mark zerosDone
-        il.EmitBranch(OpCodes.Br,dotReady)
-        il.Mark noFraction
-        constant -1; save dot
-        il.Mark dotReady
-        load position; load length; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Sub; save index
-        let image = CodecDigitWriterEmitter.capture il api.Digits (fun () -> load digits; constant 1; il.Emit OpCodes.Cgt)
-        for chunk = 0 to 3 do
-            let absent = il.Label()
-            load digits; constant(chunk*9); il.Emit OpCodes.Sub; save remaining
-            load remaining; constant 0; il.EmitBranch(OpCodes.Ble,absent)
-            let bounded = il.Label()
-            load remaining; constant 9; il.EmitBranch(OpCodes.Ble,bounded)
-            constant 9; save remaining
-            il.Mark bounded
-            CodecDigitWriterEmitter.reverseChunk il api.Digits utf16 image chunks[chunk] remaining reference index (Some dot)
-            il.Mark absent
-        state(); load length; il.EmitMethod(OpCodes.Call,output.Advance)
-        il.EmitBranch(OpCodes.Br,complete)
-        il.Mark list
-        CodecOutputEmitter.listBody il output utf16 selected state false None (Some (fun () -> load length)) (fun append ->
-            let listUnsigned = il.Label()
-            load negative; il.EmitBranch(OpCodes.Brfalse,listUnsigned)
-            append(fun () -> constant(int '-'))
-            il.Mark listUnsigned
-            let listPositive = il.Label()
-            load point; constant 0; il.EmitBranch(OpCodes.Bgt,listPositive)
-            append(fun () -> constant(int '0')); append(fun () -> constant(int '.'))
+        if output.Kind <> CodecOutputKind.Validation then captureChunks()
+        if output.Kind = CodecOutputKind.Span then
+            CodecOutputEmitter.admitSpan il output selected destination state
+            destination(); il.EmitMethod(OpCodes.Call,output.Start); save reference
+            state(); il.EmitMethod(OpCodes.Call,output.Position); save position
+            let store offset value = CodecOutputEmitter.store il output utf16 reference offset value
+            let unsigned = il.Label()
+            load negative; il.EmitBranch(OpCodes.Brfalse,unsigned)
+            store (fun () -> load position) (fun () -> constant(int '-'))
+            il.Mark unsigned
+            let noFraction = il.Label()
+            let leading = il.Label()
+            load scale; il.EmitBranch(OpCodes.Brfalse,noFraction)
+            // Place the decimal point and leading zeros before the reverse coefficient loop.
+            let dotReady = il.Label()
+            load point; constant 0; il.EmitBranch(OpCodes.Ble,leading)
+            load position; load negative; il.Emit OpCodes.Add; load point; il.Emit OpCodes.Add; save dot
+            store (fun () -> load dot) (fun () -> constant(int '.'))
+            il.EmitBranch(OpCodes.Br,dotReady)
+            il.Mark leading
+            load position; load negative; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Add; save dot
+            store (fun () -> load dot; constant 1; il.Emit OpCodes.Sub) (fun () -> constant(int '0'))
+            store (fun () -> load dot) (fun () -> constant(int '.'))
+            load dot; constant 1; il.Emit OpCodes.Add; save index
+            let zeros = il.Label()
+            let zerosDone = il.Label()
             constant 0; load point; il.Emit OpCodes.Sub; save remaining
-            let zeroLoop = il.Label()
-            let zeroDone = il.Label()
-            il.Mark zeroLoop
-            load remaining; il.EmitBranch(OpCodes.Brfalse,zeroDone)
-            append(fun () -> constant(int '0'))
+            il.Mark zeros
+            load remaining; il.EmitBranch(OpCodes.Brfalse,zerosDone)
+            store (fun () -> load index) (fun () -> constant(int '0'))
+            load index; constant 1; il.Emit OpCodes.Add; save index
             load remaining; constant 1; il.Emit OpCodes.Sub; save remaining
-            il.EmitBranch(OpCodes.Br,zeroLoop)
-            il.Mark zeroDone
-            il.Mark listPositive
-            constant 0; save index
+            il.EmitBranch(OpCodes.Br,zeros)
+            il.Mark zerosDone
+            il.EmitBranch(OpCodes.Br,dotReady)
+            il.Mark noFraction
             constant -1; save dot
-            let noPoint = il.Label()
-            load scale; il.EmitBranch(OpCodes.Brfalse,noPoint)
-            load point; constant 0; il.EmitBranch(OpCodes.Ble,noPoint)
-            load point; save dot
-            il.Mark noPoint
+            il.Mark dotReady
+            load position; load length; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Sub; save index
             let image = CodecDigitWriterEmitter.capture il api.Digits (fun () -> load digits; constant 1; il.Emit OpCodes.Cgt)
-            for chunk = 3 downto 0 do
+            for chunk = 0 to 3 do
                 let absent = il.Label()
-                let bounded = il.Label()
                 load digits; constant(chunk*9); il.Emit OpCodes.Sub; save remaining
                 load remaining; constant 0; il.EmitBranch(OpCodes.Ble,absent)
+                let bounded = il.Label()
                 load remaining; constant 9; il.EmitBranch(OpCodes.Ble,bounded)
                 constant 9; save remaining
                 il.Mark bounded
-                CodecDigitWriterEmitter.forwardChunk il api.Digits utf16 image chunks[chunk] remaining (min 9 (29-chunk*9)) index (Some dot) append
+                CodecDigitWriterEmitter.reverseChunk il api.Digits utf16 image chunks[chunk] remaining reference index (Some dot)
                 il.Mark absent
+            state(); load length; il.EmitMethod(OpCodes.Call,output.Advance)
             il.EmitBranch(OpCodes.Br,complete)
-        )
+        elif output.Kind <> CodecOutputKind.Validation then
+            CodecOutputEmitter.listBody il output utf16 state (fun append ->
+                let listUnsigned = il.Label()
+                load negative; il.EmitBranch(OpCodes.Brfalse,listUnsigned)
+                append(fun () -> constant(int '-'))
+                il.Mark listUnsigned
+                let listPositive = il.Label()
+                load point; constant 0; il.EmitBranch(OpCodes.Bgt,listPositive)
+                append(fun () -> constant(int '0')); append(fun () -> constant(int '.'))
+                constant 0; load point; il.Emit OpCodes.Sub; save remaining
+                let zeroLoop = il.Label()
+                let zeroDone = il.Label()
+                il.Mark zeroLoop
+                load remaining; il.EmitBranch(OpCodes.Brfalse,zeroDone)
+                append(fun () -> constant(int '0'))
+                load remaining; constant 1; il.Emit OpCodes.Sub; save remaining
+                il.EmitBranch(OpCodes.Br,zeroLoop)
+                il.Mark zeroDone
+                il.Mark listPositive
+                constant 0; save index
+                constant -1; save dot
+                let noPoint = il.Label()
+                load scale; il.EmitBranch(OpCodes.Brfalse,noPoint)
+                load point; constant 0; il.EmitBranch(OpCodes.Ble,noPoint)
+                load point; save dot
+                il.Mark noPoint
+                let image = CodecDigitWriterEmitter.capture il api.Digits (fun () -> load digits; constant 1; il.Emit OpCodes.Cgt)
+                for chunk = 3 downto 0 do
+                    let absent = il.Label()
+                    let bounded = il.Label()
+                    load digits; constant(chunk*9); il.Emit OpCodes.Sub; save remaining
+                    load remaining; constant 0; il.EmitBranch(OpCodes.Ble,absent)
+                    load remaining; constant 9; il.EmitBranch(OpCodes.Ble,bounded)
+                    constant 9; save remaining
+                    il.Mark bounded
+                    CodecDigitWriterEmitter.forwardChunk il api.Digits utf16 image chunks[chunk] remaining (min 9 (29-chunk*9)) index (Some dot) append
+                    il.Mark absent
+                il.EmitBranch(OpCodes.Br,complete)
+            )
+        else il.EmitBranch(OpCodes.Br,complete)
         il.Mark zero
         CodecOutputEmitter.literal il output utf16 [|int '0'|] destination state
         il.EmitBranch(OpCodes.Br,complete)
-        il.Mark discarded
-        il.Emit OpCodes.Pop
         il.Mark complete
         il.Emit OpCodes.Ret
 
+    let writerFrom (il: CodecIL<'T,'M,'F>) (api: CodecDecimalWriterApi<'T,'M,'F>) utf16 address =
+        if api.Digits.Output.Kind = CodecOutputKind.Validation then
+            address(); il.Emit OpCodes.Pop; il.Emit OpCodes.Ret
+        else outputWriterFrom il api utf16 address
+
     let writer il api utf16 =
-        writerFrom il api utf16 (fun () -> il.EmitInt(OpCodes.Ldarga,0))
+        writerFrom il api utf16 (fun () -> il.InputAddress())

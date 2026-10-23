@@ -9,6 +9,7 @@ Both routes generate operations for your original model types, preserving their 
 Call the generated project-local `SoloDBAOT.Register()` before the first operation that needs generated metadata:
 
 ```csharp
+using System;
 using SoloDatabase;
 
 internal sealed class Person
@@ -21,14 +22,13 @@ internal static class Program
 {
     private static void Main()
     {
+#if !DEBUG
         SoloDBAOT.Register();
-
-        using (var db = new SoloDB("memory:people"))
-        {
-            var people = db.GetCollection<Person>();
-            var id = people.Insert(new Person { Name = "Ada" });
-            var person = people.GetById(id);
-        }
+#endif
+        using var db = new SoloDB("memory:people");
+        var people = db.GetCollection<Person>();
+        long id = people.Insert(new Person { Name = "Ada" });
+        Console.WriteLine(people.GetById(id).Name);
     }
 }
 ```
@@ -42,22 +42,33 @@ Declare a provider alias and call its lowercase `register` method before use:
 ```fsharp
 namespace Example
 
+open System
+open System.Linq
 open SoloDatabase
 
 type Person() =
     member val Id = 0L with get, set
     member val Name = "" with get, set
 
+#if !DEBUG
 type AOTSupport = SoloDBAOT<0>
+#endif
 
-module Startup =
-    let run () =
+module Program =
+    [<EntryPoint>]
+    let main _ =
+#if !DEBUG
         AOTSupport.register()
-
+#endif
         use db = new SoloDB("memory:people")
         let people = db.GetCollection<Person>()
-        let id = people.Insert(Person(Name = "Ada"))
-        people.GetById(id)
+        people.Insert(Person(Name = "Ada")) |> ignore
+        let count = people.CompileQuotation(fun query -> query.Count())
+        let find = people.CompileQuotation(fun query (name: string) ->
+            query.Where(fun person -> person.Name = name).ToArray())
+        Console.WriteLine(count.Invoke())
+        Console.WriteLine(find.Invoke("Ada").[0].Name)
+        0
 ```
 
 `0` is the provider's static argument, not a model identifier. Model roots are discovered from the current project's resolved SoloDB uses. `[<SoloDBAOT>]` on a model also selects it explicitly. Keep ordinary F# source ordering: declare the alias before calling it.
@@ -76,31 +87,30 @@ Each consuming project registers its own generated operations. A library can cal
 
 Generation follows the registration call in the compiled source. Attributes or an F# provider alias alone do not activate full model generation. An ordinary runtime `if` does not disable generation; exclude the call with a preprocessor condition instead.
 
-For example, add a user-defined symbol to the consuming `.csproj` or `.fsproj`:
+Use the standard `DEBUG` symbol to keep registration out of Debug builds. The examples above use `#if !DEBUG`: C# guards the registration call, and F# guards both the provider alias and its call. No project-file changes or custom symbols are needed.
 
-```xml
-<PropertyGroup Condition="'$(Configuration)' == 'Release'">
-  <DefineConstants>$(DefineConstants);SOLODB_GENERATED</DefineConstants>
-</PropertyGroup>
-```
-
-Then guard the registration call in C#:
+In C#:
 
 ```csharp
-#if SOLODB_GENERATED
+#if !DEBUG
 SoloDBAOT.Register();
 #endif
 ```
 
-Or in F#:
+In F#, declare the alias before the code that calls it:
 
 ```fsharp
-#if SOLODB_GENERATED
+#if !DEBUG
+type AOTSupport = SoloDBAOT<0>
+#endif
+
+// Inside your startup function:
+#if !DEBUG
 AOTSupport.register()
 #endif
 ```
 
-This example activates generation in Release and omits it in Debug. Any user-defined symbol and configuration can be used; Release is not required. `RELEASE` is not a universally predefined SDK symbol. Choose conditions that also activate registration in every configuration you intend to publish with NativeAOT. Switching configurations or removing the active call updates the generated output through the package build integration.
+With the standard Debug and Release configurations, this selects generated operations in Release and ordinary runtime discovery in Debug. Choose a source condition that includes every configuration you publish with NativeAOT. An ordinary runtime `if` does not exclude generation. The package handles activation changes during normal builds.
 
 ## JIT and NativeAOT deployment
 
@@ -108,7 +118,7 @@ When generation is inactive, ordinary JIT execution discovers supported type ope
 
 Both C# and F# builds emit application operations into a project-specific runtime helper assembly. Package build integration generates and delivers the helper during normal builds and publishing. Keep it with managed application output; NativeAOT consumes it during native compilation. The generator and provider tooling are build-time dependencies and are not deployed with the application.
 
-The build integration supports .NET SDK 8 and later; installing SDK 10 separately is unnecessary. F# analysis uses the installed SDK's .NET host. The runtime library requires FSharp.Core 8.0.100 or later, and projects can retain a newer FSharp.Core version.
+Generating operations requires .NET SDK 8 or later; installing SDK 10 separately is unnecessary. This compiler requirement is separate from the runtime requirements of ordinary SoloDB applications. F# analysis uses the installed SDK's .NET host. The runtime library requires FSharp.Core 6.0.7 or later and preserves newer consumer versions. The CSharp generator and FSharp provider use FSharp.Core 8 independently of the runtime library.
 
 Application APIs have separate NativeAOT requirements. On .NET 8 linux-x64 with FSharp.Core 8.0.403, formatted `printfn` can fail with missing native generic code even in an executable without SoloDB. Model registration does not supply that framework code. Use compatible application output, such as `Console.WriteLine`, for that deployment.
 
@@ -121,11 +131,13 @@ For F# NativeAOT applications, use `CompileQuotation` instead of passing an ordi
 Write an ordinary lambda, without a marker argument or quotation brackets:
 
 ```fsharp
-let count = people.CompileQuotation(fun query -> System.Linq.Queryable.Count(query))
+open System.Linq
+
+let count = people.CompileQuotation(fun query -> query.Count())
 let total = count.Invoke()
 
 let find = people.CompileQuotation(fun query id ->
-    System.Linq.Queryable.Single(query, fun person -> person.Id = id))
+    query.Single(fun person -> person.Id = id))
 let person = find.Invoke(id)
 ```
 
@@ -137,17 +149,17 @@ Some F# union field accessors need a metadata flag correction for NativeAOT quot
 
 Direct JSON operations share model conversion policies across ordinary execution and generated support.
 
-`JsonValue.ParseInto<T>` reads a string, `ReadOnlySpan<byte>` containing UTF-8, or `ReadOnlySpan<char>` containing UTF-16 directly into a supported type. `JsonValue.WriteJson<T>` writes that type to a destination. Existing `Serialize<T>` still returns a `JsonValue` tree, and `Parse` still creates a tree.
+`JsonValue.ParseInto<T>` reads a string, `ReadOnlySpan<byte>` containing UTF-8, or `ReadOnlySpan<char>` containing UTF-16 directly into a supported type. `JsonValue.WriteJson<T>` writes that type to a destination. Existing `Serialize<T>` still returns a `JsonValue` tree, and `Parse` still creates a tree. Writers take the model by `ref`, including class references. Mutable struct getters operate on that supplied location; values returned by properties are captured once before their child writer runs. `ParseInto<T>` keeps its returning API.
 
 The overloads below use C# API notation:
 
 ```text
-int JsonValue.WriteJson<T>(T value, ref Span<byte> destination,
+int JsonValue.WriteJson<T>(ref T value, ref Span<byte> destination,
     JsonBufferGrow<byte> grow = null, JsonBufferRelease<byte> release = null);
-int JsonValue.WriteJson<T>(T value, ref Span<char> destination,
+int JsonValue.WriteJson<T>(ref T value, ref Span<char> destination,
     JsonBufferGrow<char> grow = null, JsonBufferRelease<char> release = null);
-int JsonValue.WriteJson<T>(T value, IList<byte> destination);
-int JsonValue.WriteJson<T>(T value, IList<char> destination);
+int JsonValue.WriteJson<T>(ref T value, IList<byte> destination);
+int JsonValue.WriteJson<T>(ref T value, IList<char> destination);
 ```
 
 `ParseInto<T>(null)` with the string overload returns the default value of `T`; an empty byte or character span raises `ArgumentException`.
@@ -160,7 +172,7 @@ Forward object readers convert recognized properties in input order. Mutable pro
 
 In forward object readers, each duplicate occurrence is converted: the last successfully converted value wins, including names made equivalent by JSON escapes. An invalid earlier occurrence fails even if a later occurrence would be valid. Constructors and setters may already have run when a later malformed value or trailing input causes failure; their effects are not rolled back. Explicit tree parsing and subsequent tree conversion retain their separate duplicate and conversion-order behavior. Optional wrappers, unions and directional collection readers, including Stack, retain their established policies.
 
-A different assignable runtime type selected by a late `$type` discriminator uses an exceptional read of the object as that type. A failed declared-type read may also select this route when the object identifies a different assignable type. Earlier declared-type effects remain and the selected read can add effects; this is not effect-order parity with the former prescanned reader. When the selected type is unchanged, the original failure is preserved. Missing or same-type discriminators use the ordinary direct path.
+A different assignable runtime type selected by a late `$type` discriminator uses an exceptional read of the object as that type. A failed declared-type read may also select this route when the object identifies a different assignable type. Earlier declared-type effects remain and the selected read can add effects. When the selected type is unchanged, the original failure is preserved. Missing or same-type discriminators use the ordinary direct path.
 
 Each typed conversion uses a fixed operation for its type and encoding. Project registration supplies generated operations before use; ordinary JIT execution prepares its operation on first use. Runtime polymorphism preserves the actual type and its discriminator where required. Growth/release ownership and constructor, getter, setter and output callback effects retain their documented behavior.
 
@@ -196,7 +208,7 @@ using System;
 using SoloDatabase.JsonSerializator;
 
 Span<byte> destination = Span<byte>.Empty;
-int written = JsonValue.WriteJson(person, ref destination);
+int written = JsonValue.WriteJson(ref person, ref destination);
 ReadOnlySpan<byte> json = destination.Slice(0, written);
 ```
 
@@ -210,7 +222,7 @@ If growth throws, destination still identifies the old buffer. If release throws
 
 List overloads append to existing contents and return only the number of elements added. A null list raises `ArgumentNullException`; a read-only list raises `ArgumentException` before serialization. Writable lists use their append operations, with capacity growth for `List<byte>` and `List<char>`. No complete temporary JSON array is required merely to append. Callback, allocation, getter, enumeration and list failures propagate; partially written output is not rolled back. After a span failure, the caller retains responsibility for the buffer currently identified by destination.
 
-Direct numeric conversion uses the declared integer, `double`, `float` or `decimal` type. Floating values avoid the decimal-backed tree's rounding and range limitations, so values previously rounded or rejected cannot have a blanket byte-identical-output guarantee. Direct floating-point writers use invariant numeric formatting, preserve negative zero as `-0`, and emit the JSON5 literals `NaN`, `Infinity` and `-Infinity` for nonfinite values. Explicit `JsonValue.Number` keeps its decimal representation. .NET Standard 2.0 UTF-16 numeric formatting may allocate a number-only string; direct output is not an allocation-free guarantee.
+Direct numeric conversion uses the declared integer, `double`, `float` or `decimal` type. Floating values avoid the decimal-backed tree's rounding and range limitations, so direct and tree output can differ for values outside Decimal precision or range. Direct floating-point writers use invariant numeric formatting, preserve negative zero as `-0`, and emit the JSON5 literals `NaN`, `Infinity` and `-Infinity` for nonfinite values. Explicit `JsonValue.Number` keeps its decimal representation. .NET Standard 2.0 UTF-16 numeric formatting may allocate a number-only string; direct output is not an allocation-free guarantee.
 
 Direct floating readers retain a `NaN` number token, including in present nullable values, lists and Object-valued members. The explicit tree APIs have different directional rules: `JsonValue.Serialize` of a nonfinite floating value raises `OverflowException`, while `JsonValue.Parse("NaN")` produces a Decimal-backed zero. These tree conversions are not a native floating-point roundtrip.
 
@@ -230,21 +242,11 @@ Runtime discovery follows the stored shapes encountered while field samples are 
 
 Initialize collections that need conversion before accessing them from event handlers. Handler-context collection lookup does not scan or convert numerical fields. Callbacks run inside the active statement and transaction, so they can observe in-flight writes; ordinary collection initialization returns after conversion completes.
 
-### Earlier direct JSON measurements
+### Choosing a JSON API
 
-A historical warmed comparison measured 300 operations per case. Managed bytes per operation fell from 1,373,088 to 1,127,328 for document reads, 1,360,208 to 1,114,448 for compiled reads, and 630,244 to 602,090 for hydrated owners. Total elapsed times were 406.026 to 259.044 ms, 242.376 to 241.323 ms, and 245.498 to 253.228 ms respectively.
+Use `ParseInto<T>` and `WriteJson<T>` when your application needs typed values and JSON text or bytes. They avoid constructing an intermediate `JsonValue` tree. Use `Parse` and `Serialize` when you need to inspect or edit a JSON tree. Choose UTF-8 for byte-oriented interfaces and UTF-16 for character-oriented interfaces, so encoding conversion is not added unnecessarily.
 
-One historical sequential comparison measured 1,000 complete write/read round trips after 100 warmups, using escaped Unicode text and integer arrays of 9 or 4,096 elements. UTF-16 elapsed times fell from 29.852 to 16.868 ms for the small array and 1,316.985 to 637.164 ms for the large array; UTF-8 fell from 26.852 to 16.416 ms and 1,158.034 to 517.965 ms. Managed allocation per operation fell from 6,288 to 4,008 bytes and 1,526,160 to 690,128 bytes for UTF-16, and from 6,048 to 3,768 bytes and 1,460,896 to 624,864 bytes for UTF-8. Destination growth, typed arrays and lexical work still allocate.
-
-A separate historical sample of 300 operations measured document update/read allocation falling from 21,912 to 17,376 bytes per operation in ordinary execution and 21,320 to 16,784 bytes in generated execution. Total times were 38.897 to 42.032 ms and 35.972 to 35.366 ms respectively. Compiled scalar allocation fell from 264 to 248 bytes in both routes; times rose from 5.010 to 5.452 ms and 5.161 to 5.577 ms. Client-tail allocation remained 20,040 bytes, with times 38.576 to 38.808 ms and 38.136 to 38.441 ms. The sample showed mixed timing results.
-
-## JSON comparison scope
-
-The historical .NET 10 comparison used separately owned UTF-8 byte arrays and UTF-16 strings, and separate reads, against System.Text.Json generated serialization/metadata readers and Newtonsoft.Json 13.0.4 with reused contracts. Required output copying and transcoding were included. Strict common inputs preserved declared wide integer, decimal and finite double values. It used five rotated warm samples per cell; setup observations were first calls in an already initialized process.
-
-ASCII model, string and array outputs matched exactly across the tested writers. Escape-rich output differed by encoder policy, so those cells compared equivalent values with different wire work. The supplied System.Text.Json writer invoked its actual generated handler where available; default owned APIs were distinct measured routes. The native comparison used SoloDB and System.Text.Json.
-
-The corrected ordinary 4,096-element array reads allocated 295,288 rather than 688,504 managed bytes per operation. Final ordinary median times changed from 621.826 to 623.345 microseconds for UTF-16 and 521.054 to 517.675 for UTF-8, showing mixed, near-baseline array timing; generated-route observations are also near baseline with the same allocation reduction. Ordinary plain-string write medians changed from 4.778 to 0.871 microseconds for UTF-16 and 4.358 to 0.720 for UTF-8. System.Text.Json was faster in many cells.
+The direct APIs share the database model conversion policies. Returned models own their data, and the caller owns the final output buffer. Buffer growth, model construction and required output copies can allocate.
 
 ## SQLite provider compatibility
 

@@ -147,7 +147,7 @@ internal static partial class GeneratedSequenceCodec
             FSharpFunc<TypeReference,FSharpOption<MethodReference>>.FromConverter(
                 new Converter<TypeReference,FSharpOption<MethodReference>>(child => FSharpOption<MethodReference>.Some(
                     GeneratedChildCodec.ReadCall(definitions,module,owner,product,child,reader,name + "Element",models)))),
-            FSharpFunc<TypeReference,MethodReference>.FromConverter(new Converter<TypeReference,MethodReference>(child => api.Operation("JsonRawRead","ReadMember",child,reader))),
+            FSharpFunc<TypeReference,MethodReference>.FromConverter(new Converter<TypeReference,MethodReference>(child => api.Operation("JsonRawRead","ReadMemberInto",child,reader))),
             model.Type,element,!reference && model.Facts.SupportsValuesWrapper,false,!populate,false,false);
         return method;
     }

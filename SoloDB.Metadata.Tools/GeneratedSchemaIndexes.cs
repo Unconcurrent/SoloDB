@@ -121,7 +121,7 @@ internal static class GeneratedSchemaIndexes
                 body.Emit(OpCodes.Call,module.ImportReference(metadata.Methods.Single(method => method.Name == "UncompletedAttributes")));
                 body.Emit(OpCodes.Ret);
             }
-            else if (definitions.SchemaWitnesses != null && property.Attributes.Length == 0 && definitions.EmptyAttributes != null)
+            else if (property.Attributes.Length == 0 && definitions.EmptyAttributes != null)
             {
                 owner.Methods.Remove(factory);
                 factory = definitions.EmptyAttributes;
@@ -129,7 +129,7 @@ internal static class GeneratedSchemaIndexes
             else
             {
                 Emit(module,product,factory,property.Attributes);
-                if (definitions.SchemaWitnesses != null && property.Attributes.Length == 0) definitions.EmptyAttributes = factory;
+                if (property.Attributes.Length == 0) definitions.EmptyAttributes = factory;
             }
             il.Emit(OpCodes.Dup); il.Emit(OpCodes.Ldc_I4,ordinal); il.Emit(OpCodes.Ldstr,property.Member.Name);
             api.TypeToken(il,property.Member.Type);

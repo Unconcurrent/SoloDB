@@ -28,17 +28,14 @@ type ProjectGeneration private () =
         ProjectGeneration.Write(contextPath, project, arguments, assemblyName, attributeSource, templatePath, workspace, report, null)
 
     static member internal Write(contextPath: string, project: string, arguments: string[], assemblyName: string, attributeSource: string, templatePath: string, workspace: string, report: Action<string,int,int,string>, timing: Action<string,float>) =
-        ProjectGeneration.Generate(contextPath,project,arguments,assemblyName,attributeSource,templatePath,workspace,report,timing,"","","","",null,null)
+        ProjectGeneration.Generate(contextPath,project,arguments,assemblyName,attributeSource,templatePath,workspace,report,timing,"","","","")
 
     static member internal Complete(contextPath,project,arguments,assemblyName,attributeSource,templatePath,workspace,report,timing,input,outputDirectory,helperPath,selection) =
-        ProjectGeneration.Complete(contextPath,project,arguments,assemblyName,attributeSource,templatePath,workspace,report,timing,input,outputDirectory,helperPath,selection,null,null)
-
-    static member internal Complete(contextPath,project,arguments,assemblyName,attributeSource,templatePath,workspace,report,timing,input,outputDirectory,helperPath,selection,waitForCompiler: Action,observe: Action<string>) =
-        ProjectGeneration.Generate(contextPath,project,arguments,assemblyName,attributeSource,templatePath,workspace,report,timing,input,outputDirectory,helperPath,selection,waitForCompiler,observe)
+        ProjectGeneration.Generate(contextPath,project,arguments,assemblyName,attributeSource,templatePath,workspace,report,timing,input,outputDirectory,helperPath,selection)
 
     static member private Generate(contextPath: string, project: string, arguments: string[], assemblyName: string, attributeSource: string,
         templatePath: string, workspace: string, report: Action<string,int,int,string>, timing: Action<string,float>,
-        input: string, outputDirectory: string, helperPath: string, selection: string, waitForCompiler: Action,observe: Action<string>) =
+        input: string, outputDirectory: string, helperPath: string, selection: string) =
         let measure name work =
             if isNull timing then work() else
             let watch = Stopwatch.StartNew()
@@ -47,7 +44,7 @@ type ProjectGeneration private () =
         try
             Directory.CreateDirectory(workspace) |> ignore
             let arguments = arguments |> Array.filter(CompilerContext.IsContextArgument >> not)
-            let inputs = CurrentAssembly.inputsWith observe arguments (Path.GetDirectoryName(project))
+            let inputs = CurrentAssembly.inputsWith null arguments (Path.GetDirectoryName(project))
             let dependencies = ResizeArray<string>(inputs.Dependencies)
             let writeSource content =
                 Directory.CreateDirectory(Path.GetDirectoryName(attributeSource)) |> ignore
@@ -65,7 +62,6 @@ type ProjectGeneration private () =
                 for source in parsing.SourceFiles do
                     let source = Path.GetFullPath(if Path.IsPathRooted(source) then source else Path.Combine(Path.GetDirectoryName(project),source))
                     dependencies.Add(source)
-                    if not(isNull observe) then observe.Invoke(source)
                     let parsed = checker.ParseFile(source, SourceText.ofString(File.ReadAllText(source)), parsing) |> Async.RunSynchronously
                     parsedInputs.Add(source, parsed.ParseTree))
             let candidate input =
@@ -144,7 +140,6 @@ type ProjectGeneration private () =
                 else None
             match checkedProject with
             | None ->
-                if not(isNull waitForCompiler) then waitForCompiler.Invoke()
                 if input.Length = 0 then
                     File.Delete(templatePath)
                     writeSource "namespace SoloDatabase.Generated\ndo ()\n"
@@ -155,7 +150,7 @@ type ProjectGeneration private () =
                     if File.Exists(attributeSource) then File.Delete(attributeSource)
                 ""
             | Some(result,uses,aliases,aliasNames) ->
-                let current = measure "assembly-facts" (fun () -> CurrentAssembly.acquireWith observe result inputs (Path.GetDirectoryName(project)) assemblyName)
+                let current = measure "assembly-facts" (fun () -> CurrentAssembly.acquireWith null result inputs (Path.GetDirectoryName(project)) assemblyName)
                 let referencePaths =
                     result.ProjectContext.GetReferencedAssemblies()
                     |> Seq.choose(fun assembly ->
@@ -179,7 +174,6 @@ type ProjectGeneration private () =
                     let struct(witnesses, calls) = QueryConstructionWitnesses.Read(path, references)
                     Array.append queryWitnesses witnesses, Array.append queryCalls calls
                 let hasAttribute = ModelDiscovery.hasAccessAttribute result
-                if not(isNull waitForCompiler) then waitForCompiler.Invoke()
                 if input.Length = 0 then
                     let access = Array.append [|product.Name.Name|] (models |> Array.collect(fun model -> model.AccessAssemblies |> Seq.toArray)) |> Array.distinct |> Array.sort
                     let source = Text.StringBuilder()

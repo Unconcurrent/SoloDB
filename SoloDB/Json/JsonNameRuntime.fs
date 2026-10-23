@@ -21,6 +21,8 @@ module internal JsonNameRuntime =
           Begin = typeof<JsonNameInput>.GetMethod("Begin",flags).MakeGenericMethod(reader) :> MethodBase
           Reference = input "Reference"; Position = input "Position"; Length = input "Length"
           OffsetByte = (unsafeMethod "Add" 2).MakeGenericMethod(typeof<byte>) :> MethodBase
+          Word = typeof<JsonNameInput>.GetMethod((if reader.Equals(typeof<Utf16Reader>) then "Utf16Pair" else "Utf8Word"),flags) :> MethodBase
+          Pair = typeof<JsonNameInput>.GetMethod("Utf8Pair",flags) :> MethodBase
           Quoted = operation "Quoted"; Identifier = operation "Identifier"
           Invalid = typeof<JsonNameInput>.GetMethod("Invalid",flags) :> MethodBase
           Unterminated = typeof<JsonNameInput>.GetMethod("Unterminated",flags) :> MethodBase

@@ -54,10 +54,10 @@ type internal JsonWriterRegion =
         &Unsafe.As<'E,byte>(&MemoryMarshal.GetReference(Span<'E>(value)))
 
     static member internal ReserveSpan<'E>(destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>, minimum: int): unit =
-        JsonWriteBuffer.ensureSpan &destination &state minimum
+        if minimum > destination.Length then JsonWriteBuffer.ensureSpan &destination &state minimum
 
-    static member internal ReserveList<'E>(list: System.Collections.Generic.List<'E>, count: int): unit =
-        JsonWriteBuffer.ensureList list count
+    static member internal AddList<'E>(state: byref<JsonWriteState<'E>>, value: 'E): unit =
+        JsonWriteBuffer.addToList &state value
 
     static member internal FitsSpan<'E>(destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>, count: int): bool =
         count <= destination.Length - state.Written
@@ -84,7 +84,7 @@ type internal JsonWriterRegion =
         &Unsafe.As<'T,byte>(&value)
 
     static member private Capture<'E>(value: byte[], overlaps: bool, available: int, state: byref<JsonWriteState<'E>>, count: int): byte[] =
-        if not state.Discard && (overlaps || (not(isNull state.List) && not(state.List :? System.Collections.Generic.List<'E>)) ||
+        if (overlaps || (not(isNull state.List) && isNull state.ConcreteList) ||
                                  (not(isNull state.Grow) && count > available)) then
             Array.copy value
         else value

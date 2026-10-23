@@ -38,22 +38,23 @@ module internal JsonOptionalRuntime =
         CodecOptionalEmitter.reader (RuntimeCodecIL(method.GetILGenerator())) api
         method
 
-    let private createWriter (target: Type) (encoding: Type) (parameters: Type[]) (write: Type -> MethodBase) nullMethod =
+    let private createWriter (target: Type) (parameters: Type[]) (write: Type -> MethodBase) (nullBody: CodecIL<Type,MethodBase,FieldInfo> -> unit) =
+        let arguments = Array.copy parameters
+        arguments[0] <- target.MakeByRefType()
+        let method = DynamicMethod("WriteOptional" + target.Name,typeof<Void>,arguments,typeof<JsonOptionalInput>.Module,true)
+        let il = RuntimeCodecIL(method.GetILGenerator(),arguments[0])
         let payload = payload target
         let api =
             { Result = target; Payload = payload; ValueType = target.IsValueType
               Presence = if kind target = 2 then Some(target.GetProperty("HasValue").GetMethod :> MethodBase) else None
               Value = if kind target = 3 then None else Some(target.GetProperty("Value").GetMethod :> MethodBase)
               Transfer = if kind target = 3 then Some(transfer target payload) else None
-              Null = nullMethod; PayloadCall = write payload }
-        let arguments = Array.copy parameters
-        arguments[0] <- target
-        let method = DynamicMethod("WriteOptional" + target.Name,typeof<Void>,arguments,typeof<JsonOptionalInput>.Module,true)
-        CodecOptionalEmitter.writer (RuntimeCodecIL(method.GetILGenerator())) api
+              Null = (fun () -> nullBody il); PayloadCall = write payload }
+        CodecOptionalEmitter.writer il api
         method
 
     let reader (target: Type) (reader: Type) contract read retry skip =
         JsonDefaultMethods.get target reader contract (fun () -> createReader target reader read retry skip)
 
-    let writer (target: Type) (encoding: Type) (output: Type) contract parameters write (nullMethod: MethodBase) =
-        JsonDefaultMethods.withContract target encoding output contract (fun () -> createWriter target encoding parameters write nullMethod)
+    let writer (target: Type) (encoding: Type) (output: Type) contract parameters write nullBody =
+        JsonDefaultMethods.withContract target encoding output contract (fun () -> createWriter target parameters write nullBody)

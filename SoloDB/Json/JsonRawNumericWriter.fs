@@ -22,7 +22,7 @@ module internal JsonNumberSpelling =
         if dot >= 0 then
             while finish > dot + 1 && output.AsciiCode source[finish-1] = '0'B do finish <- finish - 1
             if finish = dot + 1 then finish <- dot
-        JsonWriteBuffer.appendSpan &destination &state (source.Slice(0,finish))
+        output.Raw(source.Slice(0,finish),&destination,&state)
 
     let floating<'E,'O when 'O : struct and 'O :> IJsonTextOutput<'E>>
         (output: 'O) (source: ReadOnlySpan<'E>) fixedSpelling (destination: byref<Span<'E>>) (state: byref<JsonWriteState<'E>>) =
@@ -34,7 +34,7 @@ module internal JsonNumberSpelling =
             | '.'B -> dot <- index
             | _ -> ()
         if exponentStart < 0 || not fixedSpelling then
-            JsonWriteBuffer.appendSpan &destination &state source
+            output.Raw(source,&destination,&state)
         else
             let sign = if output.AsciiCode source[0] = '-'B then 1 else 0
             let mutable index = exponentStart + 1
@@ -66,57 +66,57 @@ module internal JsonRawNumericWriter =
         let magnitude = abs value
         magnitude >= 1e-28 && magnitude <= 79228162514264337593543950335.0
 
-    let int64Utf8 (value: int64) (destination: byref<Span<byte>>) (state: byref<JsonWriteState<byte>>) =
+    let int64Utf8<'O when 'O : struct and 'O :> IJsonTextOutput<byte>> (output: 'O) (value: int64) (destination: byref<Span<byte>>) (state: byref<JsonWriteState<byte>>) =
         let pointer = NativePtr.stackalloc<byte> 128
         let buffer = Span<byte>(NativePtr.toVoidPtr pointer,128)
         let mutable written = 0
         if not(Utf8Formatter.TryFormat(value,buffer,&written,StandardFormat())) then invalidOp "Cannot format the JSON number."
         let source = ReadOnlySpan<byte>(NativePtr.toVoidPtr pointer,written)
-        JsonWriteBuffer.appendSpan &destination &state source
+        output.Raw(source,&destination,&state)
 
-    let uint64Utf8 (value: uint64) (destination: byref<Span<byte>>) (state: byref<JsonWriteState<byte>>) =
+    let uint64Utf8<'O when 'O : struct and 'O :> IJsonTextOutput<byte>> (output: 'O) (value: uint64) (destination: byref<Span<byte>>) (state: byref<JsonWriteState<byte>>) =
         let pointer = NativePtr.stackalloc<byte> 128
         let buffer = Span<byte>(NativePtr.toVoidPtr pointer,128)
         let mutable written = 0
         if not(Utf8Formatter.TryFormat(value,buffer,&written,StandardFormat())) then invalidOp "Cannot format the JSON number."
         let source = ReadOnlySpan<byte>(NativePtr.toVoidPtr pointer,written)
-        JsonWriteBuffer.appendSpan &destination &state source
+        output.Raw(source,&destination,&state)
 
-    let decimalUtf8 (value: decimal) (destination: byref<Span<byte>>) (state: byref<JsonWriteState<byte>>) =
-        if value = 0M then JsonWriteBuffer.append &destination &state ('0'B)
+    let decimalUtf8<'O when 'O : struct and 'O :> IJsonTextOutput<byte>> (output: 'O) (value: decimal) (destination: byref<Span<byte>>) (state: byref<JsonWriteState<byte>>) =
+        if value = 0M then output.Ascii('0'B,&destination,&state)
         else
             let pointer = NativePtr.stackalloc<byte> 128
             let buffer = Span<byte>(NativePtr.toVoidPtr pointer,128)
             let mutable written = 0
             if not(Utf8Formatter.TryFormat(value,buffer,&written,StandardFormat())) then invalidOp "Cannot format the JSON number."
             let source = ReadOnlySpan<byte>(NativePtr.toVoidPtr pointer,written)
-            JsonNumberSpelling.decimal (JsonUtf8Output()) source &destination &state
+            JsonNumberSpelling.decimal output source &destination &state
 
-    let doubleUtf8 (value: double) (destination: byref<Span<byte>>) (state: byref<JsonWriteState<byte>>) =
+    let doubleUtf8<'O when 'O : struct and 'O :> IJsonTextOutput<byte>> (output: 'O) (value: double) (destination: byref<Span<byte>>) (state: byref<JsonWriteState<byte>>) =
         if value = 0.0 then
-            if BitConverter.DoubleToInt64Bits(float value) < 0L then JsonWriteBuffer.append &destination &state ('-'B)
-            JsonWriteBuffer.append &destination &state ('0'B)
+            if BitConverter.DoubleToInt64Bits(float value) < 0L then output.Ascii('-'B,&destination,&state)
+            output.Ascii('0'B,&destination,&state)
         else
             let pointer = NativePtr.stackalloc<byte> 128
             let buffer = Span<byte>(NativePtr.toVoidPtr pointer,128)
             let mutable written = 0
             if not(Utf8Formatter.TryFormat(value,buffer,&written,StandardFormat())) then invalidOp "Cannot format the JSON number."
             let source = ReadOnlySpan<byte>(NativePtr.toVoidPtr pointer,written)
-            JsonNumberSpelling.floating (JsonUtf8Output()) source (faithfulFloatingRange (float value)) &destination &state
+            JsonNumberSpelling.floating output source (faithfulFloatingRange (float value)) &destination &state
 
-    let singleUtf8 (value: single) (destination: byref<Span<byte>>) (state: byref<JsonWriteState<byte>>) =
+    let singleUtf8<'O when 'O : struct and 'O :> IJsonTextOutput<byte>> (output: 'O) (value: single) (destination: byref<Span<byte>>) (state: byref<JsonWriteState<byte>>) =
         if value = 0.0f then
-            if BitConverter.DoubleToInt64Bits(float value) < 0L then JsonWriteBuffer.append &destination &state ('-'B)
-            JsonWriteBuffer.append &destination &state ('0'B)
+            if BitConverter.DoubleToInt64Bits(float value) < 0L then output.Ascii('-'B,&destination,&state)
+            output.Ascii('0'B,&destination,&state)
         else
             let pointer = NativePtr.stackalloc<byte> 128
             let buffer = Span<byte>(NativePtr.toVoidPtr pointer,128)
             let mutable written = 0
             if not(Utf8Formatter.TryFormat(value,buffer,&written,StandardFormat())) then invalidOp "Cannot format the JSON number."
             let source = ReadOnlySpan<byte>(NativePtr.toVoidPtr pointer,written)
-            JsonNumberSpelling.floating (JsonUtf8Output()) source (faithfulFloatingRange (float value)) &destination &state
+            JsonNumberSpelling.floating output source (faithfulFloatingRange (float value)) &destination &state
 
-    let int64Utf16 (value: int64) (destination: byref<Span<char>>) (state: byref<JsonWriteState<char>>) =
+    let int64Utf16<'O when 'O : struct and 'O :> IJsonTextOutput<char>> (output: 'O) (value: int64) (destination: byref<Span<char>>) (state: byref<JsonWriteState<char>>) =
         let pointer = NativePtr.stackalloc<char> 128
         let buffer = Span<char>(NativePtr.toVoidPtr pointer,128)
         let mutable written = 0
@@ -128,9 +128,9 @@ module internal JsonRawNumericWriter =
         written <- text.Length
         #endif
         let source = ReadOnlySpan<char>(NativePtr.toVoidPtr pointer,written)
-        JsonWriteBuffer.appendSpan &destination &state source
+        output.Raw(source,&destination,&state)
 
-    let uint64Utf16 (value: uint64) (destination: byref<Span<char>>) (state: byref<JsonWriteState<char>>) =
+    let uint64Utf16<'O when 'O : struct and 'O :> IJsonTextOutput<char>> (output: 'O) (value: uint64) (destination: byref<Span<char>>) (state: byref<JsonWriteState<char>>) =
         let pointer = NativePtr.stackalloc<char> 128
         let buffer = Span<char>(NativePtr.toVoidPtr pointer,128)
         let mutable written = 0
@@ -142,10 +142,10 @@ module internal JsonRawNumericWriter =
         written <- text.Length
         #endif
         let source = ReadOnlySpan<char>(NativePtr.toVoidPtr pointer,written)
-        JsonWriteBuffer.appendSpan &destination &state source
+        output.Raw(source,&destination,&state)
 
-    let decimalUtf16 (value: decimal) (destination: byref<Span<char>>) (state: byref<JsonWriteState<char>>) =
-        if value = 0M then JsonWriteBuffer.append &destination &state '0'
+    let decimalUtf16<'O when 'O : struct and 'O :> IJsonTextOutput<char>> (output: 'O) (value: decimal) (destination: byref<Span<char>>) (state: byref<JsonWriteState<char>>) =
+        if value = 0M then output.Ascii('0'B,&destination,&state)
         else
             let pointer = NativePtr.stackalloc<char> 128
             let buffer = Span<char>(NativePtr.toVoidPtr pointer,128)
@@ -158,12 +158,12 @@ module internal JsonRawNumericWriter =
             written <- text.Length
             #endif
             let source = ReadOnlySpan<char>(NativePtr.toVoidPtr pointer,written)
-            JsonNumberSpelling.decimal (JsonUtf16Output()) source &destination &state
+            JsonNumberSpelling.decimal output source &destination &state
 
-    let doubleUtf16 (value: double) (destination: byref<Span<char>>) (state: byref<JsonWriteState<char>>) =
+    let doubleUtf16<'O when 'O : struct and 'O :> IJsonTextOutput<char>> (output: 'O) (value: double) (destination: byref<Span<char>>) (state: byref<JsonWriteState<char>>) =
         if value = 0.0 then
-            if BitConverter.DoubleToInt64Bits(float value) < 0L then JsonWriteBuffer.append &destination &state '-'
-            JsonWriteBuffer.append &destination &state '0'
+            if BitConverter.DoubleToInt64Bits(float value) < 0L then output.Ascii('-'B,&destination,&state)
+            output.Ascii('0'B,&destination,&state)
         else
             let pointer = NativePtr.stackalloc<char> 128
             let buffer = Span<char>(NativePtr.toVoidPtr pointer,128)
@@ -176,12 +176,12 @@ module internal JsonRawNumericWriter =
             written <- text.Length
             #endif
             let source = ReadOnlySpan<char>(NativePtr.toVoidPtr pointer,written)
-            JsonNumberSpelling.floating (JsonUtf16Output()) source (faithfulFloatingRange (float value)) &destination &state
+            JsonNumberSpelling.floating output source (faithfulFloatingRange (float value)) &destination &state
 
-    let singleUtf16 (value: single) (destination: byref<Span<char>>) (state: byref<JsonWriteState<char>>) =
+    let singleUtf16<'O when 'O : struct and 'O :> IJsonTextOutput<char>> (output: 'O) (value: single) (destination: byref<Span<char>>) (state: byref<JsonWriteState<char>>) =
         if value = 0.0f then
-            if BitConverter.DoubleToInt64Bits(float value) < 0L then JsonWriteBuffer.append &destination &state '-'
-            JsonWriteBuffer.append &destination &state '0'
+            if BitConverter.DoubleToInt64Bits(float value) < 0L then output.Ascii('-'B,&destination,&state)
+            output.Ascii('0'B,&destination,&state)
         else
             let pointer = NativePtr.stackalloc<char> 128
             let buffer = Span<char>(NativePtr.toVoidPtr pointer,128)
@@ -194,4 +194,4 @@ module internal JsonRawNumericWriter =
             written <- text.Length
             #endif
             let source = ReadOnlySpan<char>(NativePtr.toVoidPtr pointer,written)
-            JsonNumberSpelling.floating (JsonUtf16Output()) source (faithfulFloatingRange (float value)) &destination &state
+            JsonNumberSpelling.floating output source (faithfulFloatingRange (float value)) &destination &state

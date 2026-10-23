@@ -260,12 +260,12 @@ module internal FileStorageCoreChunks =
             while statement.Step() do
                 let number = statement.Row.GetInt64(1)
                 while currentChunkNr < number do
-                    chunks.Add {| rowid = -1L; Number = currentChunkNr |}
+                    chunks.Add (struct {| rowid = -1L; Number = currentChunkNr |})
                     currentChunkNr <- currentChunkNr + 1L
-                chunks.Add {| rowid = statement.Row.GetInt64(0); Number = number |}
+                chunks.Add (struct {| rowid = statement.Row.GetInt64(0); Number = number |})
                 currentChunkNr <- number + 1L
             while currentChunkNr <= endChunkNumber do
-                chunks.Add {| rowid = -1L; Number = currentChunkNr |}
+                chunks.Add (struct {| rowid = -1L; Number = currentChunkNr |})
                 currentChunkNr <- currentChunkNr + 1L
             statement.Dispose()
         with error -> statement.Abort(error); reraise()

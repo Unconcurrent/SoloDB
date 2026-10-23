@@ -73,12 +73,16 @@ internal static partial class GeneratedDictionaryCodec
             var reader=module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator."+name));
             Delegate(entry,module,product,"JsonDirectReader`2",Reader(definitions,module,owner,product,model,reader,"ReadDictionary"+name+index,models),model.Type,reader);
         }
+        entry.Emit(OpCodes.Call,api.Metadata("RegisterRawReaders",model.Type));
         if (!readersOnly)
-            foreach(var pair in new[]{(module.TypeSystem.Byte,"JsonUtf8Writer"),(module.TypeSystem.Char,"JsonUtf16Writer")})
-            {
-                var output=module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator."+pair.Item2));
-                Delegate(entry,module,product,"JsonDirectWriter`2",Writer(definitions,module,owner,product,model,pair.Item1,output,"WriteDictionary"+pair.Item2+index,models),model.Type,pair.Item1);
+            foreach(var kind in GeneratedJsonDefinitions.Outputs) {
+                var writes = definitions.OutputView(kind);
+                foreach(var encoding in new[]{module.TypeSystem.Byte,module.TypeSystem.Char}) {
+                    var output = writes.OutputType(module,product,encoding);
+                    Delegate(entry,module,product,"JsonDirectWriter`2",Writer(writes,module,owner,product,model,encoding,output,"WriteDictionary"+encoding.Name+index,models),model.Type,encoding);
+                }
+                GeneratedJsonAssembly.BoxedWriters(definitions,module,owner,entry,product,model.Type);
+                entry.Emit(OpCodes.Call,api.Metadata("RegisterOutputWriters",model.Type,writes.OutputType(module,product,module.TypeSystem.Byte),writes.OutputType(module,product,module.TypeSystem.Char)));
             }
-        entry.Emit(OpCodes.Call,api.Metadata(readersOnly?"RegisterRawReaders":"RegisterRaw",model.Type));
     }
 }

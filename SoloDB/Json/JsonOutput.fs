@@ -21,8 +21,8 @@ type internal JsonWriteState<'Element> =
     val mutable Storage: 'Element array
     val mutable IncludeType: bool
     val mutable OmitId: bool
-    val mutable Discard: bool
     val List: IList<'Element>
+    val ConcreteList: List<'Element>
     val Grow: JsonBufferGrow<'Element>
     val Release: JsonBufferRelease<'Element>
     new(list: IList<'Element>, grow: JsonBufferGrow<'Element>, release: JsonBufferRelease<'Element>) =
@@ -30,7 +30,7 @@ type internal JsonWriteState<'Element> =
             invalidArg "release" "A release callback requires a custom growth callback."
         if not(isNull list) && list.IsReadOnly then
             invalidArg "destination" "The destination list is read-only."
-        { Written = 0; Storage = Array.empty; IncludeType = false; OmitId = false; Discard = false; List = list; Grow = grow; Release = release }
+        { Written = 0; Storage = Array.empty; IncludeType = false; OmitId = false; List = list; ConcreteList = (match list with :? List<'Element> as value -> value | _ -> null); Grow = grow; Release = release }
 
 module internal JsonWriteBuffer =
     let private capacity current minimum =
@@ -65,61 +65,54 @@ module internal JsonWriteBuffer =
         if total > list.Capacity then list.Capacity <- capacity list.Capacity total
 
     let ensure (destination: byref<Span<'E>>) (state: byref<JsonWriteState<'E>>) count =
-        let minimum = Checked.(+) state.Written count
-        if state.Discard then ()
-        elif isNull state.List then ensureSpan &destination &state minimum
-        else
-            match state.List with
-            | :? List<'E> as list -> ensureList list count
-            | _ -> ()
+        ensureSpan &destination &state (Checked.(+) state.Written count)
 
     let append (destination: byref<Span<'E>>) (state: byref<JsonWriteState<'E>>) value =
-        if not state.Discard then
-            ensure &destination &state 1
-            if isNull state.List then destination[state.Written] <- value
-            else
-                match state.List with
-                | :? List<'E> as list -> list.Add value
-                | list -> list.Add value
-            state.Written <- state.Written + 1
-
-    let appendSpan (destination: byref<Span<'E>>) (state: byref<JsonWriteState<'E>>) (source: ReadOnlySpan<'E>) =
-        if not state.Discard then
-            ensure &destination &state source.Length
-            if isNull state.List then
-                source.CopyTo(destination.Slice(state.Written))
-                state.Written <- state.Written + source.Length
-            else
-                match state.List with
-                | :? List<'E> as list ->
-                    for index = 0 to source.Length - 1 do list.Add source[index]
-                    state.Written <- state.Written + source.Length
-                | list ->
-                    for index = 0 to source.Length - 1 do
-                        list.Add source[index]
-                        state.Written <- state.Written + 1
-
-    let inline private listUnit (list: ^List) (state: byref<JsonWriteState<byte>>) value =
-        (^List : (member Add: byte -> unit) (list,value))
+        ensure &destination &state 1
+        destination[state.Written] <- value
         state.Written <- state.Written + 1
 
-    let inline private listRegion reserve units (state: byref<JsonWriteState<byte>>) =
-        Checked.(+) state.Written units |> ignore
-        reserve units
+    let appendSpan (destination: byref<Span<'E>>) (state: byref<JsonWriteState<'E>>) (source: ReadOnlySpan<'E>) =
+        ensure &destination &state source.Length
+        source.CopyTo(destination.Slice(state.Written))
+        state.Written <- state.Written + source.Length
 
-    // Inline expansion retains the concrete List or original interface Add target.
-    let inline utf8ListText reserve (list: ^List) (value: string) start count (state: byref<JsonWriteState<byte>>) =
+    let addToList (state: byref<JsonWriteState<'E>>) value =
+        if isNull state.ConcreteList then state.List.Add(value)
+        else
+            ensureList state.ConcreteList 1
+            state.ConcreteList.Add(value)
+
+    let appendIList (state: byref<JsonWriteState<'E>>) value =
+        Checked.(+) state.Written 1 |> ignore
+        addToList &state value
+        state.Written <- state.Written + 1
+
+    let appendIListSpan (state: byref<JsonWriteState<'E>>) (source: ReadOnlySpan<'E>) =
+        Checked.(+) state.Written source.Length |> ignore
+        for index = 0 to source.Length - 1 do
+            addToList &state source[index]
+            state.Written <- state.Written + 1
+
+    let private listUnit (state: byref<JsonWriteState<byte>>) value =
+        addToList &state value
+        state.Written <- state.Written + 1
+
+    let private listRegion units (state: byref<JsonWriteState<byte>>) =
+        Checked.(+) state.Written units |> ignore
+
+    let utf8ListText (value: string) start count (state: byref<JsonWriteState<byte>>) =
         let finish = start + count
         let mutable index = start
         while index < finish do
             let c = int value[index]
             if c < 0x80 then
-                listRegion reserve 1 &state
-                listUnit list &state (byte c)
+                listRegion 1 &state
+                listUnit &state (byte c)
             elif c < 0x800 then
-                listRegion reserve 2 &state
-                listUnit list &state (byte(0xC0 ||| (c >>> 6)))
-                listUnit list &state (byte(0x80 ||| (c &&& 63)))
+                listRegion 2 &state
+                listUnit &state (byte(0xC0 ||| (c >>> 6)))
+                listUnit &state (byte(0x80 ||| (c &&& 63)))
             else
                 let mutable code = c
                 if c >= 0xD800 && c <= 0xDFFF then
@@ -128,26 +121,28 @@ module internal JsonWriteBuffer =
                         index <- index + 1
                     else code <- 0xFFFD
                 if code > 0xFFFF then
-                    listRegion reserve 4 &state
-                    listUnit list &state (byte(0xF0 ||| (code >>> 18)))
-                    listUnit list &state (byte(0x80 ||| ((code >>> 12) &&& 63)))
+                    listRegion 4 &state
+                    listUnit &state (byte(0xF0 ||| (code >>> 18)))
+                    listUnit &state (byte(0x80 ||| ((code >>> 12) &&& 63)))
                 else
-                    listRegion reserve 3 &state
-                    listUnit list &state (byte(0xE0 ||| (code >>> 12)))
-                listUnit list &state (byte(0x80 ||| ((code >>> 6) &&& 63)))
-                listUnit list &state (byte(0x80 ||| (code &&& 63)))
+                    listRegion 3 &state
+                    listUnit &state (byte(0xE0 ||| (code >>> 12)))
+                listUnit &state (byte(0x80 ||| ((code >>> 6) &&& 63)))
+                listUnit &state (byte(0x80 ||| (code &&& 63)))
             index <- index + 1
 
 type internal IJsonTextOutput<'Element> =
     abstract AsciiCode: 'Element -> byte
     abstract Ascii: byte * byref<Span<'Element>> * byref<JsonWriteState<'Element>> -> unit
     abstract Text: string * int * int * byref<Span<'Element>> * byref<JsonWriteState<'Element>> -> unit
+    abstract Raw: ReadOnlySpan<'Element> * byref<Span<'Element>> * byref<JsonWriteState<'Element>> -> unit
 
 [<Struct>]
 type internal JsonUtf16Output =
     interface IJsonTextOutput<char> with
         member _.AsciiCode(value) = byte value
         member _.Ascii(value,destination,state) = JsonWriteBuffer.append &destination &state (char value)
+        member _.Raw(value,destination,state) = JsonWriteBuffer.appendSpan &destination &state value
         member _.Text(value,start,count,destination,state) =
             JsonWriteBuffer.appendSpan &destination &state (value.AsSpan(start,count))
 
@@ -156,8 +151,9 @@ type internal JsonUtf8Output =
     interface IJsonTextOutput<byte> with
         member _.AsciiCode(value) = value
         member _.Ascii(value,destination,state) = JsonWriteBuffer.append &destination &state value
+        member _.Raw(value,destination,state) = JsonWriteBuffer.appendSpan &destination &state value
         member _.Text(value,start,count,destination,state) =
-            if not state.Discard && count > 0 && isNull state.List then
+            if count > 0 then
                 #if NETSTANDARD2_1_OR_GREATER || NET6_0_OR_GREATER
                 let source = value.AsSpan(start,count)
                 let bytes = Encoding.UTF8.GetByteCount(source)
@@ -172,11 +168,23 @@ type internal JsonUtf8Output =
                 let written = Encoding.UTF8.GetBytes(source,count,NativePtr.add target state.Written,destination.Length-state.Written)
                 #endif
                 state.Written <- state.Written + written
-            elif not state.Discard && count > 0 then
-                match state.List with
-                | :? List<byte> as list ->
-                    JsonWriteBuffer.utf8ListText (fun count -> JsonWriteBuffer.ensureList list count) list value start count &state
-                | list -> JsonWriteBuffer.utf8ListText ignore list value start count &state
+[<Struct>]
+type internal JsonUtf8IListOutput =
+    interface IJsonTextOutput<byte> with
+        member _.AsciiCode(value) = value
+        member _.Ascii(value,_,state) = JsonWriteBuffer.appendIList &state value
+        member _.Raw(value,_,state) = JsonWriteBuffer.appendIListSpan &state value
+        member _.Text(value,start,count,_,state) =
+            JsonWriteBuffer.utf8ListText value start count &state
+
+[<Struct>]
+type internal JsonUtf16IListOutput =
+    interface IJsonTextOutput<char> with
+        member _.AsciiCode(value) = byte value
+        member _.Ascii(value,_,state) = JsonWriteBuffer.appendIList &state (char value)
+        member _.Raw(value,_,state) = JsonWriteBuffer.appendIListSpan &state value
+        member _.Text(value,start,count,_,state) =
+            JsonWriteBuffer.appendIListSpan &state (value.AsSpan(start,count))
 
 module internal JsonStringEscaping =
     // Skip safe ASCII in vectors; every exceptional or Unicode unit still uses escape.

@@ -35,6 +35,7 @@ module internal CodecArrayEmitter =
         il.Emit OpCodes.Ldc_I4_1
         il.EmitMethod(OpCodes.Call,input.NextElement)
         il.EmitBranch(OpCodes.Brfalse,finish)
+        let call = match input.Operation element with Some call -> call | None -> input.Read element
         loop il input.Operation input.Read element (fun read ->
             let loop = il.Label()
             let completed = il.Label()
@@ -53,10 +54,17 @@ module internal CodecArrayEmitter =
             il.EmitMethod(OpCodes.Call,input.GrowArray element)
             il.EmitLocal(OpCodes.Stloc,values)
             il.Mark capacity
-            il.EmitLocal(OpCodes.Ldloc,values)
-            il.EmitLocal(OpCodes.Ldloc,count)
-            read (fun () -> il.Emit OpCodes.Ldarg_0)
-            il.EmitType(OpCodes.Stelem,element)
+            if il.ResultParameter call then
+                il.Emit OpCodes.Ldarg_0
+                il.EmitLocal(OpCodes.Ldloc,values)
+                il.EmitLocal(OpCodes.Ldloc,count)
+                il.EmitType(OpCodes.Ldelema,element)
+                il.EmitMethod(OpCodes.Call,call)
+            else
+                il.EmitLocal(OpCodes.Ldloc,values)
+                il.EmitLocal(OpCodes.Ldloc,count)
+                read (fun () -> il.Emit OpCodes.Ldarg_0)
+                il.EmitType(OpCodes.Stelem,element)
             il.EmitLocal(OpCodes.Ldloc,count)
             il.Emit OpCodes.Ldc_I4_1
             il.Emit OpCodes.Add
@@ -78,21 +86,18 @@ module internal CodecArrayEmitter =
 
     let rawArrayWriter (il: CodecIL<'T,'M,'F>) int32 (output: CodecArrayWriterApi<'T,'M>) element =
         let present = il.Label()
-        il.Emit OpCodes.Ldarg_0
+        il.InputValue()
         il.EmitBranch(OpCodes.Brtrue,present)
-        il.Emit OpCodes.Ldarg_1
-        il.Emit OpCodes.Ldarg_2
-        il.EmitMethod(OpCodes.Call,output.Null)
+        output.Literal "null"
         il.Emit OpCodes.Ret
         il.Mark present
-        il.Emit OpCodes.Ldarg_1
-        il.Emit OpCodes.Ldarg_2
-        il.EmitMethod(OpCodes.Call,output.BeginArray)
+        output.Literal "["
         let index = il.Local int32
         let finish = il.Label()
-        il.Emit OpCodes.Ldarg_0
+        il.InputValue()
         il.Emit OpCodes.Ldlen
         il.EmitBranch(OpCodes.Brfalse,finish)
+        let call = match output.Operation element with Some call -> call | None -> output.Serialize element
         loop il output.Operation output.Serialize element (fun write ->
             let loop = il.Label()
             let completed = il.Label()
@@ -100,14 +105,12 @@ module internal CodecArrayEmitter =
             let value = il.Label()
             il.EmitLocal(OpCodes.Ldloc,index)
             il.EmitBranch(OpCodes.Brfalse,value)
-            il.Emit OpCodes.Ldarg_1
-            il.Emit OpCodes.Ldarg_2
-            il.EmitMethod(OpCodes.Call,output.Separator)
+            output.Literal ","
             il.Mark value
             write (fun () ->
-                il.Emit OpCodes.Ldarg_0
+                il.InputValue()
                 il.EmitLocal(OpCodes.Ldloc,index)
-                il.EmitType(OpCodes.Ldelem,element)
+                il.EmitType((if il.ByRefParameter(call,0) then OpCodes.Ldelema else OpCodes.Ldelem),element)
                 il.Emit OpCodes.Ldarg_1
                 il.Emit OpCodes.Ldarg_2)
             il.EmitLocal(OpCodes.Ldloc,index)
@@ -115,14 +118,12 @@ module internal CodecArrayEmitter =
             il.Emit OpCodes.Add
             il.EmitLocal(OpCodes.Stloc,index)
             il.EmitLocal(OpCodes.Ldloc,index)
-            il.Emit OpCodes.Ldarg_0
+            il.InputValue()
             il.Emit OpCodes.Ldlen
             il.Emit OpCodes.Conv_I4
             il.EmitBranch(OpCodes.Bge,completed)
             il.EmitBranch(OpCodes.Br,loop)
             il.Mark completed)
         il.Mark finish
-        il.Emit OpCodes.Ldarg_1
-        il.Emit OpCodes.Ldarg_2
-        il.EmitMethod(OpCodes.Call,output.EndArray)
+        output.Literal "]"
         il.Emit OpCodes.Ret

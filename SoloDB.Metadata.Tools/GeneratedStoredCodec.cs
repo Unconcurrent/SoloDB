@@ -24,10 +24,15 @@ internal static class GeneratedStoredCodec
             GeneratedJsonAssembly.Delegate(entry,Callable("JsonDirectReader`2",reader),
                 api.Operation("JsonStoredNumeric",TypeSupport.StoredNumeric(target.FullName).Value.Item2,reader));
         }
-        foreach(var element in new[]{module.TypeSystem.Byte,module.TypeSystem.Char})
-            GeneratedJsonAssembly.Delegate(entry,Callable("JsonDirectWriter`2",element),
-                GeneratedOutputCodec.StoredNumber(definitions,module,owner,product,target,element,"WriteStoredNumber"+element.Name+index));
-        entry.Emit(OpCodes.Call,api.Metadata("RegisterRaw",target));
+        entry.Emit(OpCodes.Call,api.Metadata("RegisterRawReaders",target));
+        foreach(var kind in GeneratedJsonDefinitions.Outputs) {
+            var writes = definitions.OutputView(kind);
+            foreach(var element in new[]{module.TypeSystem.Byte,module.TypeSystem.Char})
+                GeneratedJsonAssembly.Delegate(entry,Callable("JsonDirectWriter`2",element),
+                    GeneratedOutputCodec.StoredNumber(writes,module,owner,product,target,element,"WriteStoredNumber"+element.Name+index));
+            GeneratedJsonAssembly.BoxedWriters(definitions,module,owner,entry,product,target);
+            entry.Emit(OpCodes.Call,api.Metadata("RegisterOutputWriters",target,writes.OutputType(module,product,module.TypeSystem.Byte),writes.OutputType(module,product,module.TypeSystem.Char)));
+        }
     }
 
     internal static void Register(GeneratedJsonDefinitions native,ModuleDefinition module,TypeDefinition owner,

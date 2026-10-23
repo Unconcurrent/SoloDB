@@ -147,8 +147,8 @@ type SqlRowValue private () =
         let mutable destination = Span<char>.Empty
         let mutable state = JsonWriteState<char>(null,null,null)
         match row.StorageClass ordinal with
-        | SQLitePCL.raw.SQLITE_INTEGER -> JsonRawNumericWriter.int64Utf16 (row.GetInt64 ordinal) &destination &state
-        | SQLitePCL.raw.SQLITE_FLOAT -> JsonRawNumericWriter.doubleUtf16 (row.GetDouble ordinal) &destination &state
+        | SQLitePCL.raw.SQLITE_INTEGER -> JsonRawNumericWriter.int64Utf16 (JsonUtf16Output()) (row.GetInt64 ordinal) &destination &state
+        | SQLitePCL.raw.SQLITE_FLOAT -> JsonRawNumericWriter.doubleUtf16 (JsonUtf16Output()) (row.GetDouble ordinal) &destination &state
         | SQLitePCL.raw.SQLITE_TEXT -> JsonStringEscaping.write (JsonUtf16Output()) (row.GetString ordinal) &destination &state
         | _ -> raise(InvalidCastException("The SQL value is not a JSON scalar."))
         #if NETSTANDARD2_1_OR_GREATER || NET6_0_OR_GREATER

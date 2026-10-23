@@ -401,8 +401,6 @@ module internal TypeSupport =
 
     let ArrayValuesWrapper(array, element) = array && SupportsValuesWrapper element
 
-    let KnownWriterCandidate(abstractType, sameType) = not abstractType && not sameType
-
     let PolymorphicNative(stored, definition) = stored && (StoredNumeric definition).IsSome
 
     let StoredDynamic(shape, nonGenericEnumerable) =

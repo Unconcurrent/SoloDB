@@ -332,45 +332,46 @@ type JsonValue =
 
     /// Writes typed JSON to UTF-8 storage, growing it when required, and returns the written byte count.
     /// A release callback requires a custom grow callback. The final span remains caller-owned.
-    static member WriteJson<'T>(value: 'T, destination: byref<Span<byte>>,
+    static member WriteJson<'T>(value: byref<'T>, destination: byref<Span<byte>>,
                                [<Optional; DefaultParameterValue(null: JsonBufferGrow<byte>)>] grow: JsonBufferGrow<byte>,
                                [<Optional; DefaultParameterValue(null: JsonBufferRelease<byte>)>] release: JsonBufferRelease<byte>): int =
         let mutable state = JsonWriteState<byte>(null,grow,release)
-        JsonRawWrite<'T,byte,JsonUtf8Writer,JsonNativeContract>.Write(value,&destination,&state)
+        JsonRawWrite<'T,byte,JsonUtf8Writer,JsonNativeContract>.Write(&value,&destination,&state)
         state.Written
 
     /// Writes typed JSON to UTF-16 storage, growing it when required, and returns the written character count.
     /// A release callback requires a custom grow callback. The final span remains caller-owned.
-    static member WriteJson<'T>(value: 'T, destination: byref<Span<char>>,
+    static member WriteJson<'T>(value: byref<'T>, destination: byref<Span<char>>,
                                [<Optional; DefaultParameterValue(null: JsonBufferGrow<char>)>] grow: JsonBufferGrow<char>,
                                [<Optional; DefaultParameterValue(null: JsonBufferRelease<char>)>] release: JsonBufferRelease<char>): int =
         let mutable state = JsonWriteState<char>(null,grow,release)
-        JsonRawWrite<'T,char,JsonUtf16Writer,JsonNativeContract>.Write(value,&destination,&state)
+        JsonRawWrite<'T,char,JsonUtf16Writer,JsonNativeContract>.Write(&value,&destination,&state)
         state.Written
 
     /// Appends typed UTF-8 JSON and returns the number of bytes added.
-    static member WriteJson<'T>(value: 'T, destination: IList<byte>): int =
+    static member WriteJson<'T>(value: byref<'T>, destination: IList<byte>): int =
         if isNull destination then nullArg "destination"
         let mutable state = JsonWriteState<byte>(destination,null,null)
         let mutable span = Span<byte>.Empty
-        JsonRawWrite<'T,byte,JsonUtf8Writer,JsonNativeContract>.Write(value,&span,&state)
+        JsonRawWrite<'T,byte,JsonUtf8IListWriter,JsonNativeContract>.Write(&value,&span,&state)
         state.Written
 
     /// Appends typed UTF-16 JSON and returns the number of characters added.
-    static member WriteJson<'T>(value: 'T, destination: IList<char>): int =
+    static member WriteJson<'T>(value: byref<'T>, destination: IList<char>): int =
         if isNull destination then nullArg "destination"
         let mutable state = JsonWriteState<char>(destination,null,null)
         let mutable span = Span<char>.Empty
-        JsonRawWrite<'T,char,JsonUtf16Writer,JsonNativeContract>.Write(value,&span,&state)
+        JsonRawWrite<'T,char,JsonUtf16IListWriter,JsonNativeContract>.Write(&value,&span,&state)
         state.Written
 
     static member internal WriteBuffer<'T>(value: 'T, includeType: bool, omitId: bool): ArraySegment<char> =
+        let mutable value = value
         let mutable destination = Span<char>.Empty
         let mutable state = JsonWriteState<char>(null,null,null)
         if includeType then (box value).GetType() |> ignore
         state.IncludeType <- includeType
         state.OmitId <- omitId
-        JsonRawWrite<'T,char,JsonUtf16Writer,JsonStoredContract>.Write(value,&destination,&state)
+        JsonRawWrite<'T,char,JsonUtf16Writer,JsonStoredContract>.Write(&value,&destination,&state)
         ArraySegment<char>(state.Storage,0,state.Written)
 
     /// Runtime and query assignment use the same declared stored writer selection.
@@ -406,7 +407,7 @@ type JsonValue =
         JsonRawOutput<char,JsonUtf16Writer,JsonNativeContract>.BeginArray(&destination,&state)
         for index = 0 to count - 1 do
             if index > 0 then JsonRawOutput<char,JsonUtf16Writer,JsonNativeContract>.Separator(&destination,&state)
-            JsonRawNumericWriter.int64Utf16 (idAt index) &destination &state
+            JsonRawNumericWriter.int64Utf16 (JsonUtf16Output()) (idAt index) &destination &state
         JsonRawOutput<char,JsonUtf16Writer,JsonNativeContract>.EndArray(&destination,&state)
         System.String(state.Storage,0,state.Written)
 
@@ -486,7 +487,8 @@ type JsonValue =
         for pair in values do
             JsonRawOutput<char,JsonUtf16Writer,JsonNativeContract>.Property(pair.Key,comma,&destination,&state)
             comma <- true
-            JsonRawWrite<obj,char,JsonUtf16Writer,JsonNativeContract>.Member(pair.Value,&destination,&state)
+            let mutable value = pair.Value
+            JsonRawWrite<obj,char,JsonUtf16Writer,JsonNativeContract>.Member(&value,&destination,&state)
         JsonRawOutput<char,JsonUtf16Writer,JsonNativeContract>.EndObject<obj>(comma,true,&destination,&state)
         System.String(state.Storage,0,state.Written)
 
@@ -814,14 +816,7 @@ type JsonValue =
         json
         
 
-    static member val internal ParserApi = {
-        Null = fun() -> Null
-        Bool = Boolean
-        Str = String
-        Num = Number
-        Arr = List
-        Obj = Object
-    }
+    static member internal ParserApi = JsonImpl.ParserApi
 
     /// <summary>
     /// Parses a JSON string into a JsonValue.
@@ -883,7 +878,8 @@ type JsonValue =
 
         let cursor = JsonLexer.fromUtf16Span jsonSpan
         let mutable context = JsonReadContext(cursor,{ Start = 0; Length = jsonSpan.Length; Depth = 0 })
-        let value = JsonRawRead<JsonNativeContract>.Read<'T,Utf16Reader> &context
+        let mutable value = Unchecked.defaultof<'T>
+        JsonRawRead<JsonNativeContract>.ReadInto<'T,Utf16Reader>(&context,&value)
         JsonReadCursor.finish &context
         value
 
@@ -900,7 +896,8 @@ type JsonValue =
 
         let cursor = JsonLexer.fromUtf8Span jsonSpan
         let mutable context = JsonReadContext(cursor,{ Start = 0; Length = jsonSpan.Length; Depth = 0 })
-        let value = JsonRawRead<JsonNativeContract>.Read<'T,Utf8Reader> &context
+        let mutable value = Unchecked.defaultof<'T>
+        JsonRawRead<JsonNativeContract>.ReadInto<'T,Utf8Reader>(&context,&value)
         JsonReadCursor.finish &context
         value
 
@@ -1187,8 +1184,8 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         let numeric = (TypeSupport.NumericCore typeof<'T>.FullName).IsSome
         let read8 = { Reader = utf8Read; ReadRuntime = JsonDirectRuntimeReader<Utf8Reader>(fun context -> box(JsonRawRead<'Contract>.Invoke<'T,Utf8Reader>(utf8Read,&context))); Intrinsic = if numeric then utf8Read else null }
         let read16 = { Reader = utf16Read; ReadRuntime = JsonDirectRuntimeReader<Utf16Reader>(fun context -> box(JsonRawRead<'Contract>.Invoke<'T,Utf16Reader>(utf16Read,&context))); Intrinsic = if numeric then utf16Read else null }
-        let write8 = { Writer = utf8Write; WriteRuntime = JsonDirectRuntimeWriter<byte>(fun value destination state -> utf8Write.Invoke(unbox<'T> value,&destination,&state)) }
-        let write16 = { Writer = utf16Write; WriteRuntime = JsonDirectRuntimeWriter<char>(fun value destination state -> utf16Write.Invoke(unbox<'T> value,&destination,&state)) }
+        let write8 = { Writer = utf8Write; WriteRuntime = JsonWriterRuntime.runtimeWriter utf8Write; WriteActual = null }
+        let write16 = { Writer = utf16Write; WriteRuntime = JsonWriterRuntime.runtimeWriter utf16Write; WriteActual = null }
         TypeMetadataCache.Register(typeof<'T>, fun metadata ->
             let metadata = JsonRawReadMetadata<'Contract>.Store<Utf8Reader>({ Generated = true; Value = read8 },metadata)
             let metadata = JsonRawReadMetadata<'Contract>.Store<Utf16Reader>({ Generated = true; Value = read16 },metadata)
@@ -1219,36 +1216,64 @@ and [<AbstractClass; Sealed>] JsonMetadata =
                 match (if equivalentReader then native.JsonUtf16Read else ValueNone) with
                 | ValueSome operation -> JsonRawReadMetadata<JsonStoredContract>.Store<Utf16Reader>(operation,metadata)
                 | ValueNone -> metadata
-            let metadata =
-                match (if equivalentWriter then native.JsonUtf8Write else ValueNone) with
-                | ValueSome operation -> JsonRawWriteMetadata<byte,JsonUtf8Writer,JsonStoredContract>.Store(operation,metadata)
+            let copy element output metadata =
+                match (if equivalentWriter then MetadataMap.tryFind (struct(element,output,typeof<JsonNativeContract>)) metadata.JsonWrites else ValueNone) with
+                | ValueSome operation -> { metadata with JsonWrites = MetadataMap.set (struct(element,output,typeof<JsonStoredContract>)) operation metadata.JsonWrites }
                 | ValueNone -> metadata
-            match (if equivalentWriter then native.JsonUtf16Write else ValueNone) with
-            | ValueSome operation -> JsonRawWriteMetadata<char,JsonUtf16Writer,JsonStoredContract>.Store(operation,metadata)
-            | ValueNone -> metadata)
+            metadata
+            |> copy typeof<byte> typeof<JsonUtf8Writer>
+            |> copy typeof<char> typeof<JsonUtf16Writer>
+            |> copy typeof<byte> typeof<JsonUtf8IListWriter>
+            |> copy typeof<char> typeof<JsonUtf16IListWriter>
+            |> copy typeof<byte> typeof<JsonValidationOutput<byte>>
+            |> copy typeof<char> typeof<JsonValidationOutput<char>>)
 
     static member internal RegisterStoredDynamic() =
         JsonRawRead<JsonStoredContract>.Ensure<obj,Utf8Reader>()
         JsonRawRead<JsonStoredContract>.Ensure<obj,Utf16Reader>()
         JsonRawWrite<obj,byte,JsonUtf8Writer,JsonStoredContract>.Ensure()
         JsonRawWrite<obj,char,JsonUtf16Writer,JsonStoredContract>.Ensure()
+        JsonRawWrite<obj,byte,JsonUtf8IListWriter,JsonStoredContract>.Ensure()
+        JsonRawWrite<obj,char,JsonUtf16IListWriter,JsonStoredContract>.Ensure()
+        JsonRawWrite<obj,byte,JsonValidationOutput<byte>,JsonStoredContract>.Ensure()
+        JsonRawWrite<obj,char,JsonValidationOutput<char>,JsonStoredContract>.Ensure()
 
     static member internal RegisterStoredDocument<'T>() =
         JsonMetadata.RegisterStoredRaw<DBRef<'T>>(JsonRawCollections<JsonStoredContract>.DocumentReader<'T,Utf8Reader>(),JsonRawCollections<JsonStoredContract>.DocumentReader<'T,Utf16Reader>(),
             JsonRawCollections<JsonStoredContract>.DocumentWriter<'T,byte,JsonUtf8Writer>(),JsonRawCollections<JsonStoredContract>.DocumentWriter<'T,char,JsonUtf16Writer>())
+        JsonMetadata.RegisterOutputWritersCore<DBRef<'T>,JsonUtf8IListWriter,JsonUtf16IListWriter,JsonStoredContract>(
+            JsonRawCollections<JsonStoredContract>.DocumentWriter<'T,byte,JsonUtf8IListWriter>(),JsonRawCollections<JsonStoredContract>.DocumentWriter<'T,char,JsonUtf16IListWriter>())
+        JsonMetadata.RegisterOutputWritersCore<DBRef<'T>,JsonValidationOutput<byte>,JsonValidationOutput<char>,JsonStoredContract>(
+            JsonRawCollections<JsonStoredContract>.DocumentWriter<'T,byte,JsonValidationOutput<byte>>(),JsonRawCollections<JsonStoredContract>.DocumentWriter<'T,char,JsonValidationOutput<char>>())
+
     static member internal RegisterStoredTypedDocument<'T,'Id>() =
         JsonMetadata.RegisterStoredRaw<DBRef<'T,'Id>>(JsonRawCollections<JsonStoredContract>.TypedDocumentReader<'T,'Id,Utf8Reader>(),JsonRawCollections<JsonStoredContract>.TypedDocumentReader<'T,'Id,Utf16Reader>(),
             JsonRawCollections<JsonStoredContract>.TypedDocumentWriter<'T,'Id,byte,JsonUtf8Writer>(),JsonRawCollections<JsonStoredContract>.TypedDocumentWriter<'T,'Id,char,JsonUtf16Writer>())
+        JsonMetadata.RegisterOutputWritersCore<DBRef<'T,'Id>,JsonUtf8IListWriter,JsonUtf16IListWriter,JsonStoredContract>(
+            JsonRawCollections<JsonStoredContract>.TypedDocumentWriter<'T,'Id,byte,JsonUtf8IListWriter>(),JsonRawCollections<JsonStoredContract>.TypedDocumentWriter<'T,'Id,char,JsonUtf16IListWriter>())
+        JsonMetadata.RegisterOutputWritersCore<DBRef<'T,'Id>,JsonValidationOutput<byte>,JsonValidationOutput<char>,JsonStoredContract>(
+            JsonRawCollections<JsonStoredContract>.TypedDocumentWriter<'T,'Id,byte,JsonValidationOutput<byte>>(),JsonRawCollections<JsonStoredContract>.TypedDocumentWriter<'T,'Id,char,JsonValidationOutput<char>>())
+
     static member internal RegisterStoredFileReference() =
         JsonMetadata.RegisterStoredRaw<FileRef>(JsonRawCollections<JsonStoredContract>.FileReferenceReader<Utf8Reader>(),JsonRawCollections<JsonStoredContract>.FileReferenceReader<Utf16Reader>(),
             JsonRawCollections<JsonStoredContract>.FileReferenceWriter<byte,JsonUtf8Writer>(),JsonRawCollections<JsonStoredContract>.FileReferenceWriter<char,JsonUtf16Writer>())
+        JsonMetadata.RegisterOutputWritersCore<FileRef,JsonUtf8IListWriter,JsonUtf16IListWriter,JsonStoredContract>(
+            JsonRawCollections<JsonStoredContract>.FileReferenceWriter<byte,JsonUtf8IListWriter>(),JsonRawCollections<JsonStoredContract>.FileReferenceWriter<char,JsonUtf16IListWriter>())
+        JsonMetadata.RegisterOutputWritersCore<FileRef,JsonValidationOutput<byte>,JsonValidationOutput<char>,JsonStoredContract>(
+            JsonRawCollections<JsonStoredContract>.FileReferenceWriter<byte,JsonValidationOutput<byte>>(),JsonRawCollections<JsonStoredContract>.FileReferenceWriter<char,JsonValidationOutput<char>>())
+
     static member internal RegisterStoredDirectoryReference() =
         JsonMetadata.RegisterStoredRaw<DirectoryRef>(JsonRawCollections<JsonStoredContract>.DirectoryReferenceReader<Utf8Reader>(),JsonRawCollections<JsonStoredContract>.DirectoryReferenceReader<Utf16Reader>(),
             JsonRawCollections<JsonStoredContract>.DirectoryReferenceWriter<byte,JsonUtf8Writer>(),JsonRawCollections<JsonStoredContract>.DirectoryReferenceWriter<char,JsonUtf16Writer>())
+        JsonMetadata.RegisterOutputWritersCore<DirectoryRef,JsonUtf8IListWriter,JsonUtf16IListWriter,JsonStoredContract>(
+            JsonRawCollections<JsonStoredContract>.DirectoryReferenceWriter<byte,JsonUtf8IListWriter>(),JsonRawCollections<JsonStoredContract>.DirectoryReferenceWriter<char,JsonUtf16IListWriter>())
+        JsonMetadata.RegisterOutputWritersCore<DirectoryRef,JsonValidationOutput<byte>,JsonValidationOutput<char>,JsonStoredContract>(
+            JsonRawCollections<JsonStoredContract>.DirectoryReferenceWriter<byte,JsonValidationOutput<byte>>(),JsonRawCollections<JsonStoredContract>.DirectoryReferenceWriter<char,JsonValidationOutput<char>>())
 
     static member private RegisterRawReadersCore<'T,'Contract>(utf8: JsonDirectReader<'T,Utf8Reader>, utf16: JsonDirectReader<'T,Utf16Reader>): unit =
-        let read8 = { Reader = utf8; ReadRuntime = JsonDirectRuntimeReader<Utf8Reader>(fun context -> box(JsonRawRead<'Contract>.Invoke<'T,Utf8Reader>(utf8,&context))); Intrinsic = null }
-        let read16 = { Reader = utf16; ReadRuntime = JsonDirectRuntimeReader<Utf16Reader>(fun context -> box(JsonRawRead<'Contract>.Invoke<'T,Utf16Reader>(utf16,&context))); Intrinsic = null }
+        let numeric = (TypeSupport.NumericCore typeof<'T>.FullName).IsSome
+        let read8 = { Reader = utf8; ReadRuntime = JsonDirectRuntimeReader<Utf8Reader>(fun context -> box(JsonRawRead<'Contract>.Invoke<'T,Utf8Reader>(utf8,&context))); Intrinsic = if numeric then utf8 else null }
+        let read16 = { Reader = utf16; ReadRuntime = JsonDirectRuntimeReader<Utf16Reader>(fun context -> box(JsonRawRead<'Contract>.Invoke<'T,Utf16Reader>(utf16,&context))); Intrinsic = if numeric then utf16 else null }
         TypeMetadataCache.Register(typeof<'T>,fun metadata ->
             let metadata = JsonRawReadMetadata<'Contract>.Store<Utf8Reader>({ Generated = true; Value = read8 },metadata)
             JsonRawReadMetadata<'Contract>.Store<Utf16Reader>({ Generated = true; Value = read16 },metadata))
@@ -1260,8 +1285,8 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         JsonMetadata.RegisterRawReadersCore<'T,JsonStoredContract>(utf8,utf16)
 
     static member private RegisterRawWritersCore<'T,'Contract>(utf8: JsonDirectWriter<'T,byte>, utf16: JsonDirectWriter<'T,char>): unit =
-        let write8 = { Writer = utf8; WriteRuntime = JsonDirectRuntimeWriter<byte>(fun value destination state -> utf8.Invoke(unbox<'T> value,&destination,&state)) }
-        let write16 = { Writer = utf16; WriteRuntime = JsonDirectRuntimeWriter<char>(fun value destination state -> utf16.Invoke(unbox<'T> value,&destination,&state)) }
+        let write8 = { Writer = utf8; WriteRuntime = JsonWriterRuntime.runtimeWriter utf8; WriteActual = null }
+        let write16 = { Writer = utf16; WriteRuntime = JsonWriterRuntime.runtimeWriter utf16; WriteActual = null }
         TypeMetadataCache.Register(typeof<'T>,fun metadata ->
             let metadata = JsonRawWriteMetadata<byte,JsonUtf8Writer,'Contract>.Store({ Generated = true; Value = write8 },metadata)
             JsonRawWriteMetadata<char,JsonUtf16Writer,'Contract>.Store({ Generated = true; Value = write16 },metadata))
@@ -1272,19 +1297,81 @@ and [<AbstractClass; Sealed>] JsonMetadata =
     static member internal RegisterStoredRawWriters<'T>(utf8: JsonDirectWriter<'T,byte>, utf16: JsonDirectWriter<'T,char>): unit =
         JsonMetadata.RegisterRawWritersCore<'T,JsonStoredContract>(utf8,utf16)
 
+    static member private PublishOutputWriters<'T,'O8,'O16,'Contract when 'O8 : struct and 'O8 :> IJsonValueOutput<byte> and 'O16 : struct and 'O16 :> IJsonValueOutput<char>>
+        (utf8: JsonDirectWriter<'T,byte>, utf16: JsonDirectWriter<'T,char>, runtime8: JsonDirectRuntimeWriter<byte>, runtime16: JsonDirectRuntimeWriter<char>): unit =
+        let write8 = { Writer = utf8; WriteRuntime = runtime8; WriteActual = null }
+        let write16 = { Writer = utf16; WriteRuntime = runtime16; WriteActual = null }
+        TypeMetadataCache.Register(typeof<'T>,fun metadata ->
+            let metadata = JsonRawWriteMetadata<byte,'O8,'Contract>.Store({ Generated = true; Value = write8 },metadata)
+            JsonRawWriteMetadata<char,'O16,'Contract>.Store({ Generated = true; Value = write16 },metadata))
+
+    static member private RegisterOutputWritersCore<'T,'O8,'O16,'Contract when 'O8 : struct and 'O8 :> IJsonValueOutput<byte> and 'O16 : struct and 'O16 :> IJsonValueOutput<char>>
+        (utf8: JsonDirectWriter<'T,byte>, utf16: JsonDirectWriter<'T,char>): unit =
+        JsonMetadata.PublishOutputWriters<'T,'O8,'O16,'Contract>(utf8,utf16,JsonWriterRuntime.runtimeWriter utf8,JsonWriterRuntime.runtimeWriter utf16)
+
+    static member internal RegisterOutputWriters<'T,'O8,'O16 when 'O8 : struct and 'O8 :> IJsonValueOutput<byte> and 'O16 : struct and 'O16 :> IJsonValueOutput<char>>
+        (utf8: JsonDirectWriter<'T,byte>, utf16: JsonDirectWriter<'T,char>, runtime8: JsonDirectRuntimeWriter<byte>, runtime16: JsonDirectRuntimeWriter<char>): unit =
+        JsonMetadata.PublishOutputWriters<'T,'O8,'O16,JsonNativeContract>(utf8,utf16,runtime8,runtime16)
+
+    static member internal RegisterStoredOutputWriters<'T,'O8,'O16 when 'O8 : struct and 'O8 :> IJsonValueOutput<byte> and 'O16 : struct and 'O16 :> IJsonValueOutput<char>>
+        (utf8: JsonDirectWriter<'T,byte>, utf16: JsonDirectWriter<'T,char>, runtime8: JsonDirectRuntimeWriter<byte>, runtime16: JsonDirectRuntimeWriter<char>): unit =
+        JsonMetadata.PublishOutputWriters<'T,'O8,'O16,JsonStoredContract>(utf8,utf16,runtime8,runtime16)
+
+    static member private RegisterOutputBodiesCore<'T,'O8,'O16,'Contract when 'O8 : struct and 'O8 :> IJsonValueOutput<byte> and 'O16 : struct and 'O16 :> IJsonValueOutput<char>>(utf8: JsonDirectWriter<'T,byte>, utf16: JsonDirectWriter<'T,char>, runtime8: JsonDirectRuntimeWriter<byte>, runtime16: JsonDirectRuntimeWriter<char>): unit =
+        JsonDefaultMethods.publish typeof<'T> typeof<byte> typeof<'O8> (JsonOperationPolicy<'Contract>.Name "raw-model-body") utf8
+        JsonDefaultMethods.publish typeof<'T> typeof<char> typeof<'O16> (JsonOperationPolicy<'Contract>.Name "raw-model-body") utf16
+        TypeMetadataCache.Register(typeof<'T>,fun metadata ->
+            let metadata = JsonRawWriteMetadata<byte,'O8,'Contract>.StoreActual(
+                runtime8,metadata)
+            JsonRawWriteMetadata<char,'O16,'Contract>.StoreActual(
+                runtime16,metadata))
+
+    static member internal RegisterOutputBodies<'T,'O8,'O16 when 'O8 : struct and 'O8 :> IJsonValueOutput<byte> and 'O16 : struct and 'O16 :> IJsonValueOutput<char>>(utf8: JsonDirectWriter<'T,byte>, utf16: JsonDirectWriter<'T,char>, runtime8: JsonDirectRuntimeWriter<byte>, runtime16: JsonDirectRuntimeWriter<char>): unit =
+        JsonMetadata.RegisterOutputBodiesCore<'T,'O8,'O16,JsonNativeContract>(utf8,utf16,runtime8,runtime16)
+
+    static member internal RegisterStoredOutputBodies<'T,'O8,'O16 when 'O8 : struct and 'O8 :> IJsonValueOutput<byte> and 'O16 : struct and 'O16 :> IJsonValueOutput<char>>(utf8: JsonDirectWriter<'T,byte>, utf16: JsonDirectWriter<'T,char>, runtime8: JsonDirectRuntimeWriter<byte>, runtime16: JsonDirectRuntimeWriter<char>): unit =
+        JsonMetadata.RegisterOutputBodiesCore<'T,'O8,'O16,JsonStoredContract>(utf8,utf16,runtime8,runtime16)
+
+    static member internal RegisterOutputSequenceBytes<'O8,'O16>(utf8: JsonDirectWriter<byte[],byte>, utf16: JsonDirectWriter<byte[],char>): unit =
+        JsonDefaultMethods.publish typeof<byte[]> typeof<byte> typeof<'O8> "sequence-bytes-write" utf8
+        JsonDefaultMethods.publish typeof<byte[]> typeof<char> typeof<'O16> "sequence-bytes-write" utf16
+
+    static member private RegisterSequenceOutputBodiesCore<'Element,'O8,'O16,'Contract>
+        (utf8: JsonDirectWriter<IEnumerable<'Element>,byte>, utf16: JsonDirectWriter<IEnumerable<'Element>,char>): unit =
+        let role = JsonOperationPolicy<'Contract>.Name(if typeof<'Element>.Equals(typeof<byte>) then "sequence-binary-write" else "sequence-write")
+        JsonDefaultMethods.publish typeof<IEnumerable<'Element>> typeof<byte> typeof<'O8> role utf8
+        JsonDefaultMethods.publish typeof<IEnumerable<'Element>> typeof<char> typeof<'O16> role utf16
+
+    static member internal RegisterSequenceOutputBodies<'Element,'O8,'O16>
+        (utf8: JsonDirectWriter<IEnumerable<'Element>,byte>, utf16: JsonDirectWriter<IEnumerable<'Element>,char>): unit =
+        JsonMetadata.RegisterSequenceOutputBodiesCore<'Element,'O8,'O16,JsonNativeContract>(utf8,utf16)
+
+    static member internal RegisterStoredSequenceOutputBodies<'Element,'O8,'O16>
+        (utf8: JsonDirectWriter<IEnumerable<'Element>,byte>, utf16: JsonDirectWriter<IEnumerable<'Element>,char>): unit =
+        JsonMetadata.RegisterSequenceOutputBodiesCore<'Element,'O8,'O16,JsonStoredContract>(utf8,utf16)
+
+    static member internal RegisterSequenceOutputs<'Sequence,'Element,'O8,'O16 when 'O8 : struct and 'O8 :> IJsonValueOutput<byte> and 'O16 : struct and 'O16 :> IJsonValueOutput<char>>
+        (utf8: JsonDirectWriter<'Sequence,byte>, utf16: JsonDirectWriter<'Sequence,char>): unit =
+        JsonMetadata.RegisterOutputWritersCore<'Sequence,'O8,'O16,JsonNativeContract>(utf8,utf16)
+        let role = JsonOperationPolicy<JsonNativeContract>.Name(if typeof<'Element>.Equals(typeof<byte>) then "sequence-binary-write" else "sequence-write")
+        JsonDefaultMethods.publish typeof<'Sequence> typeof<byte> typeof<'O8> role utf8
+        JsonDefaultMethods.publish typeof<'Sequence> typeof<char> typeof<'O16> role utf16
+
+    static member internal RegisterStoredSequenceOutputs<'Sequence,'Element,'O8,'O16 when 'O8 : struct and 'O8 :> IJsonValueOutput<byte> and 'O16 : struct and 'O16 :> IJsonValueOutput<char>>
+        (utf8: JsonDirectWriter<'Sequence,byte>, utf16: JsonDirectWriter<'Sequence,char>): unit =
+        JsonMetadata.RegisterOutputWritersCore<'Sequence,'O8,'O16,JsonStoredContract>(utf8,utf16)
+        let role = JsonOperationPolicy<JsonStoredContract>.Name(if typeof<'Element>.Equals(typeof<byte>) then "sequence-binary-write" else "sequence-write")
+        JsonDefaultMethods.publish typeof<'Sequence> typeof<byte> typeof<'O8> role utf8
+        JsonDefaultMethods.publish typeof<'Sequence> typeof<char> typeof<'O16> role utf16
+
     static member private RegisterWriterBodiesCore<'T,'Contract>(utf8: JsonDirectWriter<'T,byte>, utf16: JsonDirectWriter<'T,char>): unit =
-        JsonDefaultMethods.publish typeof<'T> typeof<byte> typeof<JsonUtf8Writer> (JsonOperationPolicy<'Contract>.Name "raw-model-body") utf8
-        JsonDefaultMethods.publish typeof<'T> typeof<char> typeof<JsonUtf16Writer> (JsonOperationPolicy<'Contract>.Name "raw-model-body") utf16
+        JsonMetadata.RegisterOutputBodiesCore<'T,JsonUtf8Writer,JsonUtf16Writer,'Contract>(utf8,utf16,JsonWriterRuntime.runtimeWriter utf8,JsonWriterRuntime.runtimeWriter utf16)
 
     static member internal RegisterWriterBodies<'T>(utf8: JsonDirectWriter<'T,byte>, utf16: JsonDirectWriter<'T,char>): unit =
         JsonMetadata.RegisterWriterBodiesCore<'T,JsonNativeContract>(utf8,utf16)
 
     static member internal RegisterStoredWriterBodies<'T>(utf8: JsonDirectWriter<'T,byte>, utf16: JsonDirectWriter<'T,char>): unit =
         JsonMetadata.RegisterWriterBodiesCore<'T,JsonStoredContract>(utf8,utf16)
-
-    static member internal RegisterSequenceByteWriters(utf8: JsonDirectWriter<byte[],byte>, utf16: JsonDirectWriter<byte[],char>): unit =
-        JsonDefaultMethods.publish typeof<byte[]> typeof<byte> typeof<byte> "sequence-bytes-write" utf8
-        JsonDefaultMethods.publish typeof<byte[]> typeof<char> typeof<char> "sequence-bytes-write" utf16
 
     static member private RegisterSequenceWriterBodiesCore<'Element,'Contract>
         (utf8: JsonDirectWriter<IEnumerable<'Element>,byte>, utf16: JsonDirectWriter<IEnumerable<'Element>,char>): unit =
@@ -1434,6 +1521,12 @@ and [<AbstractClass; Sealed>] JsonMetadata =
                 JsonDirectReader<'T,Utf16Reader>(fun context -> unbox<'T>(box(JsonRawInput<JsonNativeContract>.Tree<Utf16Reader> &context))),
                 JsonRawCollections<JsonNativeContract>.TreeWriter<'T,byte,JsonUtf8Writer>(Func<'T,JsonValue>(fun value -> unbox<JsonValue>(box value))),
                 JsonRawCollections<JsonNativeContract>.TreeWriter<'T,char,JsonUtf16Writer>(Func<'T,JsonValue>(fun value -> unbox<JsonValue>(box value))))
+            JsonMetadata.RegisterOutputWritersCore<'T,JsonUtf8IListWriter,JsonUtf16IListWriter,JsonNativeContract>(
+                JsonRawCollections<JsonNativeContract>.TreeWriter<'T,byte,JsonUtf8IListWriter>(Func<'T,JsonValue>(fun value -> unbox<JsonValue>(box value))),
+                JsonRawCollections<JsonNativeContract>.TreeWriter<'T,char,JsonUtf16IListWriter>(Func<'T,JsonValue>(fun value -> unbox<JsonValue>(box value))))
+            JsonMetadata.RegisterOutputWritersCore<'T,JsonValidationOutput<byte>,JsonValidationOutput<char>,JsonNativeContract>(
+                JsonRawCollections<JsonNativeContract>.TreeWriter<'T,byte,JsonValidationOutput<byte>>(Func<'T,JsonValue>(fun value -> unbox<JsonValue>(box value))),
+                JsonRawCollections<JsonNativeContract>.TreeWriter<'T,char,JsonValidationOutput<char>>(Func<'T,JsonValue>(fun value -> unbox<JsonValue>(box value))))
         else
             JsonMetadata.RegisterRaw<'T>(JsonRawScalarReader.Create<'T,Utf8Reader>().Value,JsonRawScalarReader.Create<'T,Utf16Reader>().Value,
                 JsonRawScalarWriter.Create<'T,byte,JsonUtf8Writer>().Value,JsonRawScalarWriter.Create<'T,char,JsonUtf16Writer>().Value)
@@ -1448,6 +1541,10 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         JsonRawRead<JsonNativeContract>.Ensure<'T,Utf16Reader>()
         JsonRawWrite<'T,byte,JsonUtf8Writer,JsonNativeContract>.Ensure()
         JsonRawWrite<'T,char,JsonUtf16Writer,JsonNativeContract>.Ensure()
+        JsonRawWrite<'T,byte,JsonUtf8IListWriter,JsonNativeContract>.Ensure()
+        JsonRawWrite<'T,char,JsonUtf16IListWriter,JsonNativeContract>.Ensure()
+        JsonRawWrite<'T,byte,JsonValidationOutput<byte>,JsonNativeContract>.Ensure()
+        JsonRawWrite<'T,char,JsonValidationOutput<char>,JsonNativeContract>.Ensure()
     /// Preserves object JSON dispatch and its dynamic read representation.
     static member internal RegisterDynamicObject() =
         JsonMetadata.EnsureDynamicScalar<bool>()
@@ -1484,6 +1581,10 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         JsonRawRead<JsonNativeContract>.Ensure<obj,Utf16Reader>()
         JsonRawWrite<obj,byte,JsonUtf8Writer,JsonNativeContract>.Ensure()
         JsonRawWrite<obj,char,JsonUtf16Writer,JsonNativeContract>.Ensure()
+        JsonRawWrite<obj,byte,JsonUtf8IListWriter,JsonNativeContract>.Ensure()
+        JsonRawWrite<obj,char,JsonUtf16IListWriter,JsonNativeContract>.Ensure()
+        JsonRawWrite<obj,byte,JsonValidationOutput<byte>,JsonNativeContract>.Ensure()
+        JsonRawWrite<obj,char,JsonValidationOutput<char>,JsonNativeContract>.Ensure()
     /// Uses a compiler-established enum width with the canonical underlying scalar codec.
     static member internal RegisterEnumTree<'Enum,'Underlying>() =
         JsonMetadata.EnsureScalarTree<'Underlying>()
@@ -1546,21 +1647,37 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateFileReference())
         JsonMetadata.RegisterRaw<FileRef>(JsonRawCollections<JsonNativeContract>.FileReferenceReader<Utf8Reader>(),JsonRawCollections<JsonNativeContract>.FileReferenceReader<Utf16Reader>(),
             JsonRawCollections<JsonNativeContract>.FileReferenceWriter<byte,JsonUtf8Writer>(),JsonRawCollections<JsonNativeContract>.FileReferenceWriter<char,JsonUtf16Writer>())
+        JsonMetadata.RegisterOutputWritersCore<FileRef,JsonUtf8IListWriter,JsonUtf16IListWriter,JsonNativeContract>(
+            JsonRawCollections<JsonNativeContract>.FileReferenceWriter<byte,JsonUtf8IListWriter>(),JsonRawCollections<JsonNativeContract>.FileReferenceWriter<char,JsonUtf16IListWriter>())
+        JsonMetadata.RegisterOutputWritersCore<FileRef,JsonValidationOutput<byte>,JsonValidationOutput<char>,JsonNativeContract>(
+            JsonRawCollections<JsonNativeContract>.FileReferenceWriter<byte,JsonValidationOutput<byte>>(),JsonRawCollections<JsonNativeContract>.FileReferenceWriter<char,JsonValidationOutput<char>>())
 
     static member internal RegisterDirectoryReference(): unit =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateDirectoryReference())
         JsonMetadata.RegisterRaw<DirectoryRef>(JsonRawCollections<JsonNativeContract>.DirectoryReferenceReader<Utf8Reader>(),JsonRawCollections<JsonNativeContract>.DirectoryReferenceReader<Utf16Reader>(),
             JsonRawCollections<JsonNativeContract>.DirectoryReferenceWriter<byte,JsonUtf8Writer>(),JsonRawCollections<JsonNativeContract>.DirectoryReferenceWriter<char,JsonUtf16Writer>())
+        JsonMetadata.RegisterOutputWritersCore<DirectoryRef,JsonUtf8IListWriter,JsonUtf16IListWriter,JsonNativeContract>(
+            JsonRawCollections<JsonNativeContract>.DirectoryReferenceWriter<byte,JsonUtf8IListWriter>(),JsonRawCollections<JsonNativeContract>.DirectoryReferenceWriter<char,JsonUtf16IListWriter>())
+        JsonMetadata.RegisterOutputWritersCore<DirectoryRef,JsonValidationOutput<byte>,JsonValidationOutput<char>,JsonNativeContract>(
+            JsonRawCollections<JsonNativeContract>.DirectoryReferenceWriter<byte,JsonValidationOutput<byte>>(),JsonRawCollections<JsonNativeContract>.DirectoryReferenceWriter<char,JsonValidationOutput<char>>())
 
     static member internal RegisterFileMany(): unit =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateFileMany())
         JsonMetadata.RegisterRaw<FileRefMany>(JsonRawCollections<JsonNativeContract>.FileManyReader<Utf8Reader>(),JsonRawCollections<JsonNativeContract>.FileManyReader<Utf16Reader>(),
             JsonRawCollections<JsonNativeContract>.FileManyWriter<byte,JsonUtf8Writer>(),JsonRawCollections<JsonNativeContract>.FileManyWriter<char,JsonUtf16Writer>())
+        JsonMetadata.RegisterOutputWritersCore<FileRefMany,JsonUtf8IListWriter,JsonUtf16IListWriter,JsonNativeContract>(
+            JsonRawCollections<JsonNativeContract>.FileManyWriter<byte,JsonUtf8IListWriter>(),JsonRawCollections<JsonNativeContract>.FileManyWriter<char,JsonUtf16IListWriter>())
+        JsonMetadata.RegisterOutputWritersCore<FileRefMany,JsonValidationOutput<byte>,JsonValidationOutput<char>,JsonNativeContract>(
+            JsonRawCollections<JsonNativeContract>.FileManyWriter<byte,JsonValidationOutput<byte>>(),JsonRawCollections<JsonNativeContract>.FileManyWriter<char,JsonValidationOutput<char>>())
 
     static member internal RegisterDirectoryMany(): unit =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateDirectoryMany())
         JsonMetadata.RegisterRaw<DirectoryRefMany>(JsonRawCollections<JsonNativeContract>.DirectoryManyReader<Utf8Reader>(),JsonRawCollections<JsonNativeContract>.DirectoryManyReader<Utf16Reader>(),
             JsonRawCollections<JsonNativeContract>.DirectoryManyWriter<byte,JsonUtf8Writer>(),JsonRawCollections<JsonNativeContract>.DirectoryManyWriter<char,JsonUtf16Writer>())
+        JsonMetadata.RegisterOutputWritersCore<DirectoryRefMany,JsonUtf8IListWriter,JsonUtf16IListWriter,JsonNativeContract>(
+            JsonRawCollections<JsonNativeContract>.DirectoryManyWriter<byte,JsonUtf8IListWriter>(),JsonRawCollections<JsonNativeContract>.DirectoryManyWriter<char,JsonUtf16IListWriter>())
+        JsonMetadata.RegisterOutputWritersCore<DirectoryRefMany,JsonValidationOutput<byte>,JsonValidationOutput<char>,JsonNativeContract>(
+            JsonRawCollections<JsonNativeContract>.DirectoryManyWriter<byte,JsonValidationOutput<byte>>(),JsonRawCollections<JsonNativeContract>.DirectoryManyWriter<char,JsonValidationOutput<char>>())
 
     static member internal CreateFileReference(): JsonCodec<FileRef> =
         FileSystemReferenceMetadata.Single<FileRef,Types.SoloDBFileHeader>(
@@ -1600,6 +1717,11 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateDocumentCodec<'T>())
         JsonMetadata.RegisterRaw<DBRef<'T>>(JsonRawCollections<JsonNativeContract>.DocumentReader<'T,Utf8Reader>(),JsonRawCollections<JsonNativeContract>.DocumentReader<'T,Utf16Reader>(),
             JsonRawCollections<JsonNativeContract>.DocumentWriter<'T,byte,JsonUtf8Writer>(),JsonRawCollections<JsonNativeContract>.DocumentWriter<'T,char,JsonUtf16Writer>())
+        JsonMetadata.RegisterOutputWritersCore<DBRef<'T>,JsonUtf8IListWriter,JsonUtf16IListWriter,JsonNativeContract>(
+            JsonRawCollections<JsonNativeContract>.DocumentWriter<'T,byte,JsonUtf8IListWriter>(),JsonRawCollections<JsonNativeContract>.DocumentWriter<'T,char,JsonUtf16IListWriter>())
+        JsonMetadata.RegisterOutputWritersCore<DBRef<'T>,JsonValidationOutput<byte>,JsonValidationOutput<char>,JsonNativeContract>(
+            JsonRawCollections<JsonNativeContract>.DocumentWriter<'T,byte,JsonValidationOutput<byte>>(),JsonRawCollections<JsonNativeContract>.DocumentWriter<'T,char,JsonValidationOutput<char>>())
+
     static member internal CreateTypedDocumentCodec<'T,'Id>() =
         ReferenceTypeMetadata.Register<DBRef<'T,'Id>,'T>(false, typeof<'Id>)
         JsonMetadata.EnsureScalarTree<decimal>()
@@ -1634,6 +1756,11 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateTypedDocumentCodec<'T,'Id>())
         JsonMetadata.RegisterRaw<DBRef<'T,'Id>>(JsonRawCollections<JsonNativeContract>.TypedDocumentReader<'T,'Id,Utf8Reader>(),JsonRawCollections<JsonNativeContract>.TypedDocumentReader<'T,'Id,Utf16Reader>(),
             JsonRawCollections<JsonNativeContract>.TypedDocumentWriter<'T,'Id,byte,JsonUtf8Writer>(),JsonRawCollections<JsonNativeContract>.TypedDocumentWriter<'T,'Id,char,JsonUtf16Writer>())
+        JsonMetadata.RegisterOutputWritersCore<DBRef<'T,'Id>,JsonUtf8IListWriter,JsonUtf16IListWriter,JsonNativeContract>(
+            JsonRawCollections<JsonNativeContract>.TypedDocumentWriter<'T,'Id,byte,JsonUtf8IListWriter>(),JsonRawCollections<JsonNativeContract>.TypedDocumentWriter<'T,'Id,char,JsonUtf16IListWriter>())
+        JsonMetadata.RegisterOutputWritersCore<DBRef<'T,'Id>,JsonValidationOutput<byte>,JsonValidationOutput<char>,JsonNativeContract>(
+            JsonRawCollections<JsonNativeContract>.TypedDocumentWriter<'T,'Id,byte,JsonValidationOutput<byte>>(),JsonRawCollections<JsonNativeContract>.TypedDocumentWriter<'T,'Id,char,JsonValidationOutput<char>>())
+
     /// Supplies exact member facts without constructing a reflection expression witness.
     static member Member<'T, 'Value>(declaringType: Type, clrName: string, storedName: string, isField: bool, read: Func<'T, 'Value>) =
         if isNull read then nullArg "read"
@@ -1998,6 +2125,15 @@ and private ConvertStringTo<'T> =
 /// Internal implementation details for JSON serialization and deserialization logic.
 /// </summary>
 and private JsonImpl =
+    static member val internal ParserApi = {
+        Null = fun() -> Null
+        Bool = Boolean
+        Str = String
+        Num = Number
+        Arr = List
+        Obj = Object
+    }
+
     /// <summary>
     /// Creates a JsonValue.Object from a dictionary.
     /// </summary>
@@ -2943,20 +3079,20 @@ and private JsonObjectGeneration =
 /// </summary>
 /// <typeparam name="'A">The target type for deserialization.</typeparam>
 and private JsonRawWriteMetadata<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueOutput<'E>> =
+    static let key = struct(typeof<'E>,typeof<'O>,typeof<'Contract>)
     static member Select(metadata: TypeMetadataRecord): MetadataValue<JsonRawWriteOperations> voption =
-        if JsonOperationPolicy<'Contract>.IsStored then
-            if typeof<'E>.Equals(typeof<byte>) then metadata.StoredJsonUtf8Write else metadata.StoredJsonUtf16Write
-        elif typeof<'E>.Equals(typeof<byte>) then metadata.JsonUtf8Write else metadata.JsonUtf16Write
+        MetadataMap.tryFind key metadata.JsonWrites
     static member Store(operation: MetadataValue<JsonRawWriteOperations>, metadata: TypeMetadataRecord): TypeMetadataRecord =
         match JsonRawWriteMetadata<'E,'O,'Contract>.Select metadata with
         | ValueSome _ -> metadata
-        | ValueNone ->
-            if JsonOperationPolicy<'Contract>.IsStored then
-                if typeof<'E>.Equals(typeof<byte>) then { metadata with StoredJsonUtf8Write = ValueSome operation }
-                else { metadata with StoredJsonUtf16Write = ValueSome operation }
-            elif typeof<'E>.Equals(typeof<byte>) then { metadata with JsonUtf8Write = ValueSome operation }
-            else { metadata with JsonUtf16Write = ValueSome operation }
-    static member ForType(target: Type, value: obj, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
+        | ValueNone -> { metadata with JsonWrites = MetadataMap.set key operation metadata.JsonWrites }
+    static member StoreActual(writer: JsonDirectRuntimeWriter<'E>, metadata: TypeMetadataRecord): TypeMetadataRecord =
+        match JsonRawWriteMetadata<'E,'O,'Contract>.Select metadata with
+        | ValueSome operation ->
+            let updated = { operation with Value = { operation.Value with WriteActual = writer } }
+            { metadata with JsonWrites = MetadataMap.set key updated metadata.JsonWrites }
+        | ValueNone -> metadata
+    static member private Invoke(target: Type, value: obj, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>, actual: bool): unit =
         let operations =
             match TypeMetadataCache.Read(target,JsonRawWriteMetadata<'E,'O,'Contract>.Select) with
             | ValueSome operation -> operation.Value
@@ -2970,7 +3106,14 @@ and private JsonRawWriteMetadata<'E,'O,'Contract when 'O : struct and 'O :> IJso
                         with :? TargetInvocationException as error ->
                             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw()
                             Unchecked.defaultof<JsonRawWriteOperations>))
-        (operations.WriteRuntime :?> JsonDirectRuntimeWriter<'E>).Invoke(value,&destination,&state)
+        let writer = if actual && not(isNull operations.WriteActual) then operations.WriteActual else operations.WriteRuntime
+        (writer :?> JsonDirectRuntimeWriter<'E>).Invoke(value,&destination,&state)
+
+    static member ForType(target: Type, value: obj, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
+        JsonRawWriteMetadata<'E,'O,'Contract>.Invoke(target,value,&destination,&state,false)
+
+    static member ForActual(target: Type, value: obj, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
+        JsonRawWriteMetadata<'E,'O,'Contract>.Invoke(target,value,&destination,&state,true)
 
     static member Runtime(value: obj, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
         JsonRawOutput<'E,'O,'Contract>.Actual(value,value.GetType(),&destination,&state)
@@ -2982,7 +3125,7 @@ and private JsonRawWrite<'T,'E,'O,'Contract when 'O : struct and 'O :> IJsonValu
             // Keep the original preparation error outside a new CLR initializer wrapper.
             let failure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error)
             let writer = JsonDirectWriter<'T,'E>(fun _ _ _ -> failure.Throw())
-            { Writer = writer; WriteRuntime = JsonDirectRuntimeWriter<'E>(fun _ _ _ -> failure.Throw()) }
+            { Writer = writer; WriteRuntime = JsonDirectRuntimeWriter<'E>(fun _ _ _ -> failure.Throw()); WriteActual = null }
     static let writer =
         if isNull operations.Writer then
             let runtime = operations.WriteRuntime :?> JsonDirectRuntimeWriter<'E>
@@ -2992,10 +3135,11 @@ and private JsonRawWrite<'T,'E,'O,'Contract when 'O : struct and 'O :> IJsonValu
     static member private Build(): JsonRawWriteOperations =
         let target = typeof<'T>
         let operation = JsonValue.WriterOperation(target,JsonOperationPolicy<'Contract>.IsStored)
+        let mutable body: JsonDirectWriter<'T,'E> = null
         let writer =
             match operation with
             | RawRootOperation.StoredNumeric ->
-                (JsonStoredNumericRuntime.writerMethod target typeof<'E>).CreateDelegate(typeof<JsonDirectWriter<'T,'E>>) :?> JsonDirectWriter<'T,'E>
+                (JsonStoredNumericRuntime.writerMethod target typeof<'E> typeof<'O>).CreateDelegate(typeof<JsonDirectWriter<'T,'E>>) :?> JsonDirectWriter<'T,'E>
             | RawRootOperation.Scalar -> JsonRawScalarWriter.Create<'T,'E,'O>().Value
             | RawRootOperation.Tree ->
                 JsonRawCollections<'Contract>.TreeWriter<'T,'E,'O>(Func<'T,JsonValue>(fun value -> unbox<JsonValue>(box value)))
@@ -3014,29 +3158,33 @@ and private JsonRawWrite<'T,'E,'O,'Contract when 'O : struct and 'O :> IJsonValu
                 else
                     match JsonRawCollections<'Contract>.Writer<'T,'E,'O>() with
                     | ValueSome writer -> writer
-                    | ValueNone -> JsonRawOutput<'E,'O,'Contract>.Model<'T>()
-        { Writer = writer; WriteRuntime = JsonDirectRuntimeWriter<'E>(fun value destination state -> writer.Invoke(unbox<'T> value,&destination,&state)) }
+                    | ValueNone ->
+                        let writer = JsonRawOutput<'E,'O,'Contract>.Model<'T>()
+                        body <- JsonDefaultMethods.callable<JsonDirectWriter<'T,'E>> typeof<'T> typeof<'E> typeof<'O> (JsonOperationPolicy<'Contract>.Name "raw-model-body")
+                                    (fun () -> JsonRawOutput<'E,'O,'Contract>.ModelBody typeof<'T>)
+                        writer
+        let actual = if isNull body then null else JsonWriterRuntime.runtimeWriter body
+        { Writer = writer; WriteRuntime = JsonWriterRuntime.runtimeWriter writer; WriteActual = actual }
     static member private Prepare(): JsonRawWriteOperations =
         TypeMetadataCache.Discover(typeof<'T>,JsonRawWriteMetadata<'E,'O,'Contract>.Select,
             (fun operation metadata -> JsonRawWriteMetadata<'E,'O,'Contract>.Store(operation,metadata)),
             Func<JsonRawWriteOperations>(JsonRawWrite<'T,'E,'O,'Contract>.Build))
     static member internal Fixed(): JsonRawWriteOperations = operations
     static member internal Ensure(): unit = operations |> ignore
-    static member internal Write(value: 'T, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
-        writer.Invoke(value,&destination,&state)
-    static member internal Member(value: 'T, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
+    static member internal Write(value: byref<'T>, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
+        writer.Invoke(&value,&destination,&state)
+    static member internal Member(value: byref<'T>, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
         let previousType, previousId = state.IncludeType, state.OmitId
         state.IncludeType <- false
         state.OmitId <- false
-        try JsonRawWrite<'T,'E,'O,'Contract>.Write(value,&destination,&state)
+        try JsonRawWrite<'T,'E,'O,'Contract>.Write(&value,&destination,&state)
         finally
             state.IncludeType <- previousType
             state.OmitId <- previousId
-    static member internal Discard(value: 'T): unit =
+    static member internal Discard(value: byref<'T>): unit =
         let mutable destination = Span<'E>.Empty
         let mutable state = JsonWriteState<'E>(null,null,null)
-        state.Discard <- true
-        JsonRawWrite<'T,'E,'O,'Contract>.Write(value,&destination,&state)
+        JsonRawWrite<'T,'E,JsonValidationOutput<'E>,'Contract>.Write(&value,&destination,&state)
 
 and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueOutput<'E>> =
     static member internal Null(destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
@@ -3059,12 +3207,12 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
         output.Ascii('}'B,&destination,&state)
     static member internal OmitId(state: byref<JsonWriteState<'E>>): bool = state.OmitId
 
-    static member internal TypeMember<'Model,'Value>(value: 'Value, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
+    static member internal TypeMember<'Model,'Value>(value: byref<'Value>, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
         match (if state.IncludeType then typeToName typeof<'Model> else None) with
         | Some name ->
-            JsonRawWrite<'Value,'E,'O,'Contract>.Discard(value)
+            JsonRawWrite<'Value,'E,'O,'Contract>.Discard(&value)
             JsonStringEscaping.write Unchecked.defaultof<'O> name &destination &state
-        | None -> JsonRawWrite<'Value,'E,'O,'Contract>.Member(value,&destination,&state)
+        | None -> JsonRawWrite<'Value,'E,'O,'Contract>.Member(&value,&destination,&state)
 
     static member internal ExplicitTree(runtimeType: Type, json: JsonValue, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
         match json with
@@ -3073,7 +3221,7 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
             if state.IncludeType then
                 match typeToName runtimeType with Some name -> values["$type"] <- String name | None -> ()
         | _ -> ()
-        if not state.Discard then JsonRawOutput<'E,'O,'Contract>.Tree(json,&destination,&state)
+        if not(typeof<'O>.IsGenericType && typeof<'O>.GetGenericTypeDefinition().Equals(typedefof<JsonValidationOutput<_>>)) then JsonRawOutput<'E,'O,'Contract>.Tree(json,&destination,&state)
 
     static member internal SerializeActual(value: obj, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
         let previous = state.IncludeType
@@ -3110,7 +3258,7 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
     static member private CreateTupleMethod(target: Type): DynamicMethod =
         let flags = BindingFlags.Static ||| BindingFlags.NonPublic ||| BindingFlags.Public
         let parameters = typeof<JsonDirectWriter<obj,'E>>.GetMethod("Invoke",BindingFlags.Instance ||| flags).GetParameters() |> Array.map _.ParameterType
-        parameters[0] <- target
+        parameters[0] <- target.MakeByRefType()
         let state = typedefof<JsonWriteState<_>>.MakeGenericType(typeof<'E>)
         let scope: CodecTupleWriterScope<Type,FieldInfo> =
             { Boolean = typeof<bool>
@@ -3118,7 +3266,8 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
               OmitId = state.GetField("OmitId",BindingFlags.Instance ||| flags)
               Required = fun child -> TypeSupport.TupleMemberScope(TypeSupport.RawPrimitive child.FullName,JsonOptionalRuntime.kind child) }
         let method = DynamicMethod("WriteRawTuple",typeof<Void>,parameters,typeof<JsonValue>.Module,true)
-        CodecTupleEmitter.rawWriter (RuntimeCodecIL(method.GetILGenerator())) (JsonRawOutput<'E,'O,'Contract>.ForwardApi target) scope (RuntimeTupleFacts.model target)
+        let il = RuntimeCodecIL(method.GetILGenerator(),parameters[0])
+        CodecTupleEmitter.rawWriter il (JsonRawOutput<'E,'O,'Contract>.ForwardApi(il,target)) scope (RuntimeTupleFacts.model target)
         method
 
     static member internal Tuple<'T>(): JsonDirectWriter<'T,'E> =
@@ -3130,19 +3279,15 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
     static member internal Actual(value: obj, actual: Type, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
         let target = JsonValue.RuntimeWriterType(value, actual)
         if TypeSupport.PolymorphicNative(JsonOperationPolicy<'Contract>.IsStored,target.FullName) then
-            JsonRawWriteMetadata<'E,'O,JsonNativeContract>.ForType(target,value,&destination,&state)
-        else JsonRawWriteMetadata<'E,'O,'Contract>.ForType(target,value,&destination,&state)
-    static member internal Polymorphic(known: Type -> struct(Type * MethodBase)[]): CodecPolymorphicApi<Type,MethodBase> =
+            JsonRawWriteMetadata<'E,'O,JsonNativeContract>.ForActual(target,value,&destination,&state)
+        else JsonRawWriteMetadata<'E,'O,'Contract>.ForActual(target,value,&destination,&state)
+    static member internal Polymorphic(): CodecPolymorphicApi<Type,MethodBase> =
         let flags = BindingFlags.Static ||| BindingFlags.NonPublic ||| BindingFlags.Public
         { RuntimeType = typeof<Type>
-          Equals = typeof<Type>.GetMethod("Equals",[|typeof<Type>|]) :> MethodBase
+          SameType = typeof<Type>.GetMethod("Equals",[|typeof<Type>|]) :> MethodBase
           IncludeType = typeof<JsonRawOutput<'E,'O,'Contract>>.GetMethod("IncludeType",flags) :> MethodBase
           SetIncludeType = typeof<JsonRawOutput<'E,'O,'Contract>>.GetMethod("SetIncludeType",flags) :> MethodBase
-          Actual = typeof<JsonRawOutput<'E,'O,'Contract>>.GetMethod("Actual",flags) :> MethodBase
-          Known = fun declared -> known declared |> Array.map(fun struct(target,body) ->
-
-              { Type = target; ValueType = target.IsValueType
-                Operation = (body) }) }
+          Actual = typeof<JsonRawOutput<'E,'O,'Contract>>.GetMethod("Actual",flags) :> MethodBase }
 
     static member internal ChildOperation(target: Type): MethodBase option =
         let flags = BindingFlags.Static ||| BindingFlags.NonPublic ||| BindingFlags.Public
@@ -3150,52 +3295,49 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
         let rank = if target.IsArray then target.GetArrayRank() else 0
         match TypeSupport.RawChildWriter(definition,target.IsEnum,rank,JsonOperationPolicy<'Contract>.IsStored) with
         | RawChildOperation.Member -> None
-        | RawChildOperation.StoredNumeric -> Some(JsonStoredNumericRuntime.writerMethod target typeof<'E> :> MethodBase)
+        | RawChildOperation.StoredNumeric -> Some(JsonStoredNumericRuntime.writerMethod target typeof<'E> typeof<'O> :> MethodBase)
         | RawChildOperation.Adapted native ->
             Some(if native then JsonRawCollections<JsonNativeContract>.WriteMethod<'E,'O>(target) :> MethodBase
                  else JsonRawCollections<'Contract>.WriteMethod<'E,'O>(target) :> MethodBase)
         | RawChildOperation.Sequence _ ->
             JsonRawCollections<'Contract>.Invoke(typeof<JsonRawCollections<'Contract>>,"SequenceWriteMethod",[|target;target.GetGenericArguments().[0];typeof<'E>;typeof<'O>|],
                 [|box(target.GetGenericArguments().[0].Equals(typeof<byte>))|]) :?> MethodBase |> Some
-        | RawChildOperation.Numeric -> Some(JsonWriterRuntime.number target typeof<'E> :> MethodBase)
-        | RawChildOperation.Text -> Some(JsonWriterRuntime.text typeof<'E> :> MethodBase)
-        | RawChildOperation.Boolean -> Some(JsonWriterRuntime.boolean typeof<'E> :> MethodBase)
-        | RawChildOperation.Guid -> Some(JsonWriterRuntime.guid typeof<'E> :> MethodBase)
-        | RawChildOperation.Bytes -> Some(JsonWriterRuntime.bytes typeof<'E> :> MethodBase)
+        | RawChildOperation.Numeric -> Some(JsonWriterRuntime.number target typeof<'E> typeof<'O> :> MethodBase)
+        | RawChildOperation.Text -> Some(JsonWriterRuntime.text typeof<'E> typeof<'O> :> MethodBase)
+        | RawChildOperation.Boolean -> Some(JsonWriterRuntime.boolean typeof<'E> typeof<'O> :> MethodBase)
+        | RawChildOperation.Guid -> Some(JsonWriterRuntime.guid typeof<'E> typeof<'O> :> MethodBase)
+        | RawChildOperation.Bytes -> Some(JsonWriterRuntime.bytes typeof<'E> typeof<'O> :> MethodBase)
         | RawChildOperation.Primitive name -> Some(typeof<JsonRawPrimitive>.GetMethod("Write" + name,flags).MakeGenericMethod(typeof<'E>,typeof<'O>) :> MethodBase)
         | RawChildOperation.Array -> Some(JsonRawOutput<'E,'O,'Contract>.ArrayMethod(target.GetElementType()) :> MethodBase)
         | RawChildOperation.Formatted -> invalidOp "A formatted reader cannot be selected for output."
 
-    static member internal ForwardApi(modelType: Type): CodecRawWriterApi<Type,MethodBase> =
+    static member internal ForwardApi(il: CodecIL<Type,MethodBase,FieldInfo>, modelType: Type): CodecRawWriterApi<Type,MethodBase> =
         let flags = BindingFlags.Static ||| BindingFlags.NonPublic ||| BindingFlags.Public
         let helper name arguments =
             let method = typeof<JsonRawOutput<'E,'O,'Contract>>.GetMethod(name,flags)
             (if Array.isEmpty arguments then method else method.MakeGenericMethod arguments) :> MethodBase
         { Boolean = typeof<bool>
-          Polymorphic = JsonRawOutput<'E,'O,'Contract>.Polymorphic(fun declared -> TypeMetadataCache.KnownJsonWriterBodies(declared,typeof<'E>,typeof<'O>,JsonOperationPolicy<'Contract>.Name "raw-model-body"))
+          Polymorphic = JsonRawOutput<'E,'O,'Contract>.Polymorphic()
           Operation = JsonRawOutput<'E,'O,'Contract>.ChildOperation
-          Null = JsonWriterRuntime.constant typeof<'E> "null" :> MethodBase
+          Literal = JsonWriterRuntime.inlineLiteral typeof<'E> typeof<'O> il
           SerializeActual = helper "SerializeActual" [||]
-          BeginArray = JsonWriterRuntime.constant typeof<'E> "[" :> MethodBase; Separator = JsonWriterRuntime.constant typeof<'E> "," :> MethodBase; EndArray = JsonWriterRuntime.constant typeof<'E> "]" :> MethodBase
-          BeginObject = JsonWriterRuntime.constant typeof<'E> "{" :> MethodBase; Property = fun text -> JsonWriterRuntime.property typeof<'E> text :> MethodBase
-          TypeLiteral = fun target -> JsonWriterRuntime.typeName target typeof<'E> :> MethodBase
-          EndObject = JsonWriterRuntime.constant typeof<'E> "}" :> MethodBase; OmitId = helper "OmitId" [||]
+          Property = JsonWriterRuntime.inlineProperty typeof<'E> typeof<'O> il
+          TypeLiteral = fun target -> JsonWriterRuntime.typeName target typeof<'E> typeof<'O> :> MethodBase
+          OmitId = helper "OmitId" [||]
           Discard = fun target -> typeof<JsonRawWrite<obj,byte,JsonUtf8Writer,'Contract>>.GetGenericTypeDefinition().MakeGenericType(target,typeof<'E>,typeof<'O>,typeof<'Contract>).GetMethod("Discard",flags) :> MethodBase
           Serialize = fun target -> typeof<JsonRawWrite<obj,byte,JsonUtf8Writer,'Contract>>.GetGenericTypeDefinition().MakeGenericType(target,typeof<'E>,typeof<'O>,typeof<'Contract>).GetMethod("Member",flags) :> MethodBase }
 
     static member private CreateArrayMethod(element: Type): DynamicMethod =
         let parameters = typeof<JsonDirectWriter<obj,'E>>.GetMethod("Invoke",BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic).GetParameters() |> Array.map _.ParameterType
-        parameters[0] <- element.MakeArrayType()
+        parameters[0] <- element.MakeArrayType().MakeByRefType()
         let method = DynamicMethod("WriteRawArray",typeof<Void>,parameters,typeof<JsonValue>.Module,true)
         let flags = BindingFlags.Static ||| BindingFlags.NonPublic ||| BindingFlags.Public
+        let il = RuntimeCodecIL(method.GetILGenerator(),parameters[0])
         let output: CodecArrayWriterApi<Type,MethodBase> =
             { Operation = JsonRawOutput<'E,'O,'Contract>.ChildOperation
               Serialize = fun target -> typeof<JsonRawWrite<obj,byte,JsonUtf8Writer,'Contract>>.GetGenericTypeDefinition().MakeGenericType(target,typeof<'E>,typeof<'O>,typeof<'Contract>).GetMethod("Member",flags) :> MethodBase
-              Null = JsonWriterRuntime.constant typeof<'E> "null" :> MethodBase
-              BeginArray = JsonWriterRuntime.constant typeof<'E> "[" :> MethodBase
-              Separator = JsonWriterRuntime.constant typeof<'E> "," :> MethodBase
-              EndArray = JsonWriterRuntime.constant typeof<'E> "]" :> MethodBase }
-        CodecArrayEmitter.rawArrayWriter (RuntimeCodecIL(method.GetILGenerator())) typeof<int> output element
+              Literal = JsonWriterRuntime.inlineLiteral typeof<'E> typeof<'O> il }
+        CodecArrayEmitter.rawArrayWriter il typeof<int> output element
         method
     static member internal ArrayMethod(element: Type): DynamicMethod =
         JsonDefaultMethods.withContract (element.MakeArrayType()) typeof<'E> typeof<'O> (JsonOperationPolicy<'Contract>.Name "array-write") (fun () -> JsonRawOutput<'E,'O,'Contract>.CreateArrayMethod(element))
@@ -3203,9 +3345,10 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
         JsonRawOutput<'E,'O,'Contract>.ArrayMethod(typeof<'Element>).CreateDelegate(typeof<JsonDirectWriter<'Element[],'E>>) :?> JsonDirectWriter<'Element[],'E>
     static member private CreateModelBody(target: Type): MethodBase =
         let parameters = typeof<JsonDirectWriter<obj,'E>>.GetMethod("Invoke",BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic).GetParameters() |> Array.map _.ParameterType
-        parameters[0] <- target
+        parameters[0] <- target.MakeByRefType()
         let method = DynamicMethod("WriteRawMembers",typeof<Void>,parameters,typeof<JsonValue>.Module,true)
-        CodecRawEmitter.rawBody (RuntimeCodecIL(method.GetILGenerator())) (JsonObjectGeneration.Api()) (JsonRawOutput<'E,'O,'Contract>.ForwardApi target) (JsonModelDiscovery.Model target)
+        let il = RuntimeCodecIL(method.GetILGenerator(),parameters[0])
+        CodecRawEmitter.rawBody il (JsonObjectGeneration.Api()) (JsonRawOutput<'E,'O,'Contract>.ForwardApi(il,target)) (JsonModelDiscovery.Model target)
         method :> MethodBase
     static member internal ModelBody(target: Type): MethodBase =
         JsonDefaultMethods.methodWithContract target typeof<'E> typeof<'O> (JsonOperationPolicy<'Contract>.Name "raw-model-body") (fun () -> JsonRawOutput<'E,'O,'Contract>.CreateModelBody target)
@@ -3214,18 +3357,19 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
         let method = DynamicMethod("WriteRawJson",typeof<Void>,(typeof<JsonDirectWriter<'T,'E>>.GetMethod("Invoke",BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic).GetParameters() |> Array.map _.ParameterType),typeof<JsonValue>.Module,true)
         let model = JsonModelDiscovery.Model typeof<'T>
         JsonModelDiscovery.PublishConstruction model
-        CodecRawEmitter.rawWriter (RuntimeCodecIL(method.GetILGenerator())) (JsonObjectGeneration.Api()) (JsonRawOutput<'E,'O,'Contract>.ForwardApi typeof<'T>) model body
+        let il = RuntimeCodecIL(method.GetILGenerator(),typeof<'T>.MakeByRefType())
+        CodecRawEmitter.rawWriter il (JsonObjectGeneration.Api()) (JsonRawOutput<'E,'O,'Contract>.ForwardApi(il,typeof<'T>)) model body
         method.CreateDelegate(typeof<JsonDirectWriter<'T,'E>>) :?> JsonDirectWriter<'T,'E>
 
     static member internal AbstractMethod(target: Type): DynamicMethod =
         JsonDefaultMethods.withContract target typeof<'E> typeof<'O> (JsonOperationPolicy<'Contract>.Name "raw-abstract-write") (fun () ->
             let parameters = typeof<JsonDirectWriter<obj,'E>>.GetMethod("Invoke",BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic).GetParameters() |> Array.map _.ParameterType
-            parameters[0] <- target
+            parameters[0] <- target.MakeByRefType()
             let method = DynamicMethod("WriteRawActual",typeof<Void>,parameters,typeof<JsonValue>.Module,true)
-            let il = RuntimeCodecIL(method.GetILGenerator())
-            let policy = JsonRawOutput<'E,'O,'Contract>.Polymorphic(fun declared -> TypeMetadataCache.KnownJsonWriterBodies(declared,typeof<'E>,typeof<'O>,JsonOperationPolicy<'Contract>.Name "raw-model-body"))
+            let il = RuntimeCodecIL(method.GetILGenerator(),parameters[0])
+            let policy = JsonRawOutput<'E,'O,'Contract>.Polymorphic()
             CodecPolymorphicEmitter.abstractWriter il (JsonObjectGeneration.Api()) policy target
-                (typeof<JsonRawOutput<'E,'O,'Contract>>.GetMethod("Null",BindingFlags.Static ||| BindingFlags.NonPublic))
+                (fun () -> JsonWriterRuntime.inlineLiteral typeof<'E> typeof<'O> il "null")
             method)
 
 and private JsonRawReadMetadata<'Contract> =
@@ -3326,12 +3470,16 @@ and private JsonRawRead<'Contract> =
         { Reader = reader; ReadRuntime = JsonDirectRuntimeReader<'R>(fun (context: byref<JsonReadContext<'R>>) -> box(JsonRawRead<'Contract>.Invoke<'T,'R>(reader,&context))); Intrinsic = intrinsic }
 
     static member internal Invoke<'T,'R when 'R : struct and 'R :> IJsonReader>(reader: JsonDirectReader<'T,'R>, context: byref<JsonReadContext<'R>>): 'T =
+        let mutable value = Unchecked.defaultof<'T>
+        JsonRawRead<'Contract>.InvokeInto<'T,'R>(reader,&context,&value)
+        value
+
+    static member internal InvokeInto<'T,'R when 'R : struct and 'R :> IJsonReader>(reader: JsonDirectReader<'T,'R>, context: byref<JsonReadContext<'R>>, value: byref<'T>): unit =
         try
-            let value = reader.Invoke &context
+            value <- reader.Invoke &context
             if not context.Consumed then
                 if not(isNull context.Properties) || not(isNull context.Elements) then JsonReadCursor.complete &context
                 else JsonReadCursor.skip &context
-            value
         // Nested type decisions retain a selective CLR exception filter.
         with error when (
             match error with
@@ -3341,8 +3489,8 @@ and private JsonRawRead<'Contract> =
                 | JsonScalarShapeMismatch -> true
                 | _ -> false) ->
             match error with
-            | JsonPrimitiveShapeMismatch _ -> JsonRawRead<'Contract>.PrimitiveRetry<'T,'R>(error,&context)
-            | _ -> JsonRawRead<'Contract>.ScalarRetry<'T,'R>(&context)
+            | JsonPrimitiveShapeMismatch _ -> value <- JsonRawRead<'Contract>.PrimitiveRetry<'T,'R>(error,&context)
+            | _ -> value <- JsonRawRead<'Contract>.ScalarRetry<'T,'R>(&context)
 
     static member internal Prepare<'T,'R when 'R : struct and 'R :> IJsonReader>(): JsonRawReadOperations =
         TypeMetadataCache.Discover(typeof<'T>,JsonRawReadMetadata<'Contract>.Select<'R>,(fun operation metadata -> JsonRawReadMetadata<'Contract>.Store<'R>(operation,metadata)),
@@ -3359,6 +3507,9 @@ and private JsonRawRead<'Contract> =
         JsonRawReadBinding<'T,'R,'Contract>.Value |> ignore
     static member internal Read<'T,'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): 'T =
         JsonRawRead<'Contract>.Invoke<'T,'R>(JsonRawReadBinding<'T,'R,'Contract>.Reader,&context)
+
+    static member internal ReadInto<'T,'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>, value: byref<'T>): unit =
+        JsonRawRead<'Contract>.InvokeInto<'T,'R>(JsonRawReadBinding<'T,'R,'Contract>.Reader,&context,&value)
 
     static member private AcquireIntrinsic<'T,'R when 'R : struct and 'R :> IJsonReader>(): JsonDirectReader<'T,'R> =
         JsonRawNumericBinding<'T,'R,JsonNativeContract>.Value
@@ -3391,10 +3542,10 @@ and private JsonRawRead<'Contract> =
         // Invalid ID shapes retain reference decoding ownership.
         try JsonRawRead<'Contract>.AcquireIntrinsic<int64,'R>().Invoke &context
         with JsonPrimitiveShapeMismatch _ -> raise JsonScalarShapeMismatch
-    static member internal ReadMember<'T,'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): 'T =
+    static member internal ReadMemberInto<'T,'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>, value: byref<'T>): unit =
         let selected = context.TypeSelected
         context.TypeSelected <- false
-        try JsonRawRead<'Contract>.Read<'T,'R> &context
+        try JsonRawRead<'Contract>.ReadInto<'T,'R>(&context,&value)
         finally context.TypeSelected <- selected
     static member internal Child<'T,'R when 'R : struct and 'R :> IJsonReader>(context: JsonReadContext<'R>): 'T =
         let mutable child = context
@@ -3639,7 +3790,7 @@ and private JsonRawInput<'Contract> =
             Properties = if properties then Some(JsonNameRuntime.api typeof<'R>) else None
             Skip = helper "Skip"; Complete = helper "Complete"
             CheckType = fun target -> typeof<JsonRawInput<'Contract>>.GetMethod("SelectType",flags).MakeGenericMethod(target,typeof<'R>) :> MethodBase
-            Read = fun target -> typeof<JsonRawRead<'Contract>>.GetMethod("ReadMember",flags).MakeGenericMethod(target,typeof<'R>) :> MethodBase }
+            Read = fun target -> typeof<JsonRawRead<'Contract>>.GetMethod("ReadMemberInto",flags).MakeGenericMethod(target,typeof<'R>) :> MethodBase }
 
     static member private CreateArrayMethod<'R when 'R : struct and 'R :> IJsonReader>(element: Type): DynamicMethod =
         let method = DynamicMethod("ReadRawArray",element.MakeArrayType(),[|JsonRawInput<'Contract>.ContextType<'R>().MakeByRefType()|],typeof<JsonValue>.Module,true)
@@ -3697,14 +3848,13 @@ and private JsonRawCollections<'Contract> =
 
     static member internal WriteMethod<'E,'O when 'O : struct and 'O :> IJsonValueOutput<'E>>(target: Type): DynamicMethod =
         let flags = BindingFlags.Static ||| BindingFlags.NonPublic ||| BindingFlags.Public
-        let forward = JsonRawOutput<'E,'O,'Contract>.ForwardApi target
         let operation target =
-            match forward.Operation target with
+            match JsonRawOutput<'E,'O,'Contract>.ChildOperation target with
             | Some call -> call
             | None ->
-                forward.Serialize target
+                typeof<JsonRawWrite<obj,byte,JsonUtf8Writer,'Contract>>.GetGenericTypeDefinition().MakeGenericType(target,typeof<'E>,typeof<'O>,typeof<'Contract>).GetMethod("Member",flags) :> MethodBase
         let parameters = typeof<JsonDirectWriter<obj,'E>>.GetMethod("Invoke",BindingFlags.Instance ||| flags).GetParameters() |> Array.map _.ParameterType
-        JsonOptionalRuntime.writer target typeof<'E> typeof<'O> (JsonOperationPolicy<'Contract>.Name "optional-write") parameters operation forward.Null
+        JsonOptionalRuntime.writer target typeof<'E> typeof<'O> (JsonOperationPolicy<'Contract>.Name "optional-write") parameters operation (fun il -> JsonWriterRuntime.inlineLiteral typeof<'E> typeof<'O> il "null")
 
     static member private ConstructorMethod<'T>(constructor: ConstructorInfo): DynamicMethod =
         JsonDefaultMethods.get typeof<'T> typeof<'T> "collection-construct" (fun () ->
@@ -3920,7 +4070,8 @@ and private JsonRawCollections<'Contract> =
             if value.HasPendingTypedId then
                 JsonRawOutput<'E,'O,'Contract>.BeginObject(&destination,&state)
                 JsonRawOutput<'E,'O,'Contract>.Property("$dbrefTypedId",false,&destination,&state)
-                JsonRawWrite<'Id,'E,'O,'Contract>.Member(value.TypedId,&destination,&state)
+                let mutable identity = value.TypedId
+                JsonRawWrite<'Id,'E,'O,'Contract>.Member(&identity,&destination,&state)
                 Unchecked.defaultof<'O>.Ascii('}'B,&destination,&state)
             elif value.HasValue then Unchecked.defaultof<'O>.Signed(value.Id,&destination,&state)
             else JsonRawOutput<'E,'O,'Contract>.Null(&destination,&state))
@@ -4041,15 +4192,16 @@ and private JsonRawCollections<'Contract> =
         let enumerator = if nonGeneric then typeof<IEnumerator> else typeof<IEnumerator<'Element>>
         let enumerable = if nonGeneric then typeof<IEnumerable> else typeof<IEnumerable<'Element>>
         let sequence =
-            { Enumerator = enumerator
+            { BytesType = typeof<byte[]>; Enumerator = enumerator
               GetEnumerator = enumerable.GetMethod("GetEnumerator") :> MethodBase
               MoveNext = typeof<IEnumerator>.GetMethod("MoveNext") :> MethodBase
               Current = enumerator.GetProperty("Current").GetMethod :> MethodBase
               Dispose = typeof<IDisposable>.GetMethod("Dispose") :> MethodBase
               DisposeType = if nonGeneric then Some typeof<IDisposable> else None
               Snapshot = typeof<JsonRawCollections<'Contract>>.GetMethod("CaptureSequenceBytes",flags) :> MethodBase
-              Bytes = if binary then JsonWriterRuntime.bytes typeof<'E> :> MethodBase else null }
-        CodecSequenceEmitter.writer (RuntimeCodecIL(method.GetILGenerator())) (JsonRawOutput<'E,'O,'Contract>.ForwardApi typeof<'Sequence>)
+              Bytes = if binary then JsonWriterRuntime.bytes typeof<'E> typeof<'O> :> MethodBase else null }
+        let il = RuntimeCodecIL(method.GetILGenerator(),parameters[0])
+        CodecSequenceEmitter.writer il (JsonRawOutput<'E,'O,'Contract>.ForwardApi(il,typeof<'Sequence>))
             sequence typeof<'Sequence> typeof<'Element> typeof<'Sequence>.IsValueType binary
         method
 
@@ -4076,12 +4228,16 @@ and private JsonRawCollections<'Contract> =
                                      (fun () ->
                                          if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "direct sequence write" typeof<IEnumerable<'Element>>
                                          JsonRawCollections<'Contract>.CreateSequenceWriter<IEnumerable<'Element>,'Element,'E,'O>(binary,false) :> MethodBase)
-                    { Writer = null; WriteRuntime = JsonDirectRuntimeWriter<'E>(fun value destination state -> writer.Invoke(value :?> IEnumerable<'Element>,&destination,&state)) })) |> ignore
+                    { Writer = null; WriteRuntime = JsonDirectRuntimeWriter<'E>(fun value destination state -> (let mutable typed = value :?> IEnumerable<'Element> in writer.Invoke(&typed,&destination,&state))); WriteActual = null })) |> ignore
 
     static member internal SequenceResult<'Element,'Sequence when 'Sequence :> IEnumerable<'Element>>(value: 'Sequence): 'Sequence =
         let target = value.GetType()
         JsonRawCollections<'Contract>.PublishSequenceResult<'Element,byte,JsonUtf8Writer>(target)
         JsonRawCollections<'Contract>.PublishSequenceResult<'Element,char,JsonUtf16Writer>(target)
+        JsonRawCollections<'Contract>.PublishSequenceResult<'Element,byte,JsonUtf8IListWriter>(target)
+        JsonRawCollections<'Contract>.PublishSequenceResult<'Element,char,JsonUtf16IListWriter>(target)
+        JsonRawCollections<'Contract>.PublishSequenceResult<'Element,byte,JsonValidationOutput<byte>>(target)
+        JsonRawCollections<'Contract>.PublishSequenceResult<'Element,char,JsonValidationOutput<char>>(target)
         value
 
     static member internal CustomDictionaryReader<'Dictionary,'Key,'Value,'R when 'R : struct and 'R :> IJsonReader>(): JsonDirectReader<'Dictionary,'R> =
@@ -4259,7 +4415,8 @@ and private JsonRawCollections<'Contract> =
               EndObject = outputType.GetMethod("EndObject",flags).MakeGenericMethod(target) :> MethodBase }
         let parameters = typeof<JsonDirectWriter<'Dictionary,'E>>.GetMethod("Invoke",BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic).GetParameters() |> Array.map _.ParameterType
         let method = DynamicMethod("WriteRawDictionary",typeof<Void>,parameters,typeof<JsonValue>.Module,true)
-        CodecDictionaryEmitter.writer (RuntimeCodecIL(method.GetILGenerator())) (JsonRawOutput<'E,'O,'Contract>.ForwardApi target) api target target.IsValueType nonGeneric
+        let il = RuntimeCodecIL(method.GetILGenerator(),parameters[0])
+        CodecDictionaryEmitter.writer il (JsonRawOutput<'E,'O,'Contract>.ForwardApi(il,target)) api target target.IsValueType nonGeneric
         method :> MethodBase
 
     static member private DictionaryWriterBody<'Dictionary,'Key,'Value,'E,'O when 'O : struct and 'O :> IJsonValueOutput<'E>>(): JsonDirectWriter<'Dictionary,'E> =

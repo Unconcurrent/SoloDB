@@ -4,6 +4,7 @@ open System.Reflection.Emit
 
 /// Original enumeration operands, supplied after cold shape admission.
 type internal CodecSequenceWriterApi<'T,'M> = {
+    BytesType: 'T
     Enumerator: 'T
     GetEnumerator: 'M
     MoveNext: 'M
@@ -67,8 +68,7 @@ module internal CodecSequenceEmitter =
 
     let private readChild (il: CodecIL<'T,'M,'F>) primitive scalar retry scalarRetry context value read =
         il.BeginException()
-        read (fun () -> il.EmitLocal(OpCodes.Ldloca,context))
-        il.EmitLocal(OpCodes.Stloc,value)
+        CodecEmitter.readLocal il read (fun () -> il.EmitLocal(OpCodes.Ldloca,context)) value
         il.Catch primitive
         il.EmitLocal(OpCodes.Ldloca,context)
         il.EmitMethod(OpCodes.Call,retry)
@@ -106,12 +106,10 @@ module internal CodecSequenceEmitter =
             il.Emit OpCodes.Ldarg_0; il.EmitLocal(OpCodes.Ldloc,(fst slots[index]).Value)
             il.EmitMethod(OpCodes.Call,api.Child); il.EmitLocal(OpCodes.Stloc,range)
         child 0
-        il.EmitLocal(OpCodes.Ldloca,range)
-        il.EmitMethod(OpCodes.Call,api.ReadItems)
-        il.EmitLocal(OpCodes.Stloc,items)
+        CodecEmitter.readLocal il api.ReadItems (fun () -> il.EmitLocal(OpCodes.Ldloca,range)) items
         child 1
         readChild il api.PrimitiveError api.ScalarError api.PrimitiveRetry api.ScalarRetry range key
-            (fun arguments -> arguments(); il.EmitMethod(OpCodes.Call,api.ReadKey))
+            api.ReadKey
         il.EmitLocal(OpCodes.Ldloc,key)
         il.EmitLocal(OpCodes.Ldloc,items)
         il.EmitMethod(OpCodes.Newobj,api.Construct)
@@ -192,7 +190,6 @@ module internal CodecSequenceEmitter =
             il.Emit OpCodes.Sub
             il.EmitLocal(OpCodes.Stloc,index)
         let defaultRead = match operation element with Some call -> call | None -> fallback element
-        let read arguments = arguments(); il.EmitMethod(OpCodes.Call,defaultRead)
         do
             let loop = il.Label()
             let endLoop = il.Label()
@@ -202,7 +199,7 @@ module internal CodecSequenceEmitter =
             il.EmitMethod(OpCodes.Call,api.Element)
             il.EmitLocal(OpCodes.Stloc,child)
             // Keep the actual failed child type and its selected input range.
-            readChild il api.PrimitiveError api.ScalarError api.PrimitiveRetry api.ScalarRetry child value read
+            readChild il api.PrimitiveError api.ScalarError api.PrimitiveRetry api.ScalarRetry child value defaultRead
             il.EmitLocal(OpCodes.Ldloc,Option.defaultValue result receiver)
             if array then il.EmitLocal(OpCodes.Ldloc,index)
             il.EmitLocal(OpCodes.Ldloc,value)
@@ -236,27 +233,26 @@ module internal CodecSequenceEmitter =
                (sequence: CodecSequenceWriterApi<'T,'M>) target element valueType binary =
         if not valueType then
             let present = il.Label()
-            il.Emit OpCodes.Ldarg_0
+            il.InputValue()
             il.EmitBranch(OpCodes.Brtrue,present)
-            il.Emit OpCodes.Ldarg_1
-            il.Emit OpCodes.Ldarg_2
-            il.EmitMethod(OpCodes.Call,output.Null)
+            output.Literal "null"
             il.Emit OpCodes.Ret
             il.Mark present
         if binary then
-            il.Emit OpCodes.Ldarg_0
+            let bytes = il.Local sequence.BytesType
+            il.InputValue()
             if valueType then il.EmitType(OpCodes.Box,target)
             il.EmitMethod(OpCodes.Call,sequence.Snapshot)
+            il.EmitLocal(OpCodes.Stloc,bytes)
+            CodecEmitter.callLocal il sequence.Bytes 0 bytes
             il.Emit OpCodes.Ldarg_1
             il.Emit OpCodes.Ldarg_2
             il.EmitMethod(OpCodes.Call,sequence.Bytes)
         else
             let iterator = il.Local sequence.Enumerator
             let current = il.Local element
-            il.Emit OpCodes.Ldarg_1
-            il.Emit OpCodes.Ldarg_2
-            il.EmitMethod(OpCodes.Call,output.BeginArray)
-            il.Emit OpCodes.Ldarg_0
+            output.Literal "["
+            il.InputValue()
             if valueType then il.EmitType(OpCodes.Box,target)
             il.EmitMethod(OpCodes.Callvirt,sequence.GetEnumerator)
             il.EmitLocal(OpCodes.Stloc,iterator)
@@ -275,7 +271,7 @@ module internal CodecSequenceEmitter =
                 let next = il.Label()
                 let doneLoop = il.Label()
                 let arguments () =
-                    il.EmitLocal(OpCodes.Ldloc,current)
+                    CodecEmitter.callLocal il defaultWrite 0 current
                     il.Emit OpCodes.Ldarg_1
                     il.Emit OpCodes.Ldarg_2
                 write arguments
@@ -283,9 +279,7 @@ module internal CodecSequenceEmitter =
                 il.EmitLocal(OpCodes.Ldloc,iterator)
                 il.EmitMethod(OpCodes.Callvirt,sequence.MoveNext)
                 il.EmitBranch(OpCodes.Brfalse,doneLoop)
-                il.Emit OpCodes.Ldarg_1
-                il.Emit OpCodes.Ldarg_2
-                il.EmitMethod(OpCodes.Call,output.Separator)
+                output.Literal ","
                 il.EmitLocal(OpCodes.Ldloc,iterator)
                 il.EmitMethod(OpCodes.Callvirt,sequence.Current)
                 il.EmitLocal(OpCodes.Stloc,current)
@@ -293,9 +287,7 @@ module internal CodecSequenceEmitter =
                 il.EmitBranch(OpCodes.Br,next)
                 il.Mark doneLoop
             il.Mark finish
-            il.Emit OpCodes.Ldarg_1
-            il.Emit OpCodes.Ldarg_2
-            il.EmitMethod(OpCodes.Call,output.EndArray)
+            output.Literal "]"
             il.Finally()
             let disposed = il.Label()
             match sequence.DisposeType with

@@ -9,6 +9,38 @@ namespace SoloDatabase.Metadata.Tools;
 
 internal static class FSharpBuildState
 {
+    internal static bool HasRegistration(string input)
+    {
+        using var assembly = AssemblyDefinition.ReadAssembly(input);
+        var module = assembly.MainModule;
+        var owners = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        foreach (var type in Types(module.Types))
+            if (type.Fields.Any(field => field.Name == "OriginalPath" && field.IsPrivate && field.IsStatic &&
+                    field.IsLiteral && field.FieldType.FullName == "System.String" && field.Constant is string) &&
+                type.Methods.Any(method => method.Name == "register" && method.IsPublic && method.IsStatic &&
+                    !method.HasGenericParameters && method.Parameters.Count == 0 && method.ReturnType.FullName == "System.Void"))
+                owners.Add(type.FullName);
+        if (owners.Count == 0) return false;
+        foreach (var type in Types(module.Types))
+            foreach (var method in type.Methods)
+                if (method.HasBody)
+                    foreach (var instruction in method.Body.Instructions)
+                        if (instruction.Operand is MethodReference target && target.Name == "register" &&
+                            !target.HasThis && !target.HasGenericParameters && target.Parameters.Count == 0 &&
+                            target.ReturnType.FullName == "System.Void" && target.DeclaringType.Scope == module &&
+                            owners.Contains(target.DeclaringType.GetElementType().FullName)) return true;
+        return false;
+
+        static System.Collections.Generic.IEnumerable<TypeDefinition> Types(System.Collections.Generic.IEnumerable<TypeDefinition> types)
+        {
+            foreach (var type in types)
+            {
+                yield return type;
+                foreach (var child in Types(type.NestedTypes)) yield return child;
+            }
+        }
+    }
+
     internal static string Value(XElement state, string name) => (string?)state.Attribute(name)
         ?? throw new InvalidDataException("The FSharp build selection has no " + name + " fact.");
 

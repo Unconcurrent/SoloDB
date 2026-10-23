@@ -4,7 +4,7 @@ open System.Reflection.Emit
 
 module internal CodecIntegerWriterEmitter =
     /// Width and sign belong to the captured value, rather than a common Int64 formatter.
-    let writerFrom (il: CodecIL<'T,'M,'F>) (api: CodecDigitWriterApi<'T,'M,'F>) width signed utf16 input =
+    let private outputWriterFrom (il: CodecIL<'T,'M,'F>) (api: CodecDigitWriterApi<'T,'M,'F>) width signed utf16 input =
         let output = api.Output
         let wide = width = 64
         let numberType = if wide then output.UInt64 else output.UInt32
@@ -55,39 +55,35 @@ module internal CodecIntegerWriterEmitter =
         selectLength 1 (powers.Count+1)
         il.Mark size
         load digits; load negative; il.Emit OpCodes.Add; save length
-        let fallback = il.Label()
-        let complete = il.Label()
-        let discarded = il.Label()
         let selected = CodecOutputEmitter.beginOperation il output state (fun () -> load length)
-        il.Emit OpCodes.Dup; il.EmitBranch(OpCodes.Brfalse,discarded)
-        constant 1; il.EmitBranch(OpCodes.Bne_Un,fallback)
-        CodecOutputEmitter.admitSpan il output selected destination state
-        destination(); il.EmitMethod(OpCodes.Call,output.Start); save reference
-        state(); il.EmitMethod(OpCodes.Call,output.Position); save position
-        let unsigned = il.Label()
-        load negative; il.EmitBranch(OpCodes.Brfalse,unsigned)
-        CodecOutputEmitter.store il output utf16 reference (fun () -> load position) (fun () -> constant(int '-'))
-        il.Mark unsigned
-        load position; load length; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Sub; save index
-        let image = CodecDigitWriterEmitter.capture il api (fun () -> load digits; constant 1; il.Emit OpCodes.Cgt)
-        CodecDigitWriterEmitter.reverse il api utf16 image wide magnitude digits (powers.Count+1) reference index None
-        state(); load length; il.EmitMethod(OpCodes.Call,output.Advance)
-        il.EmitBranch(OpCodes.Br,complete)
-        il.Mark fallback
-        CodecOutputEmitter.listBody il output utf16 selected state false None (Some (fun () -> load length)) (fun append ->
-            let positive = il.Label()
-            load negative; il.EmitBranch(OpCodes.Brfalse,positive)
-            append(fun () -> constant(int '-'))
-            il.Mark positive
-            constant 0; save index
+        if output.Kind = CodecOutputKind.Span then
+            CodecOutputEmitter.admitSpan il output selected destination state
+            destination(); il.EmitMethod(OpCodes.Call,output.Start); save reference
+            state(); il.EmitMethod(OpCodes.Call,output.Position); save position
+            let unsigned = il.Label()
+            load negative; il.EmitBranch(OpCodes.Brfalse,unsigned)
+            CodecOutputEmitter.store il output utf16 reference (fun () -> load position) (fun () -> constant(int '-'))
+            il.Mark unsigned
+            load position; load length; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Sub; save index
             let image = CodecDigitWriterEmitter.capture il api (fun () -> load digits; constant 1; il.Emit OpCodes.Cgt)
-            CodecDigitWriterEmitter.forward il api utf16 image wide magnitude digits (powers.Count+1) index None append
-        )
-        il.EmitBranch(OpCodes.Br,complete)
-        il.Mark discarded
-        il.Emit OpCodes.Pop
-        il.Mark complete
+            CodecDigitWriterEmitter.reverse il api utf16 image wide magnitude digits (powers.Count+1) reference index None
+            state(); load length; il.EmitMethod(OpCodes.Call,output.Advance)
+        elif output.Kind <> CodecOutputKind.Validation then
+            CodecOutputEmitter.listBody il output utf16 state (fun append ->
+                let positive = il.Label()
+                load negative; il.EmitBranch(OpCodes.Brfalse,positive)
+                append(fun () -> constant(int '-'))
+                il.Mark positive
+                constant 0; save index
+                let image = CodecDigitWriterEmitter.capture il api (fun () -> load digits; constant 1; il.Emit OpCodes.Cgt)
+                CodecDigitWriterEmitter.forward il api utf16 image wide magnitude digits (powers.Count+1) index None append
+            )
         il.Emit OpCodes.Ret
 
+    let writerFrom (il: CodecIL<'T,'M,'F>) (api: CodecDigitWriterApi<'T,'M,'F>) width signed utf16 input =
+        if api.Output.Kind = CodecOutputKind.Validation then
+            input(); il.Emit OpCodes.Pop; il.Emit OpCodes.Ret
+        else outputWriterFrom il api width signed utf16 input
+
     let writer il api width signed utf16 =
-        writerFrom il api width signed utf16 (fun () -> il.Emit OpCodes.Ldarg_0)
+        writerFrom il api width signed utf16 (fun () -> il.InputValue())

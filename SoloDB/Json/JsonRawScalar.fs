@@ -93,6 +93,10 @@ module internal JsonRawScalar =
 
 
 module internal JsonOutputOperations =
+    let ascii<'E,'O when 'O : struct and 'O :> IJsonTextOutput<'E>> (output: 'O) value (destination: byref<Span<'E>>) (state: byref<JsonWriteState<'E>>) =
+        output.Ascii(value,&destination,&state)
+    let raw<'E,'O when 'O : struct and 'O :> IJsonTextOutput<'E>> (output: 'O) value (destination: byref<Span<'E>>) (state: byref<JsonWriteState<'E>>) =
+        output.Raw(value,&destination,&state)
     let text<'E,'O when 'O : struct and 'O :> IJsonTextOutput<'E>> (output: 'O) value start count (destination: byref<Span<'E>>) (state: byref<JsonWriteState<'E>>) =
         output.Text(value,start,count,&destination,&state)
     let literal<'E,'O when 'O : struct and 'O :> IJsonTextOutput<'E>> (output: 'O) (value: string) (destination: byref<Span<'E>>) (state: byref<JsonWriteState<'E>>) =
@@ -110,30 +114,70 @@ type internal IJsonValueOutput<'Element> =
 type internal JsonUtf8Writer =
     interface IJsonValueOutput<byte> with
         member _.AsciiCode(value) = value
-        member _.Ascii(value,destination,state) = JsonWriteBuffer.append &destination &state value
+        member _.Ascii(value,destination,state) = JsonOutputOperations.ascii (JsonUtf8Output()) value &destination &state
+        member _.Raw(value,destination,state) = JsonOutputOperations.raw (JsonUtf8Output()) value &destination &state
         member _.Text(value,start,count,destination,state) =
-            let output = JsonUtf8Output()
-            JsonOutputOperations.text output value start count &destination &state
-        member _.Signed(value,destination,state) = JsonRawNumericWriter.int64Utf8(value) &destination &state
-        member _.Unsigned(value,destination,state) = JsonRawNumericWriter.uint64Utf8(value) &destination &state
-        member _.Decimal(value,destination,state) = JsonRawNumericWriter.decimalUtf8(value) &destination &state
-        member _.Double(value,destination,state) = JsonRawNumericWriter.doubleUtf8(value) &destination &state
-        member _.Single(value,destination,state) = JsonRawNumericWriter.singleUtf8(value) &destination &state
+            JsonOutputOperations.text (JsonUtf8Output()) value start count &destination &state
+        member _.Signed(value,destination,state) = JsonRawNumericWriter.int64Utf8 (JsonUtf8Output()) value &destination &state
+        member _.Unsigned(value,destination,state) = JsonRawNumericWriter.uint64Utf8 (JsonUtf8Output()) value &destination &state
+        member _.Decimal(value,destination,state) = JsonRawNumericWriter.decimalUtf8 (JsonUtf8Output()) value &destination &state
+        member _.Double(value,destination,state) = JsonRawNumericWriter.doubleUtf8 (JsonUtf8Output()) value &destination &state
+        member _.Single(value,destination,state) = JsonRawNumericWriter.singleUtf8 (JsonUtf8Output()) value &destination &state
+
+[<Struct>]
+type internal JsonUtf8IListWriter =
+    interface IJsonValueOutput<byte> with
+        member _.AsciiCode(value) = value
+        member _.Ascii(value,destination,state) = JsonOutputOperations.ascii (JsonUtf8IListOutput()) value &destination &state
+        member _.Raw(value,destination,state) = JsonOutputOperations.raw (JsonUtf8IListOutput()) value &destination &state
+        member _.Text(value,start,count,destination,state) =
+            JsonOutputOperations.text (JsonUtf8IListOutput()) value start count &destination &state
+        member _.Signed(value,destination,state) = JsonRawNumericWriter.int64Utf8 (JsonUtf8IListOutput()) value &destination &state
+        member _.Unsigned(value,destination,state) = JsonRawNumericWriter.uint64Utf8 (JsonUtf8IListOutput()) value &destination &state
+        member _.Decimal(value,destination,state) = JsonRawNumericWriter.decimalUtf8 (JsonUtf8IListOutput()) value &destination &state
+        member _.Double(value,destination,state) = JsonRawNumericWriter.doubleUtf8 (JsonUtf8IListOutput()) value &destination &state
+        member _.Single(value,destination,state) = JsonRawNumericWriter.singleUtf8 (JsonUtf8IListOutput()) value &destination &state
 
 [<Struct>]
 type internal JsonUtf16Writer =
     interface IJsonValueOutput<char> with
         member _.AsciiCode(value) = byte value
-        member _.Ascii(value,destination,state) = JsonWriteBuffer.append &destination &state (char value)
+        member _.Ascii(value,destination,state) = JsonOutputOperations.ascii (JsonUtf16Output()) value &destination &state
+        member _.Raw(value,destination,state) = JsonOutputOperations.raw (JsonUtf16Output()) value &destination &state
         member _.Text(value,start,count,destination,state) =
-            let output = JsonUtf16Output()
-            JsonOutputOperations.text output value start count &destination &state
-        member _.Signed(value,destination,state) = JsonRawNumericWriter.int64Utf16(value) &destination &state
-        member _.Unsigned(value,destination,state) = JsonRawNumericWriter.uint64Utf16(value) &destination &state
-        member _.Decimal(value,destination,state) = JsonRawNumericWriter.decimalUtf16(value) &destination &state
-        member _.Double(value,destination,state) = JsonRawNumericWriter.doubleUtf16(value) &destination &state
-        member _.Single(value,destination,state) = JsonRawNumericWriter.singleUtf16(value) &destination &state
+            JsonOutputOperations.text (JsonUtf16Output()) value start count &destination &state
+        member _.Signed(value,destination,state) = JsonRawNumericWriter.int64Utf16 (JsonUtf16Output()) value &destination &state
+        member _.Unsigned(value,destination,state) = JsonRawNumericWriter.uint64Utf16 (JsonUtf16Output()) value &destination &state
+        member _.Decimal(value,destination,state) = JsonRawNumericWriter.decimalUtf16 (JsonUtf16Output()) value &destination &state
+        member _.Double(value,destination,state) = JsonRawNumericWriter.doubleUtf16 (JsonUtf16Output()) value &destination &state
+        member _.Single(value,destination,state) = JsonRawNumericWriter.singleUtf16 (JsonUtf16Output()) value &destination &state
 
+[<Struct>]
+type internal JsonUtf16IListWriter =
+    interface IJsonValueOutput<char> with
+        member _.AsciiCode(value) = byte value
+        member _.Ascii(value,destination,state) = JsonOutputOperations.ascii (JsonUtf16IListOutput()) value &destination &state
+        member _.Raw(value,destination,state) = JsonOutputOperations.raw (JsonUtf16IListOutput()) value &destination &state
+        member _.Text(value,start,count,destination,state) =
+            JsonOutputOperations.text (JsonUtf16IListOutput()) value start count &destination &state
+        member _.Signed(value,destination,state) = JsonRawNumericWriter.int64Utf16 (JsonUtf16IListOutput()) value &destination &state
+        member _.Unsigned(value,destination,state) = JsonRawNumericWriter.uint64Utf16 (JsonUtf16IListOutput()) value &destination &state
+        member _.Decimal(value,destination,state) = JsonRawNumericWriter.decimalUtf16 (JsonUtf16IListOutput()) value &destination &state
+        member _.Double(value,destination,state) = JsonRawNumericWriter.doubleUtf16 (JsonUtf16IListOutput()) value &destination &state
+        member _.Single(value,destination,state) = JsonRawNumericWriter.singleUtf16 (JsonUtf16IListOutput()) value &destination &state
+
+[<Struct>]
+type internal JsonValidationOutput<'E> =
+    interface IJsonValueOutput<'E> with
+        member _.AsciiCode(_) = 0uy
+        member _.Ascii(_,_,_) = ()
+        member _.Raw(_,_,_) = ()
+        member _.Text(_,_,_,_,_) = ()
+        member _.Signed(_,_,_) = ()
+        member _.Unsigned(_,_,_) = ()
+        member _.Decimal(_,_,_) = ()
+        member _.Double(_,_,_) = ()
+        member _.Single(_,_,_) = ()
 
 [<AbstractClass; Sealed>]
 type internal JsonRawPrimitive =

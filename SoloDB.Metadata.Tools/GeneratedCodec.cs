@@ -133,7 +133,11 @@ internal static class GeneratedCodec
         CodecEmitter.defaultConstruction(new CecilCodecIL(method),type,true,Some(constructor),true);
     internal static CodecTuple<TypeReference, MethodReference, FieldReference> Tuple(GeneratedModel model, GeneratedModel[] models)
     {
-        var members = Model(model).Members;
+        var members = Model(model).Members.Select(member =>
+            model.Facts.ValueType && member.Field != null
+                ? new CodecMember<TypeReference,MethodReference,FieldReference>(member.Name,member.Type,member.Field,member.Getter,member.Setter,
+                    member.Static,member.Readable,true,member.Ignored,member.Many)
+                : member).ToArray();
         return new CodecTuple<TypeReference, MethodReference, FieldReference>(model.Type,model.Facts.ValueType,model.Constructor!,
             members.Select((member,index) => new CodecTupleMember<TypeReference, MethodReference, FieldReference>(member,
                 index == 7 ? FSharpOption<CodecTuple<TypeReference, MethodReference, FieldReference>>.Some(

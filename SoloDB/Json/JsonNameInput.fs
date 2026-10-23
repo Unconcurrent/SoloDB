@@ -1,8 +1,27 @@
 namespace SoloDatabase.JsonSerializator
 
+open System
+open System.Runtime.CompilerServices
+
 /// Logical name units reuse the quoted and identifier escape authorities.
 [<AbstractClass; Sealed>]
 type internal JsonNameInput =
+    [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
+    static member internal Utf8Word(source: byref<byte>): uint32 =
+        let value = Unsafe.ReadUnaligned<uint32>(&source)
+        if BitConverter.IsLittleEndian then value
+        else (value >>> 24) ||| ((value >>> 8) &&& 0xFF00u) ||| ((value <<< 8) &&& 0xFF0000u) ||| (value <<< 24)
+
+    [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
+    static member internal Utf8Pair(source: byref<byte>): uint32 =
+        let value = uint32(Unsafe.ReadUnaligned<uint16>(&source))
+        if BitConverter.IsLittleEndian then value else (value >>> 8) ||| ((value &&& 255u) <<< 8)
+
+    [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
+    static member internal Utf16Pair(source: byref<byte>): uint32 =
+        let value = Unsafe.ReadUnaligned<uint32>(&source)
+        if BitConverter.IsLittleEndian then value else (value >>> 16) ||| (value <<< 16)
+
     static member internal Begin<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>, first: bool): int =
         JsonGrammar.beginPropertyName &context.Cursor first
 

@@ -75,14 +75,15 @@ using System;
 using SoloDatabase.JsonSerializator;
 
 Span<byte> destination = Span<byte>.Empty;
-int written = JsonValue.WriteJson(new[] { 1, 2, 3 }, ref destination);
+int[] source = { 1, 2, 3 };
+int written = JsonValue.WriteJson(ref source, ref destination);
 ReadOnlySpan<byte> json = destination.Slice(0, written);
 int[] values = JsonValue.ParseInto<int[]>(json);
 ```
 
 An empty span grows automatically; `written` counts bytes for UTF-8 and characters for UTF-16. Writable-list overloads append and return the added count. See the [direct JSON guide](docs/generated-metadata.md#direct-typed-json) for custom growth/release callbacks, final-buffer ownership and failure behavior. NativeAOT uses the generated registration described above. `Serialize<T>` and `Parse` remain available when you need a `JsonValue` tree.
 
-Direct floating-point conversion avoids the decimal-backed tree's rounding and range limits. Output for values previously rounded or rejected can differ. Forward object readers run setters and conversions in input order: an invalid earlier duplicate fails, and user effects can remain after later malformed or trailing input. Exceptional late runtime-type selection can replay conversion and add effects. See the [direct JSON behavior and ownership guide](docs/generated-metadata.md#direct-typed-json).
+Direct floating-point conversion avoids the decimal-backed tree's rounding and range limits. Direct and tree output can differ for values outside Decimal precision or range. Forward object readers run setters and conversions in input order: an invalid earlier duplicate fails, and user effects can remain after later malformed or trailing input. Exceptional late runtime-type selection can replay conversion and add effects. See the [direct JSON behavior and ownership guide](docs/generated-metadata.md#direct-typed-json).
 
 ## Getting Started: A 60-Second Guide
 
@@ -810,7 +811,7 @@ let data = { Id = 0L; Name = "F# Document"; Data = "Some data" }
 collection.Insert(data) |> ignore
 printfn "Inserted document with ID: %d" data.Id
         
-// Query all documents into an F# list
+// Materialize the query
 let documents = collection.ToList()
 printfn "Found %d documents" documents.Count
         
@@ -856,4 +857,4 @@ Full license details are available [here](https://solodb.org/legal.html).
 
 ### Direct SQL
 
-See [Direct SQL connections](docs/native-sql.md) for named SQL execution, typed rows, parameter plans and transactions.
+See [Direct SQL connections](docs/native-sql.md) for named SQL execution, typed rows, named parameters and transactions.

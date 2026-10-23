@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Xml.Linq;
 using Microsoft.Build.Framework;
+using Mono.Cecil;
 
 namespace SoloDatabase.Metadata.Tools;
 
@@ -29,17 +30,24 @@ public sealed class HelperImplementationInputs : ITask
         Active = false;
         try
         {
+            using var consumer = AssemblyDefinition.ReadAssembly(Consumer);
+            Active = consumer.CustomAttributes.Any(attribute => attribute.AttributeType.FullName == "SoloDatabase.Generated.MetadataActivationAttribute");
             HelperAssembly.Publish(InputFile, new XElement("inputs", new XAttribute("consumer", Consumer),
                 new XAttribute("output", Output), new XAttribute("identity", Identity), new XAttribute("key", KeyFile ?? ""),
                 new XAttribute("publicSign", PublicSign), new XAttribute("delaySign", DelaySign),
                 References.Select(reference => new XElement("reference", reference.ItemSpec)),
                 CompilerReferences.Select(reference => new XElement("compilerReference", reference.ItemSpec)),
                 ImplementationInputs.Select(input => new XElement("implementation", input.ItemSpec))));
+            if (!Active)
+            {
+                if (File.Exists(Output)) File.Delete(Output);
+                HelperAssembly.Publish(Selection, new XElement("selection", new XAttribute("active", false)));
+                return true;
+            }
             if (!File.Exists(Stamp)) return true;
             if (File.Exists(Selection))
             {
-                Active = (bool)XElement.Load(Selection).Attribute("active")!;
-                if (!Active || File.Exists(Output)) return true;
+                if ((bool)XElement.Load(Selection).Attribute("active")! && File.Exists(Output)) return true;
             }
             File.Delete(Stamp);
             return true;

@@ -14,7 +14,7 @@ type internal CodecFloatingWriterApi<'Type,'Method,'Field> = {
 }
 
 module internal CodecFloatingWriterEmitter =
-    let writerFrom (il: CodecIL<'T,'M,'F>) (api: CodecFloatingWriterApi<'T,'M,'F>) width utf16 address =
+    let private outputWriterFrom (il: CodecIL<'T,'M,'F>) (api: CodecFloatingWriterApi<'T,'M,'F>) width utf16 address =
         let output = api.Digits.Output
         let wide = width = 64
         let wordType = if wide then output.UInt64 else output.UInt32
@@ -126,138 +126,136 @@ module internal CodecFloatingWriterEmitter =
         load digits; constant 1; il.Emit OpCodes.Cgt; il.Emit OpCodes.Add
         constant 2; il.Emit OpCodes.Add; load exponentDigits; il.Emit OpCodes.Add; save length
         il.Mark admitted
-        let list = il.Label()
-        let discarded = il.Label()
         let selected = CodecOutputEmitter.beginOperation il output context (fun () -> load length)
-        il.Emit OpCodes.Dup; il.EmitBranch(OpCodes.Brfalse,discarded)
-        constant 1; il.EmitBranch(OpCodes.Bne_Un,list)
-        CodecOutputEmitter.admitSpan il output selected destination context
-        destination(); il.EmitMethod(OpCodes.Call,output.Start); save reference
-        context(); il.EmitMethod(OpCodes.Call,output.Position); save position
-        let image = CodecDigitWriterEmitter.capture il api.Digits (fun () ->
-            load digits; constant 1; il.Emit OpCodes.Cgt
-            load fixedFormat; constant 0; il.Emit OpCodes.Ceq
-            il.Emit OpCodes.Or)
-        let store offset value = CodecOutputEmitter.store il output utf16 reference offset value
-        let write value = store (fun () -> load index) value; load index; constant 1; il.Emit OpCodes.Add; save index
-        load position; save index
-        let unsigned = il.Label()
-        load negative; il.EmitBranch(OpCodes.Brfalse,unsigned)
-        write(fun () -> constant(int '-'))
-        il.Mark unsigned
-        constant -1; save dot
-        let scientificOutput = il.Label()
-        let coefficientReady = il.Label()
-        load fixedFormat; il.EmitBranch(OpCodes.Brfalse,scientificOutput)
-        let positive = il.Label()
-        load point; constant 0; il.EmitBranch(OpCodes.Bgt,positive)
-        write(fun () -> constant(int '0')); write(fun () -> constant(int '.'))
-        constant 0; load point; il.Emit OpCodes.Sub; save remaining
-        let leading = il.Label()
-        let leadingDone = il.Label()
-        il.Mark leading
-        load remaining; il.EmitBranch(OpCodes.Brfalse,leadingDone)
-        write(fun () -> constant(int '0'))
-        load remaining; constant 1; il.Emit OpCodes.Sub; save remaining; il.EmitBranch(OpCodes.Br,leading)
-        il.Mark leadingDone
-        load index; load digits; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Sub; save coefficientEnd
-        il.EmitBranch(OpCodes.Br,coefficientReady)
-        il.Mark positive
-        let fraction = il.Label()
-        load point; load digits; il.EmitBranch(OpCodes.Blt,fraction)
-        load index; load digits; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Sub; save coefficientEnd
-        load index; load digits; il.Emit OpCodes.Add; save index
-        load decimalExponent; save remaining
-        let trailing = il.Label()
-        il.Mark trailing
-        load remaining; il.EmitBranch(OpCodes.Brfalse,coefficientReady)
-        write(fun () -> constant(int '0'))
-        load remaining; constant 1; il.Emit OpCodes.Sub; save remaining; il.EmitBranch(OpCodes.Br,trailing)
-        il.Mark fraction
-        load index; load point; il.Emit OpCodes.Add; save dot
-        store (fun () -> load dot) (fun () -> constant(int '.'))
-        load index; load digits; il.Emit OpCodes.Add; save coefficientEnd
-        il.EmitBranch(OpCodes.Br,coefficientReady)
-        il.Mark scientificOutput
-        load index; load digits; il.Emit OpCodes.Add
-        load digits; constant 1; il.Emit OpCodes.Cgt; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Sub; save coefficientEnd
-        let noDot = il.Label()
-        load digits; constant 1; il.EmitBranch(OpCodes.Ble,noDot)
-        load index; constant 1; il.Emit OpCodes.Add; save dot
-        store (fun () -> load dot) (fun () -> constant(int '.'))
-        il.Mark noDot
-        load coefficientEnd; constant 1; il.Emit OpCodes.Add; save index
-        write(fun () -> constant(int 'E'))
-        let plus = il.Label()
-        let signDone = il.Label()
-        load negativeExponent; il.EmitBranch(OpCodes.Brfalse,plus)
-        write(fun () -> constant(int '-')); il.EmitBranch(OpCodes.Br,signDone)
-        il.Mark plus
-        write(fun () -> constant(int '+'))
-        il.Mark signDone
-        load position; load length; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Sub; save index
-        CodecDigitWriterEmitter.reverseChunk il api.Digits utf16 image absoluteExponent exponentDigits reference index None
-        il.Mark coefficientReady
-        load coefficientEnd; save index
-        CodecDigitWriterEmitter.reverse il api.Digits utf16 image wide coefficient digits digitMaximum reference index (Some dot)
-        context(); load length; il.EmitMethod(OpCodes.Call,output.Advance); il.EmitBranch(OpCodes.Br,complete)
-        il.Mark list
-        // Arbitrary IList retains ordered successful-Add accounting, using captured numeric facts.
-        CodecOutputEmitter.listBody il output utf16 selected context false None (Some (fun () -> load length)) (fun append ->
+        if output.Kind = CodecOutputKind.Span then
+            CodecOutputEmitter.admitSpan il output selected destination context
+            destination(); il.EmitMethod(OpCodes.Call,output.Start); save reference
+            context(); il.EmitMethod(OpCodes.Call,output.Position); save position
             let image = CodecDigitWriterEmitter.capture il api.Digits (fun () ->
                 load digits; constant 1; il.Emit OpCodes.Cgt
                 load fixedFormat; constant 0; il.Emit OpCodes.Ceq
                 il.Emit OpCodes.Or)
-            let listUnsigned = il.Label()
-            load negative; il.EmitBranch(OpCodes.Brfalse,listUnsigned)
-            append(fun () -> constant(int '-'))
-            il.Mark listUnsigned
-            let listCoefficient = il.Label()
-            load fixedFormat; il.EmitBranch(OpCodes.Brfalse,listCoefficient)
-            load point; constant 0; il.EmitBranch(OpCodes.Bgt,listCoefficient)
-            append(fun () -> constant(int '0')); append(fun () -> constant(int '.'))
-            constant 0; load point; il.Emit OpCodes.Sub; save remaining
-            let listZeros = il.Label()
-            il.Mark listZeros
-            load remaining; il.EmitBranch(OpCodes.Brfalse,listCoefficient)
-            append(fun () -> constant(int '0'))
-            load remaining; constant 1; il.Emit OpCodes.Sub; save remaining; il.EmitBranch(OpCodes.Br,listZeros)
-            il.Mark listCoefficient
+            let store offset value = CodecOutputEmitter.store il output utf16 reference offset value
+            let write value = store (fun () -> load index) value; load index; constant 1; il.Emit OpCodes.Add; save index
+            load position; save index
+            let unsigned = il.Label()
+            load negative; il.EmitBranch(OpCodes.Brfalse,unsigned)
+            write(fun () -> constant(int '-'))
+            il.Mark unsigned
             constant -1; save dot
-            let ordinaryPoint = il.Label()
-            let pointReady = il.Label()
-            load fixedFormat; il.EmitBranch(OpCodes.Brtrue,ordinaryPoint)
-            load digits; constant 1; il.EmitBranch(OpCodes.Ble,pointReady)
-            constant 1; save dot; il.EmitBranch(OpCodes.Br,pointReady)
-            il.Mark ordinaryPoint
-            load point; constant 0; il.EmitBranch(OpCodes.Ble,pointReady)
-            load point; load digits; il.EmitBranch(OpCodes.Bge,pointReady)
-            load point; save dot
-            il.Mark pointReady
-            constant 0; save index
-            CodecDigitWriterEmitter.forward il api.Digits utf16 image wide coefficient digits digitMaximum index (Some dot) append
-            let listExponent = il.Label()
-            load fixedFormat; il.EmitBranch(OpCodes.Brfalse,listExponent)
+            let scientificOutput = il.Label()
+            let coefficientReady = il.Label()
+            load fixedFormat; il.EmitBranch(OpCodes.Brfalse,scientificOutput)
+            let positive = il.Label()
+            load point; constant 0; il.EmitBranch(OpCodes.Bgt,positive)
+            write(fun () -> constant(int '0')); write(fun () -> constant(int '.'))
+            constant 0; load point; il.Emit OpCodes.Sub; save remaining
+            let leading = il.Label()
+            let leadingDone = il.Label()
+            il.Mark leading
+            load remaining; il.EmitBranch(OpCodes.Brfalse,leadingDone)
+            write(fun () -> constant(int '0'))
+            load remaining; constant 1; il.Emit OpCodes.Sub; save remaining; il.EmitBranch(OpCodes.Br,leading)
+            il.Mark leadingDone
+            load index; load digits; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Sub; save coefficientEnd
+            il.EmitBranch(OpCodes.Br,coefficientReady)
+            il.Mark positive
+            let fraction = il.Label()
+            load point; load digits; il.EmitBranch(OpCodes.Blt,fraction)
+            load index; load digits; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Sub; save coefficientEnd
+            load index; load digits; il.Emit OpCodes.Add; save index
             load decimalExponent; save remaining
-            load remaining; constant 0; il.EmitBranch(OpCodes.Ble,complete)
-            let listTrailing = il.Label()
-            il.Mark listTrailing
-            append(fun () -> constant(int '0'))
-            load remaining; constant 1; il.Emit OpCodes.Sub; save remaining
-            load remaining; il.EmitBranch(OpCodes.Brtrue,listTrailing); il.EmitBranch(OpCodes.Br,complete)
-            il.Mark listExponent
-            append(fun () -> constant(int 'E'))
-            let listPlus = il.Label()
-            let listSignDone = il.Label()
-            load negativeExponent; il.EmitBranch(OpCodes.Brfalse,listPlus)
-            append(fun () -> constant(int '-')); il.EmitBranch(OpCodes.Br,listSignDone)
-            il.Mark listPlus
-            append(fun () -> constant(int '+'))
-            il.Mark listSignDone
-            constant 0; save index
-            CodecDigitWriterEmitter.forwardChunk il api.Digits utf16 image absoluteExponent exponentDigits 3 index None append
-            il.EmitBranch(OpCodes.Br,complete)
-        )
+            let trailing = il.Label()
+            il.Mark trailing
+            load remaining; il.EmitBranch(OpCodes.Brfalse,coefficientReady)
+            write(fun () -> constant(int '0'))
+            load remaining; constant 1; il.Emit OpCodes.Sub; save remaining; il.EmitBranch(OpCodes.Br,trailing)
+            il.Mark fraction
+            load index; load point; il.Emit OpCodes.Add; save dot
+            store (fun () -> load dot) (fun () -> constant(int '.'))
+            load index; load digits; il.Emit OpCodes.Add; save coefficientEnd
+            il.EmitBranch(OpCodes.Br,coefficientReady)
+            il.Mark scientificOutput
+            load index; load digits; il.Emit OpCodes.Add
+            load digits; constant 1; il.Emit OpCodes.Cgt; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Sub; save coefficientEnd
+            let noDot = il.Label()
+            load digits; constant 1; il.EmitBranch(OpCodes.Ble,noDot)
+            load index; constant 1; il.Emit OpCodes.Add; save dot
+            store (fun () -> load dot) (fun () -> constant(int '.'))
+            il.Mark noDot
+            load coefficientEnd; constant 1; il.Emit OpCodes.Add; save index
+            write(fun () -> constant(int 'E'))
+            let plus = il.Label()
+            let signDone = il.Label()
+            load negativeExponent; il.EmitBranch(OpCodes.Brfalse,plus)
+            write(fun () -> constant(int '-')); il.EmitBranch(OpCodes.Br,signDone)
+            il.Mark plus
+            write(fun () -> constant(int '+'))
+            il.Mark signDone
+            load position; load length; il.Emit OpCodes.Add; constant 1; il.Emit OpCodes.Sub; save index
+            CodecDigitWriterEmitter.reverseChunk il api.Digits utf16 image absoluteExponent exponentDigits reference index None
+            il.Mark coefficientReady
+            load coefficientEnd; save index
+            CodecDigitWriterEmitter.reverse il api.Digits utf16 image wide coefficient digits digitMaximum reference index (Some dot)
+            context(); load length; il.EmitMethod(OpCodes.Call,output.Advance); il.EmitBranch(OpCodes.Br,complete)
+        elif output.Kind <> CodecOutputKind.Validation then
+            // Arbitrary IList retains ordered successful-Add accounting, using captured numeric facts.
+            CodecOutputEmitter.listBody il output utf16 context (fun append ->
+                let image = CodecDigitWriterEmitter.capture il api.Digits (fun () ->
+                    load digits; constant 1; il.Emit OpCodes.Cgt
+                    load fixedFormat; constant 0; il.Emit OpCodes.Ceq
+                    il.Emit OpCodes.Or)
+                let listUnsigned = il.Label()
+                load negative; il.EmitBranch(OpCodes.Brfalse,listUnsigned)
+                append(fun () -> constant(int '-'))
+                il.Mark listUnsigned
+                let listCoefficient = il.Label()
+                load fixedFormat; il.EmitBranch(OpCodes.Brfalse,listCoefficient)
+                load point; constant 0; il.EmitBranch(OpCodes.Bgt,listCoefficient)
+                append(fun () -> constant(int '0')); append(fun () -> constant(int '.'))
+                constant 0; load point; il.Emit OpCodes.Sub; save remaining
+                let listZeros = il.Label()
+                il.Mark listZeros
+                load remaining; il.EmitBranch(OpCodes.Brfalse,listCoefficient)
+                append(fun () -> constant(int '0'))
+                load remaining; constant 1; il.Emit OpCodes.Sub; save remaining; il.EmitBranch(OpCodes.Br,listZeros)
+                il.Mark listCoefficient
+                constant -1; save dot
+                let ordinaryPoint = il.Label()
+                let pointReady = il.Label()
+                load fixedFormat; il.EmitBranch(OpCodes.Brtrue,ordinaryPoint)
+                load digits; constant 1; il.EmitBranch(OpCodes.Ble,pointReady)
+                constant 1; save dot; il.EmitBranch(OpCodes.Br,pointReady)
+                il.Mark ordinaryPoint
+                load point; constant 0; il.EmitBranch(OpCodes.Ble,pointReady)
+                load point; load digits; il.EmitBranch(OpCodes.Bge,pointReady)
+                load point; save dot
+                il.Mark pointReady
+                constant 0; save index
+                CodecDigitWriterEmitter.forward il api.Digits utf16 image wide coefficient digits digitMaximum index (Some dot) append
+                let listExponent = il.Label()
+                load fixedFormat; il.EmitBranch(OpCodes.Brfalse,listExponent)
+                load decimalExponent; save remaining
+                load remaining; constant 0; il.EmitBranch(OpCodes.Ble,complete)
+                let listTrailing = il.Label()
+                il.Mark listTrailing
+                append(fun () -> constant(int '0'))
+                load remaining; constant 1; il.Emit OpCodes.Sub; save remaining
+                load remaining; il.EmitBranch(OpCodes.Brtrue,listTrailing); il.EmitBranch(OpCodes.Br,complete)
+                il.Mark listExponent
+                append(fun () -> constant(int 'E'))
+                let listPlus = il.Label()
+                let listSignDone = il.Label()
+                load negativeExponent; il.EmitBranch(OpCodes.Brfalse,listPlus)
+                append(fun () -> constant(int '-')); il.EmitBranch(OpCodes.Br,listSignDone)
+                il.Mark listPlus
+                append(fun () -> constant(int '+'))
+                il.Mark listSignDone
+                constant 0; save index
+                CodecDigitWriterEmitter.forwardChunk il api.Digits utf16 image absoluteExponent exponentDigits 3 index None append
+                il.EmitBranch(OpCodes.Br,complete)
+            )
+        else il.EmitBranch(OpCodes.Br,complete)
         il.Mark zero
         let positiveZero = il.Label()
         load negative; il.EmitBranch(OpCodes.Brfalse,positiveZero)
@@ -266,7 +264,10 @@ module internal CodecFloatingWriterEmitter =
         il.Mark positiveZero
         CodecOutputEmitter.literal il output utf16 [|48|] destination context
         il.EmitBranch(OpCodes.Br,complete)
-        il.Mark discarded
-        il.Emit OpCodes.Pop
         il.Mark complete
         il.Emit OpCodes.Ret
+
+    let writerFrom (il: CodecIL<'T,'M,'F>) (api: CodecFloatingWriterApi<'T,'M,'F>) width utf16 address =
+        if api.Digits.Output.Kind = CodecOutputKind.Validation then
+            address(); il.Emit OpCodes.Pop; il.Emit OpCodes.Ret
+        else outputWriterFrom il api width utf16 address

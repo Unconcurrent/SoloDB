@@ -67,8 +67,7 @@ module internal CodecUnionEmitter =
                 il.EmitMethod(OpCodes.Call,input.Child); il.EmitLocal(OpCodes.Stloc,child)
                 let call = match operation target with Some call -> call | None -> fallback target
                 il.BeginException()
-                il.EmitLocal(OpCodes.Ldloca,child); il.EmitMethod(OpCodes.Call,call)
-                il.EmitLocal(OpCodes.Stloc,result)
+                CodecEmitter.readLocal il call (fun () -> il.EmitLocal(OpCodes.Ldloca,child)) result
                 il.Catch input.PrimitiveError
                 il.EmitLocal(OpCodes.Ldloca,child); il.EmitMethod(OpCodes.Call,input.PrimitiveRetry target)
                 il.EmitLocal(OpCodes.Stloc,result)

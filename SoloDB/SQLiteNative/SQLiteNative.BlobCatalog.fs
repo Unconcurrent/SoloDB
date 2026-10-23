@@ -28,8 +28,17 @@ type internal NativeBlobCatalog(cache: NativeStatementCache, initialBudget: Nati
         scope.Dispose()
     let labels (names: string[]) (source: NativeBlobSource) =
         if names.Length <> source.Columns.Length then ValueNone
-        elif names |> Array.mapi (fun i name -> names |> Array.take i |> Array.exists (equal name)) |> Array.exists id then ValueNone
-        else ValueSome { source with Columns=Array.map2 (fun name column -> {column with Name=name}) names source.Columns; Magic=Array.empty }
+        else
+            let mutable duplicate = false
+            let mutable i = 1
+            while not duplicate && i < names.Length do
+                let mutable j = 0
+                while not duplicate && j < i do
+                    duplicate <- equal names[i] names[j]
+                    j <- j + 1
+                i <- i + 1
+            if duplicate then ValueNone
+            else ValueSome { source with Columns=Array.map2 (fun name column -> {column with Name=name}) names source.Columns; Magic=Array.empty }
     member _.Budget with get() = budget and set value = budget <- value
     member _.Coherent = not disposed && cache.SchemaProbeBorrows = expectedBorrows && cache.Database.CallbackEpoch = callbacks
     member _.SourceVersion(schema: string) =
@@ -105,11 +114,11 @@ type internal NativeBlobCatalog(cache: NativeStatementCache, initialBudget: Nati
         with error -> scope.Abort(error); reraise()
     member private this.Lineage(schema: string, table: string, ordinary: bool, projection: NativeBlobIdentity.Projection[]) =
         if not ordinary then ValueNone else
-        let names =
+        let column name = {Name=name;PhysicalName=name;OriginName=null;Rowid=false;Stored=false}
+        let columns =
             if projection |> Array.exists (fun item -> item.Column.IsNone) then
-                this.ReadColumns(schema,table) |> Array.choose (fun struct(name,_,_,hidden) -> if hidden=1L then None else Some name)
-            else projection |> Array.map (fun item -> item.Column.Value)
-        let columns = names |> Array.map (fun name -> {Name=name;PhysicalName=name;OriginName=null;Rowid=false;Stored=false})
+                this.ReadColumns(schema,table) |> Array.choose (fun struct(name,_,_,hidden) -> if hidden=1L then None else Some(column name))
+            else projection |> Array.map (fun item -> column item.Column.Value)
         ValueSome {Schema=schema;Table=table;Columns=columns;Magic=Array.empty}
     member this.Physical(source: NativeBlobSource) =
         match this.Table(source.Schema,source.Table,true) with
@@ -132,14 +141,15 @@ type internal NativeBlobCatalog(cache: NativeStatementCache, initialBudget: Nati
         let rec resolve depth context bindings visited (query: NativeBlobIdentity.Query) =
             work <- work + 1
             if depth>32 || work>2048 then ValueNone else
-            let environment = query.Bindings |> List.map (fun binding -> binding,query.Bindings@bindings)
+            let scope = query.Bindings@bindings
+            let environment = query.Bindings |> List.map (fun binding -> binding,scope)
             let findBinding name =
                 match environment |> List.tryFind (fun (binding,_) -> equal binding.Name name) with
                 | Some found -> Some found
                 | _ -> bindings |> List.tryFind (fun binding -> equal binding.Name name) |> Option.map (fun binding -> binding,bindings)
             let source =
                 match query.Input with
-                | NativeBlobIdentity.Derived inner -> resolve (depth+1) context (query.Bindings@bindings) visited inner
+                | NativeBlobIdentity.Derived inner -> resolve (depth+1) context scope visited inner
                 | NativeBlobIdentity.Named(schema,name) ->
                     match if isNull schema then findBinding name else None with
                     | Some(binding,scope) ->

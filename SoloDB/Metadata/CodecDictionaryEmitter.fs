@@ -151,9 +151,7 @@ module internal CodecDictionaryEmitter =
         il.EmitLocal(OpCodes.Stloc,child)
         let read = match operation api.Value with Some read -> read | None -> fallback api.Value
         il.BeginException()
-        il.EmitLocal(OpCodes.Ldloca,child)
-        il.EmitMethod(OpCodes.Call,read)
-        il.EmitLocal(OpCodes.Stloc,value)
+        CodecEmitter.readLocal il read (fun () -> il.EmitLocal(OpCodes.Ldloca,child)) value
         il.Catch api.PrimitiveError
         il.EmitLocal(OpCodes.Ldloca,child)
         il.EmitMethod(OpCodes.Call,api.PrimitiveRetry)
@@ -184,18 +182,16 @@ module internal CodecDictionaryEmitter =
     let writer (il: CodecIL<'T,'M,'F>) (output: CodecRawWriterApi<'T,'M>)
                (api: CodecDictionaryWriterApi<'T,'M>) target valueType nonGeneric =
         let present = il.Label()
-        il.Emit OpCodes.Ldarg_0
+        il.InputValue()
         if valueType then il.EmitType(OpCodes.Box,target)
         let boxed = il.Local api.Object
         il.EmitLocal(OpCodes.Stloc,boxed)
         il.EmitLocal(OpCodes.Ldloc,boxed)
         il.EmitBranch(OpCodes.Brtrue,present)
-        il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
-        il.EmitMethod(OpCodes.Call,output.Null)
+        output.Literal "null"
         il.Emit OpCodes.Ret
         il.Mark present
-        il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
-        il.EmitMethod(OpCodes.Call,output.BeginObject)
+        output.Literal "{"
         let comma = il.Local api.Boolean
         let ownsType = il.Local api.Boolean
         let names = il.Local api.Names
@@ -240,7 +236,7 @@ module internal CodecDictionaryEmitter =
             il.EmitLocal(OpCodes.Ldloc,names); il.EmitLocal(OpCodes.Ldloc,name)
             il.EmitMethod(OpCodes.Callvirt,api.AddName)
             il.EmitBranch(OpCodes.Brtrue,unique)
-            il.EmitLocal(OpCodes.Ldloc,value)
+            CodecEmitter.callLocal il (output.Discard api.Value) 0 value
             il.EmitMethod(OpCodes.Call,output.Discard api.Value)
             il.EmitString "An item with the same key has already been added. Key: "
             il.EmitLocal(OpCodes.Ldloc,name)
@@ -254,7 +250,7 @@ module internal CodecDictionaryEmitter =
             il.EmitBranch(OpCodes.Brfalse,emit)
             il.Emit OpCodes.Ldarg_2; il.EmitMethod(OpCodes.Call,output.OmitId)
             il.EmitBranch(OpCodes.Brfalse,emit)
-            il.EmitLocal(OpCodes.Ldloc,value)
+            CodecEmitter.callLocal il (output.Discard api.Value) 0 value
             il.EmitMethod(OpCodes.Call,output.Discard api.Value)
             il.EmitBranch(OpCodes.Br,next)
             il.Mark emit
@@ -267,11 +263,11 @@ module internal CodecDictionaryEmitter =
             il.EmitMethod(OpCodes.Call,api.Equal)
             il.EmitBranch(OpCodes.Brfalse,ordinary)
             il.Emit OpCodes.Ldc_I4_1; il.EmitLocal(OpCodes.Stloc,ownsType)
-            il.EmitLocal(OpCodes.Ldloc,value); il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
+            CodecEmitter.callLocal il api.TypeMember 0 value; il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
             il.EmitMethod(OpCodes.Call,api.TypeMember)
             il.EmitBranch(OpCodes.Br,next)
             il.Mark ordinary
-            il.EmitLocal(OpCodes.Ldloc,value); il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
+            CodecEmitter.callLocal il write 0 value; il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
             il.EmitMethod(OpCodes.Call,write)
             il.EmitBranch(OpCodes.Br,next)
             il.Mark finish

@@ -15,14 +15,14 @@ type ModelsProvider(config: TypeProviderConfig) =
                                      Some(helper.TargetContext.ConvertSourceTypeToTarget typeof<obj>), isErased = false)
     let invalidated = Event<EventHandler, EventArgs>()
     let context = lazy (
-        let contextPath =
-            match config.ReferencedAssemblies |> Array.filter(fun path -> Path.GetFileName(path) = "SoloDB.ProjectContext.dll") with
-            | [| path |] -> path
-            | _ -> invalidOp "SoloDB generation requires exactly one current compiler context. Import the SoloDB package build targets."
-        let context = helper.TargetContext.ReadRelatedAssembly(contextPath).GetType("SoloDatabase.Tooling.ProjectContext")
-        if context.GetField("Format").GetRawConstantValue() :?> string <> "NulSeparated" then
-            invalidOp "The SoloDB compiler context format is not supported."
-        context)
+        match config.ReferencedAssemblies |> Array.filter(fun path -> Path.GetFileName(path) = "SoloDB.ProjectContext.dll") with
+        | [||] -> null
+        | [| contextPath |] ->
+            let context = helper.TargetContext.ReadRelatedAssembly(contextPath).GetType("SoloDatabase.Tooling.ProjectContext")
+            if context.GetField("Format").GetRawConstantValue() :?> string <> "NulSeparated" then
+                invalidOp "The SoloDB compiler context format is not supported."
+            context
+        | _ -> invalidOp "SoloDB generation requires exactly one current compiler context.")
     let literal name = context.Value.GetField(name).GetRawConstantValue() :?> string
     let executable = lazy (
         let template = literal "Template"
@@ -36,7 +36,7 @@ type ModelsProvider(config: TypeProviderConfig) =
             | field -> Some(field.GetRawConstantValue() :?> string,typ))
         |> dict)
     let generate (typePath: string[]) =
-        let mode = literal "Mode"
+        let mode = if isNull context.Value then "check" else literal "Mode"
         let name = typePath[typePath.Length - 1]
         let identity = "SoloDB.Generated.FSharp." + String.Join(".", typePath)
         match mode with

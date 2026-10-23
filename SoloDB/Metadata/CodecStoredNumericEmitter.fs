@@ -6,13 +6,14 @@ type internal CodecStoredNumericApi<'T,'M,'F> =
     { Output: CodecOutputApi<'T,'M,'F>
       Prepared: 'T
       Prepare: 'M
+      Validate: 'M
       Length: 'M
       Utf8Length: 'M
       Unit: 'M }
 
 /// Both destinations expand the same selected sink and canonical-key stores.
 module internal CodecStoredNumericEmitter =
-    let writer (il: CodecIL<'T,'M,'F>) (facts: CodecStoredNumericApi<'T,'M,'F>) utf16 =
+    let private outputWriter (il: CodecIL<'T,'M,'F>) (facts: CodecStoredNumericApi<'T,'M,'F>) utf16 =
         let api = facts.Output
         let prepared = il.Local facts.Prepared
         let symbols = il.Local api.Int32
@@ -23,7 +24,7 @@ module internal CodecStoredNumericEmitter =
         let save local = il.EmitLocal(OpCodes.Stloc,local)
         let destination() = il.Emit OpCodes.Ldarg_1
         let state() = il.Emit OpCodes.Ldarg_2
-        il.Emit OpCodes.Ldarg_0; il.EmitMethod(OpCodes.Call,facts.Prepare); save prepared
+        il.InputValue(); il.EmitMethod(OpCodes.Call,facts.Prepare); save prepared
         load prepared; il.EmitMethod(OpCodes.Call,facts.Length); save symbols
         load prepared; il.EmitMethod(OpCodes.Call,if utf16 then facts.Length else facts.Utf8Length)
         il.Emit OpCodes.Ldc_I4_2; il.Emit OpCodes.Add_Ovf; save units
@@ -52,7 +53,7 @@ module internal CodecStoredNumericEmitter =
             il.EmitBranch(OpCodes.Br,loop)
             il.Mark finish
             append(fun () -> il.EmitInt(OpCodes.Ldc_I4,34))
-        CodecOutputEmitter.withDestination il api state (fun selected mode concrete ->
+        CodecOutputEmitter.withDestination il api state (fun selected mode ->
             CodecOutputEmitter.checkCount il api state (fun () -> load units)
             if mode = 1 then
                 save selected.Minimum
@@ -68,7 +69,13 @@ module internal CodecStoredNumericEmitter =
             else
                 il.Emit OpCodes.Pop
                 if mode = 2 then
-                    if concrete then load selected.ConcreteList; load units; il.EmitMethod(OpCodes.Call,api.ReserveList)
-                    body (CodecOutputEmitter.listAppend il api utf16 selected state concrete (not concrete))
-                    if concrete then state(); load units; il.EmitMethod(OpCodes.Call,api.Advance))
+                    body (CodecOutputEmitter.listAppend il api utf16 state))
         il.Emit OpCodes.Ret
+
+    let writer (il: CodecIL<'T,'M,'F>) (facts: CodecStoredNumericApi<'T,'M,'F>) utf16 =
+        if facts.Output.Kind = CodecOutputKind.Validation then
+            il.InputValue()
+            il.EmitInt(OpCodes.Ldc_I4,if utf16 then 1 else 0)
+            il.EmitMethod(OpCodes.Call,facts.Validate)
+            il.Emit OpCodes.Ret
+        else outputWriter il facts utf16

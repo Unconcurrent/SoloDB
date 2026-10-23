@@ -7,6 +7,7 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="SoloDB.Unsupported.cs" />
     <InternalsVisibleTo Include="SoloDB.Metadata.FSharp.Analysis" />
     <ProjectReference Include="../SoloDB.Metadata.Codecs/SoloDB.Metadata.Codecs.fsproj" />
     <Compile Include="../SoloDB.Metadata.Generation/Model.cs" Link="Generation/Model.cs" />

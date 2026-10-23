@@ -35,11 +35,11 @@ module internal CodecBase64WriterEmitter =
         let complete = il.Label()
         if not ordinarySequence then
             let present = il.Label()
-            il.Emit OpCodes.Ldarg_0; il.EmitBranch(OpCodes.Brtrue,present)
+            il.InputValue(); il.EmitBranch(OpCodes.Brtrue,present)
             CodecOutputEmitter.literal il output utf16 [|110;117;108;108|] destination state
             il.EmitBranch(OpCodes.Br,complete)
             il.Mark present
-        il.Emit OpCodes.Ldarg_0; il.Emit OpCodes.Ldlen; il.Emit OpCodes.Conv_I4; save count
+        il.InputValue(); il.Emit OpCodes.Ldlen; il.Emit OpCodes.Conv_I4; save count
         load count; il.Emit OpCodes.Conv_I8; il.EmitInt64 2L; il.Emit OpCodes.Add
         il.EmitInt64 3L; il.Emit OpCodes.Div; il.EmitInt64 4L; il.Emit OpCodes.Mul
         if ordinarySequence then
@@ -60,7 +60,7 @@ module internal CodecBase64WriterEmitter =
             if ordinarySequence then constant 2; il.Emit OpCodes.Add
         let noSource = il.Label()
         load count; il.EmitBranch(OpCodes.Brfalse,noSource)
-        il.Emit OpCodes.Ldarg_0; destination(); state(); captureCount()
+        il.InputValue(); destination(); state(); captureCount()
         il.EmitMethod(OpCodes.Call,api.Capture); save bytes
         load bytes; il.EmitMethod(OpCodes.Call,api.Reference); save source
         il.Mark noSource
@@ -136,7 +136,7 @@ module internal CodecBase64WriterEmitter =
             il.Mark bigEndian
             body raw (Some(writeQuartet false)) false true
             il.Mark doneBody
-        CodecOutputEmitter.withDestination il output state (fun selected mode concrete ->
+        CodecOutputEmitter.withDestination il output state (fun selected mode ->
             let complete = il.Label()
             if mode <> 0 then
                 let noAlphabet = il.Label()
@@ -154,15 +154,13 @@ module internal CodecBase64WriterEmitter =
                 state(); load length; il.EmitMethod(OpCodes.Call,output.Advance)
                 il.EmitBranch(OpCodes.Br,complete)
                 il.Mark partial
-            CodecOutputEmitter.literalMode il output utf16 selected mode concrete [|int '"'|] destination state
+            CodecOutputEmitter.literalMode il output utf16 selected mode [|int '"'|] destination state
             let closing = il.Label()
             load count; il.EmitBranch(OpCodes.Brfalse,closing)
             if ordinarySequence && not utf16 && mode = 2 then
                 let append value =
                     CodecOutputEmitter.checkCount il output state (fun () -> constant 1); il.Emit OpCodes.Pop
-                    if concrete then
-                        load selected.ConcreteList; constant 1; il.EmitMethod(OpCodes.Call,output.ReserveList)
-                    CodecOutputEmitter.listAppend il output utf16 selected state concrete true value
+                    CodecOutputEmitter.listAppend il output utf16 state value
                 body append None true true
             else
                 CodecOutputEmitter.checkCount il output state bodyCount
@@ -175,14 +173,10 @@ module internal CodecBase64WriterEmitter =
                 else
                     il.Emit OpCodes.Pop
                     if mode = 2 then
-                        if concrete then
-                            load selected.ConcreteList; bodyCount(); il.EmitMethod(OpCodes.Call,output.ReserveList)
-                        let bulk = ordinarySequence && utf16 && concrete
-                        body (fun value -> CodecOutputEmitter.listAppend il output utf16 selected state concrete (not bulk) value) None true true
-                        if bulk then state(); bodyCount(); il.EmitMethod(OpCodes.Call,output.Advance)
+                        body (fun value -> CodecOutputEmitter.listAppend il output utf16 state value) None true true
             il.Mark closing
             if mode <> 0 then
-                CodecOutputEmitter.literalMode il output utf16 selected mode concrete [|int '"'|] destination state
+                CodecOutputEmitter.literalMode il output utf16 selected mode [|int '"'|] destination state
             il.Mark complete)
         il.Mark complete
         il.Emit OpCodes.Ret

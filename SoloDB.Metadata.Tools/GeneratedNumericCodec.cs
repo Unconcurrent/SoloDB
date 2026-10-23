@@ -343,20 +343,25 @@ internal static class GeneratedNumericCodec
             entry.Emit(OpCodes.Call,api.Metadata("RegisterNumericIntrinsics",target));
             return;
         }
-        foreach (var encoding in new[] { "Utf8", "Utf16" }) {
-            var element = encoding == "Utf8" ? module.TypeSystem.Byte : module.TypeSystem.Char;
-            var output = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.Json" + encoding + "Writer"));
-            MethodReference method = TypeSupport.NumericWriterCore(target.FullName) != null
-                ? GeneratedOutputCodec.Number(definitions,module,owner,product,target,element,"WriteNumeric" + encoding + index)
-                : target.FullName == "System.String" ? GeneratedOutputCodec.String(definitions,module,owner,product,element,"WriteString"+encoding+index)
-                : target.FullName == "System.Boolean" ? GeneratedOutputCodec.Boolean(definitions,module,owner,product,element,"WriteNumeric"+encoding+index)
-                : TypeSupport.NumericIntrinsicOperation(target.FullName) == "Guid" ? GeneratedOutputCodec.Guid(definitions,module,owner,product,target,element,"WriteGuid"+encoding+index)
-                : TypeSupport.NumericIntrinsicOperation(target.FullName) == "Bytes" ? GeneratedOutputCodec.Bytes(definitions,module,owner,product,target,element,"WriteBytes"+encoding+index)
-                : api.Operation("JsonRawPrimitive","Write" + TypeSupport.NumericIntrinsicOperation(target.FullName),element,output);
-            var callable = new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectWriter`2")));
-            callable.GenericArguments.Add(module.ImportReference(target));callable.GenericArguments.Add(element);
-            GeneratedJsonAssembly.Delegate(entry,callable,method);
+        entry.Emit(OpCodes.Call,api.Metadata("RegisterRawReaders",target));
+        foreach(var kind in GeneratedJsonDefinitions.Outputs) {
+            var writes = definitions.OutputView(kind);
+            foreach (var encoding in new[] { "Utf8", "Utf16" }) {
+                var element = encoding == "Utf8" ? module.TypeSystem.Byte : module.TypeSystem.Char;
+                var output = writes.OutputType(module,product,element);
+                MethodReference method = TypeSupport.NumericWriterCore(target.FullName) != null
+                    ? GeneratedOutputCodec.Number(writes,module,owner,product,target,element,"WriteNumeric" + encoding + index)
+                    : target.FullName == "System.String" ? GeneratedOutputCodec.String(writes,module,owner,product,element,"WriteString"+encoding+index)
+                    : target.FullName == "System.Boolean" ? GeneratedOutputCodec.Boolean(writes,module,owner,product,element,"WriteNumeric"+encoding+index)
+                    : TypeSupport.NumericIntrinsicOperation(target.FullName) == "Guid" ? GeneratedOutputCodec.Guid(writes,module,owner,product,target,element,"WriteGuid"+encoding+index)
+                    : TypeSupport.NumericIntrinsicOperation(target.FullName) == "Bytes" ? GeneratedOutputCodec.Bytes(writes,module,owner,product,target,element,"WriteBytes"+encoding+index)
+                    : api.Operation("JsonRawPrimitive","Write" + TypeSupport.NumericIntrinsicOperation(target.FullName),element,output);
+                var callable = new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectWriter`2")));
+                callable.GenericArguments.Add(module.ImportReference(target));callable.GenericArguments.Add(element);
+                GeneratedJsonAssembly.Delegate(entry,callable,method);
+            }
+            GeneratedJsonAssembly.BoxedWriters(definitions,module,owner,entry,product,target);
+            entry.Emit(OpCodes.Call,api.Metadata("RegisterOutputWriters",target,writes.OutputType(module,product,module.TypeSystem.Byte),writes.OutputType(module,product,module.TypeSystem.Char)));
         }
-        entry.Emit(OpCodes.Call,api.Metadata("RegisterRaw",target));
     }
 }

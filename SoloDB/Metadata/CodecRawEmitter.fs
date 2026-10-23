@@ -16,43 +16,54 @@ module internal CodecRawEmitter =
         | Some signature -> indexedFailure il api false signature
         | None when model.ValueType && (model.Members |> Array.exists(fun memberValue -> memberValue.Field.IsSome && memberValue.Static)) -> staticFieldFailure il api false
         | None ->
-            let comma = il.Local output.Boolean
-            il.Emit OpCodes.Ldarg_1
-            il.Emit OpCodes.Ldarg_2
-            il.EmitMethod(OpCodes.Call,output.BeginObject)
             let members = writtenMembers model
+            let comma = if members.Length > 0 && model.Members[members[0]].Name = "Id" then il.Local output.Boolean else -1
+            let mutable knownComma = Some false
+            let opening = members.Length > 0 && model.Members[members[0]].Name <> "Id"
+            if not opening then output.Literal "{"
             let mutable names = Set.empty
             for index in members do
                 let memberValue = model.Members[index]
+                let discard () =
+                    let value = il.Local memberValue.Type
+                    loadRawMember il model.ValueType memberValue
+                    il.EmitLocal(OpCodes.Stloc,value)
+                    let call = output.Discard memberValue.Type
+                    callLocal il call 0 value
+                    il.EmitMethod(OpCodes.Call,call)
                 let next = il.Label()
-                if memberValue.Name = "Id" && not(names.Contains memberValue.Name) then
+                let optionalId = memberValue.Name = "Id" && not(names.Contains memberValue.Name)
+                if optionalId then
                     let included = il.Label()
                     il.Emit OpCodes.Ldarg_2
                     il.EmitMethod(OpCodes.Call,output.OmitId)
                     il.EmitBranch(OpCodes.Brfalse,included)
-                    loadMember il model.ValueType 0 memberValue
-                    il.EmitMethod(OpCodes.Call,output.Discard memberValue.Type)
+                    discard()
                     il.EmitBranch(OpCodes.Br,next)
                     il.Mark included
                 if names.Contains memberValue.Name then
-                    loadMember il model.ValueType 0 memberValue
-                    il.EmitMethod(OpCodes.Call,output.Discard memberValue.Type)
+                    discard()
                     il.EmitString ("An item with the same key has already been added. Key: " + memberValue.Name)
                     il.Emit OpCodes.Ldnull
                     il.EmitMethod(OpCodes.Newobj,api.ArgumentExceptionConstructor)
                     il.Emit OpCodes.Throw
                 else
-                    il.EmitLocal(OpCodes.Ldloc,comma)
-                    il.Emit OpCodes.Ldarg_1
-                    il.Emit OpCodes.Ldarg_2
-                    il.EmitMethod(OpCodes.Call,output.Property (SoloDatabase.JsonSerializator.JsonStringLiteral.property memberValue.Name))
-                    il.Emit OpCodes.Ldc_I4_1
-                    il.EmitLocal(OpCodes.Stloc,comma)
-                    let value = il.Local memberValue.Type
-                    loadMember il model.ValueType 0 memberValue
-                    il.EmitLocal(OpCodes.Stloc,value)
+                    let commaInput = if opening && names.IsEmpty then -3 else match knownComma with Some false -> -1 | Some true -> -2 | None -> comma
+                    output.Property(SoloDatabase.JsonSerializator.JsonStringLiteral.property memberValue.Name,commaInput)
+                    if optionalId && knownComma <> Some true then
+                        il.Emit OpCodes.Ldc_I4_1
+                        il.EmitLocal(OpCodes.Stloc,comma)
+                    let call = match output.Operation memberValue.Type with Some call -> call | None -> output.Serialize memberValue.Type
+                    let fieldAddress = memberValue.Field.IsSome && memberValue.Writable && memberValue.Name <> "$type" && il.ByRefParameter(call,0)
+                    let value = if fieldAddress then -1 else il.Local memberValue.Type
+                    if not fieldAddress then
+                        loadRawMember il model.ValueType memberValue
+                        il.EmitLocal(OpCodes.Stloc,value)
                     let arguments () =
-                        il.EmitLocal(OpCodes.Ldloc,value)
+                        if fieldAddress then
+                            if model.ValueType then il.InputAddress() else il.InputValue()
+                            il.EmitField(OpCodes.Ldflda,memberValue.Field.Value)
+                        else callLocal il call 0 value
                         il.Emit OpCodes.Ldarg_1
                         il.Emit OpCodes.Ldarg_2
                     match memberValue.Name, SoloDatabase.Metadata.Generation.TypeSupport.StoredTypeName model.RuntimeName with
@@ -61,7 +72,7 @@ module internal CodecRawEmitter =
                         let complete = il.Label()
                         il.Emit OpCodes.Ldarg_2; il.EmitMethod(OpCodes.Call,output.Polymorphic.IncludeType)
                         il.EmitBranch(OpCodes.Brfalse,ordinary)
-                        il.EmitLocal(OpCodes.Ldloc,value); il.EmitMethod(OpCodes.Call,output.Discard memberValue.Type)
+                        callLocal il (output.Discard memberValue.Type) 0 value; il.EmitMethod(OpCodes.Call,output.Discard memberValue.Type)
                         il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
                         il.EmitMethod(OpCodes.Call,output.TypeLiteral model.Type)
                         il.EmitBranch(OpCodes.Br,complete)
@@ -69,6 +80,8 @@ module internal CodecRawEmitter =
                         directCall il output.Operation output.Serialize memberValue.Type arguments
                         il.Mark complete
                     | _ -> directCall il output.Operation output.Serialize memberValue.Type arguments
+                if not optionalId then knownComma <- Some true
+                elif knownComma <> Some true then knownComma <- None
                 names <- names.Add memberValue.Name
                 il.Mark next
             match SoloDatabase.Metadata.Generation.TypeSupport.StoredTypeName model.RuntimeName with
@@ -76,14 +89,13 @@ module internal CodecRawEmitter =
                 let complete = il.Label()
                 il.Emit OpCodes.Ldarg_2; il.EmitMethod(OpCodes.Call,output.Polymorphic.IncludeType)
                 il.EmitBranch(OpCodes.Brfalse,complete)
-                il.EmitLocal(OpCodes.Ldloc,comma); il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
-                il.EmitMethod(OpCodes.Call,output.Property(SoloDatabase.JsonSerializator.JsonStringLiteral.property "$type"))
+                let commaInput = match knownComma with Some false -> -1 | Some true -> -2 | None -> comma
+                output.Property(SoloDatabase.JsonSerializator.JsonStringLiteral.property "$type",commaInput)
                 il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
                 il.EmitMethod(OpCodes.Call,output.TypeLiteral model.Type)
                 il.Mark complete
             | _ -> ()
-            il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
-            il.EmitMethod(OpCodes.Call,output.EndObject)
+            output.Literal "}"
             il.Emit OpCodes.Ret
 
 
@@ -95,19 +107,17 @@ module internal CodecRawEmitter =
         | None ->
             if not model.ValueType then
                 let present = il.Label()
-                il.Emit OpCodes.Ldarg_0
+                il.InputValue()
                 il.EmitBranch(OpCodes.Brtrue,present)
-                il.Emit OpCodes.Ldarg_1
-                il.Emit OpCodes.Ldarg_2
-                il.EmitMethod(OpCodes.Call,output.Null)
+                output.Literal "null"
                 il.Emit OpCodes.Ret
                 il.Mark present
                 if not model.Sealed then
                     CodecPolymorphicEmitter.dispatch il api output.Polymorphic model.Type (not model.Abstract) (fun () ->
-                        il.Emit OpCodes.Ldarg_0; il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
+                        il.InputAddress(); il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
                         il.EmitMethod(OpCodes.Call,body))
             if model.ValueType || model.Sealed then
-                il.Emit OpCodes.Ldarg_0
+                il.InputAddress()
                 il.Emit OpCodes.Ldarg_1
                 il.Emit OpCodes.Ldarg_2
                 il.EmitMethod(OpCodes.Call,body)
@@ -200,11 +210,16 @@ module internal CodecRawEmitter =
                         il.Emit OpCodes.Ldarg_0
                         il.EmitLocal(OpCodes.Ldloc,original.Value)
                         il.EmitType(OpCodes.Stobj,api.Json)
-                    let readValue () = directCall il input.Operation input.Read memberValue.Type (fun () -> il.Emit OpCodes.Ldarg_0)
+                    let read = match input.Operation memberValue.Type with Some read -> read | None -> input.Read memberValue.Type
+                    let readValue () = CodecEmitter.readValue il read memberValue.Type (fun () -> il.Emit OpCodes.Ldarg_0)
                     match local with
                     | Some(_,value) ->
-                        readValue()
-                        il.EmitLocal(OpCodes.Stloc,value)
+                        CodecEmitter.readLocal il read (fun () -> il.Emit OpCodes.Ldarg_0) value
+                    | None when memberValue.Field.IsSome && not memberValue.Static && il.ResultParameter read ->
+                        il.Emit OpCodes.Ldarg_0
+                        il.EmitLocal((if model.ValueType then OpCodes.Ldloca else OpCodes.Ldloc),result)
+                        il.EmitField(OpCodes.Ldflda,memberValue.Field.Value)
+                        il.EmitMethod(OpCodes.Call,read)
                     | None ->
                         if not memberValue.Static then il.EmitLocal((if model.ValueType then OpCodes.Ldloca else OpCodes.Ldloc),result)
                         readValue()

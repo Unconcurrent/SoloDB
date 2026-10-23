@@ -27,14 +27,14 @@ module internal CodecTupleEmitter =
         |]
         collect [||] model
 
-    let private load (il: CodecIL<'T,'M,'F>) boxed (model: CodecTuple<'T,'M,'F>) (path: (bool * CodecMember<'T,'M,'F>)[]) =
+    let private load (il: CodecIL<'T,'M,'F>) boxed (model: CodecTuple<'T,'M,'F>) (path: (bool * CodecMember<'T,'M,'F>)[]) finalAddress =
         if boxed then
             il.Emit OpCodes.Ldarg_0
             il.EmitType((if model.ValueType then OpCodes.Unbox else OpCodes.Castclass),model.Type)
-        else il.EmitInt((if model.ValueType then OpCodes.Ldarga else OpCodes.Ldarg),0)
+        else if model.ValueType then il.InputAddress() else il.InputValue()
         for index = 0 to path.Length - 1 do
             let parentValueType,memberValue = path[index]
-            let address = index + 1 < path.Length && fst path[index + 1]
+            let address = (index + 1 < path.Length && fst path[index + 1]) || (finalAddress && index + 1 = path.Length)
             match memberValue.Field,memberValue.Getter with
             | Some field,_ -> il.EmitField((if address then OpCodes.Ldflda else OpCodes.Ldfld),field)
             | _,Some getter ->
@@ -46,7 +46,7 @@ module internal CodecTupleEmitter =
             | _ -> invalidOp "A tuple element has no readable member."
 
     let getter (il: CodecIL<'T,'M,'F>) boxed (model: CodecTuple<'T,'M,'F>) path valueType =
-        load il boxed model path
+        load il boxed model path false
         if boxed && valueType then il.EmitType(OpCodes.Box,(snd (Array.last path)).Type)
         il.Emit OpCodes.Ret
 
@@ -58,7 +58,7 @@ module internal CodecTupleEmitter =
             let path = elements[index]
             il.Emit OpCodes.Dup
             il.EmitInt(OpCodes.Ldc_I4,index)
-            load il false model path
+            load il false model path false
             il.EmitMethod(OpCodes.Call,serialize (snd (Array.last path)).Type)
             il.Emit OpCodes.Stelem_Ref
         il.Emit OpCodes.Ret
@@ -157,8 +157,7 @@ module internal CodecTupleEmitter =
             il.EmitMethod(OpCodes.Call,api.Child); il.EmitLocal(OpCodes.Stloc,child)
             let read = match operation target with Some call -> call | None -> fallback target
             il.BeginException()
-            il.EmitLocal(OpCodes.Ldloca,child); il.EmitMethod(OpCodes.Call,read)
-            il.EmitLocal(OpCodes.Stloc,values[index])
+            CodecEmitter.readLocal il read (fun () -> il.EmitLocal(OpCodes.Ldloca,child)) values[index]
             il.Catch api.PrimitiveError
             il.EmitLocal(OpCodes.Ldloca,child); il.EmitMethod(OpCodes.Call,api.PrimitiveRetry target)
             il.EmitLocal(OpCodes.Stloc,values[index])
@@ -181,32 +180,31 @@ module internal CodecTupleEmitter =
                   (scope: CodecTupleWriterScope<'T,'F>) (model: CodecTuple<'T,'M,'F>) =
         if not model.ValueType then
             let present = il.Label()
-            il.Emit OpCodes.Ldarg_0
+            il.InputValue()
             il.EmitBranch(OpCodes.Brtrue,present)
-            il.Emit OpCodes.Ldarg_1
-            il.Emit OpCodes.Ldarg_2
-            il.EmitMethod(OpCodes.Call,output.Null)
+            output.Literal "null"
             il.Emit OpCodes.Ret
             il.Mark present
-        il.Emit OpCodes.Ldarg_1
-        il.Emit OpCodes.Ldarg_2
-        il.EmitMethod(OpCodes.Call,output.BeginArray)
+        output.Literal "["
         let elements = leaves model
         for index = 0 to elements.Length - 1 do
             if index > 0 then
-                il.Emit OpCodes.Ldarg_1
-                il.Emit OpCodes.Ldarg_2
-                il.EmitMethod(OpCodes.Call,output.Separator)
+                output.Literal ","
             let path = elements[index]
             let target = (snd(Array.last path)).Type
             let direct = output.Operation target
             let scoped = direct.IsSome && scope.Required target
-            let value = il.Local target
-            load il false model path
-            il.EmitLocal(OpCodes.Stloc,value)
-            let arguments () =
-                il.EmitLocal(OpCodes.Ldloc,value); il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
             let call = match direct with Some call -> call | None -> output.Serialize target
+            let memberValue = snd(Array.last path)
+            let fieldAddress = memberValue.Field.IsSome && memberValue.Writable && il.ByRefParameter(call,0)
+            let value = if fieldAddress then -1 else il.Local target
+            if not fieldAddress then
+                load il false model path false
+                il.EmitLocal(OpCodes.Stloc,value)
+            let arguments () =
+                if fieldAddress then load il false model path true
+                else CodecEmitter.callLocal il call 0 value
+                il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
             if scoped then
                 let previousType = il.Local scope.Boolean
                 let previousId = il.Local scope.Boolean
@@ -225,7 +223,5 @@ module internal CodecTupleEmitter =
             else
                 arguments()
                 il.EmitMethod(OpCodes.Call,call)
-        il.Emit OpCodes.Ldarg_1
-        il.Emit OpCodes.Ldarg_2
-        il.EmitMethod(OpCodes.Call,output.EndArray)
+        output.Literal "]"
         il.Emit OpCodes.Ret

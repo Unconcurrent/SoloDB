@@ -23,7 +23,7 @@ module internal CodecGuidWriterEmitter =
         let constant n = il.EmitInt(OpCodes.Ldc_I4,n)
         let destination() = il.Emit OpCodes.Ldarg_1
         let state() = il.Emit OpCodes.Ldarg_2
-        il.EmitInt(OpCodes.Ldarga,0); il.EmitMethod(OpCodes.Call,api.Source); save source
+        il.InputAddress(); il.EmitMethod(OpCodes.Call,api.Source); save source
         for index = 0 to 10 do
             load source
             let offset = if index = 0 then 0 elif index = 1 then 4 elif index = 2 then 6 else index+5
@@ -50,7 +50,7 @@ module internal CodecGuidWriterEmitter =
             state(); il.EmitMethod(OpCodes.Call,output.Position); save position
         let store offset value = CodecOutputEmitter.store il output utf16 reference
                                     (fun () -> load position; constant offset; il.Emit OpCodes.Add) value
-        CodecOutputEmitter.withDestination il output state (fun selected mode concrete ->
+        CodecOutputEmitter.withDestination il output state (fun selected mode ->
             let complete = il.Label()
             if mode = 1 then
                 let partial = il.Label()
@@ -63,7 +63,7 @@ module internal CodecGuidWriterEmitter =
                 state(); constant 38; il.EmitMethod(OpCodes.Call,output.Advance)
                 il.EmitBranch(OpCodes.Br,complete)
                 il.Mark partial
-            CodecOutputEmitter.literalMode il output utf16 selected mode concrete [|int '"'|] destination state
+            CodecOutputEmitter.literalMode il output utf16 selected mode [|int '"'|] destination state
             CodecOutputEmitter.checkCount il output state (fun () -> constant 36)
             if mode = 1 then
                 save selected.Minimum
@@ -74,10 +74,8 @@ module internal CodecGuidWriterEmitter =
             else
                 il.Emit OpCodes.Pop
                 if mode = 2 then
-                    if concrete then
-                        load selected.ConcreteList; constant 36; il.EmitMethod(OpCodes.Call,output.ReserveList)
-                    body (fun _ value -> CodecOutputEmitter.listAppend il output utf16 selected state concrete true value)
+                    body (fun _ value -> CodecOutputEmitter.listAppend il output utf16 state value)
             if mode <> 0 then
-                CodecOutputEmitter.literalMode il output utf16 selected mode concrete [|int '"'|] destination state
+                CodecOutputEmitter.literalMode il output utf16 selected mode [|int '"'|] destination state
             il.Mark complete)
         il.Emit OpCodes.Ret

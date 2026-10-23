@@ -13,7 +13,8 @@ internal sealed class GeneratedJsonDefinitions
 {
     private readonly Dictionary<(string Role,string Target,string Representation,string Policy),MethodDefinition> methods;
     private readonly Dictionary<MethodDefinition,GeneratedQueries.Preservation> preservation;
-    private readonly GeneratedJsonDefinitions? native;
+    private readonly GeneratedJsonDefinitions root;
+    private readonly GeneratedJsonDefinitions?[,] views;
     private readonly string[] references;
     private bool utf8VectorPrepared;
     private bool utf16VectorPrepared;
@@ -21,16 +22,30 @@ internal sealed class GeneratedJsonDefinitions
     private FSharpOption<CodecBase64VectorApi<TypeReference,MethodReference>> utf16Vector = null!;
 
     internal GeneratedJsonDefinitions(string[]? references = null)
-    { this.references = references ?? Array.Empty<string>(); methods = new(); preservation = new(); }
-    private GeneratedJsonDefinitions(GeneratedJsonDefinitions native)
-    { this.native = native; references = native.references; methods = native.methods; preservation = native.preservation; Stored = true; }
+    { this.references = references ?? Array.Empty<string>(); methods = new(); preservation = new(); root = this; views = new GeneratedJsonDefinitions[2,3]; views[0,(int)CodecOutputKind.Span] = this; }
+    private GeneratedJsonDefinitions(GeneratedJsonDefinitions source,bool stored,CodecOutputKind output)
+    { root = source.root; views = root.views; references = root.references; methods = root.methods; preservation = root.preservation; Stored = stored; Output = output; }
+    internal CodecOutputKind Output { get; } = CodecOutputKind.Span;
+    private GeneratedJsonDefinitions View(bool stored,CodecOutputKind output)
+        => views[stored ? 1 : 0,(int)output] ??= new GeneratedJsonDefinitions(this,stored,output);
+    internal GeneratedJsonDefinitions OutputView(CodecOutputKind output) => View(Stored,output);
+    internal TypeReference OutputType(ModuleDefinition module,AssemblyDefinition product,TypeReference element)
+    {
+        if(Output == CodecOutputKind.Validation) {
+            var type = new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonValidationOutput`1")));
+            type.GenericArguments.Add(module.ImportReference(element)); return type;
+        }
+        var suffix = Output == CodecOutputKind.List ? "IList" : "";
+        return module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.Json" + (element.FullName == "System.Char" ? "Utf16" : "Utf8") + suffix + "Writer"));
+    }
+    internal static readonly CodecOutputKind[] Outputs = { CodecOutputKind.Span,CodecOutputKind.List,CodecOutputKind.Validation };
     internal List<GeneratedSchemaIndexes.Witness>? SchemaWitnesses { get; set; }
     internal MethodDefinition? EmptyAttributes { get; set; }
     internal bool Stored { get; }
-    internal string MethodName(string name) => Stored ? name + "Stored" : name;
-    internal GeneratedJsonDefinitions NativeView => native ?? this;
-    internal GeneratedJsonDefinitions StoredView() => new(this);
-    private string Role(string role) => TypeSupport.OperationRole(Stored,role);
+    internal string MethodName(string name) => (Stored ? name + "Stored" : name) + (Output == CodecOutputKind.Span ? "" : Output.ToString());
+    internal GeneratedJsonDefinitions NativeView => View(false,Output);
+    internal GeneratedJsonDefinitions StoredView() => View(true,Output);
+    private string Role(string role) => (Output != CodecOutputKind.Span && (role.Contains("write") || role == "raw-model-body" || role == "type-literal") ? Output.ToString() + ":" : "") + TypeSupport.OperationRole(Stored,role);
 
     internal GeneratedQueries.Preservation Preservation(ModuleDefinition module,MethodDefinition entry,AssemblyDefinition product)
     {
@@ -44,7 +59,7 @@ internal sealed class GeneratedJsonDefinitions
 
     internal FSharpOption<CodecBase64VectorApi<TypeReference,MethodReference>> Base64Vector(ModuleDefinition module,bool utf16)
     {
-        if(native != null) return native.Base64Vector(module,utf16);
+        if(!ReferenceEquals(root,this)) return root.Base64Vector(module,utf16);
         if(utf16) {
             if(!utf16VectorPrepared) {
                 utf16Vector=GeneratedBase64Vector.Read(module,references,true);

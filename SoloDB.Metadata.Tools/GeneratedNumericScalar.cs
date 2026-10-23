@@ -75,17 +75,22 @@ internal static class GeneratedNumericScalar
             var reader = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator." + encoding + "Reader"));
             var method = GeneratedNumericCodec.Reader(definitions,module,owner,product,target,reader,"ReadNumeric" + encoding + index);
             var callable = new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectReader`2")));
-            callable.GenericArguments.Add(target);callable.GenericArguments.Add(reader);
+            callable.GenericArguments.Add(module.ImportReference(target));callable.GenericArguments.Add(module.ImportReference(reader));
             GeneratedJsonAssembly.Delegate(entry,callable,method);
         }
-        foreach(var encoding in new[] {"Utf8","Utf16"})
-        {
-            var element = encoding == "Utf8" ? module.TypeSystem.Byte : module.TypeSystem.Char;
-            var method = GeneratedOutputCodec.Number(definitions,module,owner,product,target,element,"WriteNumeric" + encoding + index);
-            var callable = new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectWriter`2")));
-            callable.GenericArguments.Add(target);callable.GenericArguments.Add(element);
-            GeneratedJsonAssembly.Delegate(entry,callable,method);
+        entry.Emit(OpCodes.Call,api.Metadata("RegisterRawReaders",target));
+        foreach(var kind in GeneratedJsonDefinitions.Outputs) {
+            var writes = definitions.OutputView(kind);
+            foreach(var encoding in new[] {"Utf8","Utf16"})
+            {
+                var element = encoding == "Utf8" ? module.TypeSystem.Byte : module.TypeSystem.Char;
+                var method = GeneratedOutputCodec.Number(writes,module,owner,product,target,element,"WriteNumeric" + encoding + index);
+                var callable = new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectWriter`2")));
+                callable.GenericArguments.Add(module.ImportReference(target));callable.GenericArguments.Add(module.ImportReference(element));
+                GeneratedJsonAssembly.Delegate(entry,callable,method);
+            }
+            GeneratedJsonAssembly.BoxedWriters(definitions,module,owner,entry,product,target);
+            entry.Emit(OpCodes.Call,api.Metadata("RegisterOutputWriters",target,writes.OutputType(module,product,module.TypeSystem.Byte),writes.OutputType(module,product,module.TypeSystem.Char)));
         }
-        entry.Emit(OpCodes.Call,api.Metadata("RegisterRaw",target));
     }
 }

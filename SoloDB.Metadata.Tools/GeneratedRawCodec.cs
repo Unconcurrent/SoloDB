@@ -34,7 +34,7 @@ internal static partial class GeneratedRawCodec
             Function<TypeReference,MethodReference>(element => api.Operation("JsonRawInput","TrimArray",element)),
             Function<TypeReference,MethodReference>(element => Input("ArrayWrapper",element)),Input("BeginObject"),Input("Start"),null!,Input("Skip"),Input("Complete"),
             Function<TypeReference,MethodReference>(element => Input("SelectType",element)),
-            Function<TypeReference,MethodReference>(element => api.Operation("JsonRawRead","ReadMember",element,reader)));
+            Function<TypeReference,MethodReference>(element => api.Operation("JsonRawRead","ReadMemberInto",element,reader)));
         CodecArrayEmitter.rawArrayReader(new CecilCodecIL(method),GeneratedCodec.Api(api),forward,target,target.ElementType);
         return method;
     }
@@ -125,7 +125,7 @@ internal static partial class GeneratedRawCodec
                 CodecTupleEmitter.rawReader(new CecilCodecIL(method),tupleInput,
                     Function<TypeReference,FSharpOption<MethodReference>>(target=>FSharpOption<MethodReference>.Some(
                         GeneratedChildCodec.ReadCall(definitions,module,owner,product,target,reader,"ReadTuple"+suffix+index+"Child",models!))),
-                    Function<TypeReference,MethodReference>(target=>Method("JsonRawRead","ReadMember",target,reader)),GeneratedCodec.Tuple(model,models!));
+                    Function<TypeReference,MethodReference>(target=>Method("JsonRawRead","ReadMemberInto",target,reader)),GeneratedCodec.Tuple(model,models!));
             }
             else
             {
@@ -150,7 +150,7 @@ internal static partial class GeneratedRawCodec
                     Function<TypeReference,MethodReference>(target => Input("ArrayWrapper",target)),
                     Input("BeginObject"),Input("Start"),property,Input("Skip"),Input("Complete"),
                     Function<TypeReference,MethodReference>(target => Input("SelectType",target)),
-                    Function<TypeReference,MethodReference>(target => Method("JsonRawRead","ReadMember",target,reader)));
+                    Function<TypeReference,MethodReference>(target => Method("JsonRawRead","ReadMemberInto",target,reader)));
                 var il = new CecilCodecIL(method);
                 CodecRawEmitter.rawReader(il,raw,forward,codecModel!,Function<Unit,Unit>(_=> {
                     var unionInput=new CodecUnionReaderApi<TypeReference,MethodReference>(context,Type("JsonSourceRange"),
@@ -171,21 +171,25 @@ internal static partial class GeneratedRawCodec
             Delegate(Closed("JsonDirectReader`2",model.Type,reader),method);
             if (model.Facts.Shape != TypeShape.Tuple) entry.Emit(OpCodes.Call,Input("Wrap",model.Type));
         }
-        void Writer(string suffix, TypeReference encoding, TypeReference writer)
+        void Writer(GeneratedJsonDefinitions writes,string suffix, TypeReference encoding, TypeReference writer)
         {
             var shape = model.Facts.Shape;
-            var operation = CodecPreparation.writer(model.Type.FullName,TypeSupport.ForDefinition(shape,model.Type.FullName),definitions.Stored,
+            var operation = CodecPreparation.writer(model.Type.FullName,TypeSupport.ForDefinition(shape,model.Type.FullName),writes.Stored,
                 model.Facts.AbstractType,model.SequenceElement?.FullName == "System.Byte",model.Facts.NonGenericEnumerable);
             if (operation == RawRootOperation.Bson)
             {
-                var get = Body("RawTreeValue" + suffix + index,api.Json,model.Type);
-                CodecEmitter.directCall(new CecilCodecIL(get),new MethodReference("get_Json",api.Json,module.ImportReference(model.Type)) { HasThis = true },1);
+                var shared = definitions.NativeView;
+                if (!shared.TryGet("raw-tree-value",model.Type,api.Json,"",out var get)) {
+                    get = Body("RawTreeValue" + index,api.Json,model.Type);
+                    CodecEmitter.directCall(new CecilCodecIL(get),new MethodReference("get_Json",api.Json,module.ImportReference(model.Type)) { HasThis = true },1);
+                    shared.Add("raw-tree-value",model.Type,api.Json,"",get);
+                }
                 Delegate(api.Function(model.Type,api.Json),get);
                 entry.Emit(OpCodes.Call,Method("JsonRawCollections","TreeWriter",model.Type,encoding,writer)); return;
             }
             if(operation == RawRootOperation.Dictionary)
             {
-                var body=GeneratedDictionaryCodec.Writer(definitions,module,owner,product,model,encoding,writer,"WriteDictionary"+suffix+index,models!);
+                var body=GeneratedDictionaryCodec.Writer(writes,module,owner,product,model,encoding,writer,"WriteDictionary"+suffix+index,models!);
                 Delegate(Closed("JsonDirectWriter`2",model.Type,encoding),body);
                 return;
             }
@@ -196,7 +200,7 @@ internal static partial class GeneratedRawCodec
                 {
                     var nonGeneric = collectionWriter == "NonGenericSequenceWriter";
                     var element = nonGeneric ? module.TypeSystem.Object : model.CollectionArguments[0];
-                    var body = GeneratedSequenceCodec.Writer(definitions,module,owner,product,model.Type,element,encoding,writer,
+                    var body = GeneratedSequenceCodec.Writer(writes,module,owner,product,model.Type,element,encoding,writer,
                         model.Type.IsValueType,!nonGeneric && element.FullName == "System.Byte","WriteSequence" + suffix + index,models!,nonGeneric);
                     Delegate(Closed("JsonDirectWriter`2",model.Type,encoding),body);
                     return;
@@ -204,18 +208,25 @@ internal static partial class GeneratedRawCodec
                 var types = new[] { model.Type }.Concat(model.CollectionArguments).Concat(new[] { encoding,writer }).ToArray();
                 entry.Emit(OpCodes.Call,Method("JsonRawCollections",collectionWriter,types)); return;
             }
-            var method = GeneratedRawCodec.Writer(definitions,module,owner,product,model,index,models!,encoding,writer,suffix,false);
+            var method = GeneratedRawCodec.Writer(writes,module,owner,product,model,index,models!,encoding,writer,suffix,false);
             Delegate(Closed("JsonDirectWriter`2",model.Type,encoding),method);
         }
         Reader("Utf8",Type("Utf8Reader")); Reader("Utf16",Type("Utf16Reader"));
-        Writer("Utf8",module.TypeSystem.Byte,Type("JsonUtf8Writer")); Writer("Utf16",module.TypeSystem.Char,Type("JsonUtf16Writer"));
-        entry.Emit(OpCodes.Call,api.Metadata("RegisterRaw",model.Type));
-        if (!model.Facts.AbstractType && model.Facts.Shape == TypeShape.Object) {
-            var byteType=module.TypeSystem.Byte; var charType=module.TypeSystem.Char;
-            var utf8=Type("JsonUtf8Writer"); var utf16=Type("JsonUtf16Writer");
-            Delegate(Closed("JsonDirectWriter`2",model.Type,byteType),GeneratedRawCodec.Writer(definitions,module,owner,product,model,index,models!,byteType,utf8,"Utf8",true));
-            Delegate(Closed("JsonDirectWriter`2",model.Type,charType),GeneratedRawCodec.Writer(definitions,module,owner,product,model,index,models!,charType,utf16,"Utf16",true));
-            entry.Emit(OpCodes.Call,api.Metadata("RegisterWriterBodies",model.Type));
+        entry.Emit(OpCodes.Call,api.Metadata("RegisterRawReaders",model.Type));
+        foreach(var kind in GeneratedJsonDefinitions.Outputs) {
+            var writes = definitions.OutputView(kind);
+            var utf8 = writes.OutputType(module,product,module.TypeSystem.Byte);
+            var utf16 = writes.OutputType(module,product,module.TypeSystem.Char);
+            Writer(writes,"Utf8",module.TypeSystem.Byte,utf8);
+            Writer(writes,"Utf16",module.TypeSystem.Char,utf16);
+            GeneratedJsonAssembly.BoxedWriters(definitions,module,owner,entry,product,model.Type);
+            entry.Emit(OpCodes.Call,api.Metadata("RegisterOutputWriters",model.Type,utf8,utf16));
+            if (!model.Facts.AbstractType && model.Facts.Shape == TypeShape.Object) {
+                Delegate(Closed("JsonDirectWriter`2",model.Type,module.TypeSystem.Byte),GeneratedRawCodec.Writer(writes,module,owner,product,model,index,models!,module.TypeSystem.Byte,utf8,"Utf8",true));
+                Delegate(Closed("JsonDirectWriter`2",model.Type,module.TypeSystem.Char),GeneratedRawCodec.Writer(writes,module,owner,product,model,index,models!,module.TypeSystem.Char,utf16,"Utf16",true));
+                GeneratedJsonAssembly.BoxedWriters(definitions,module,owner,entry,product,model.Type);
+                entry.Emit(OpCodes.Call,api.Metadata("RegisterOutputBodies",model.Type,utf8,utf16));
+            }
         }
     }
 }

@@ -41,4 +41,17 @@ type internal BigIntegerRadix private () =
             { Chunks = chunks; Count = used; Sign = sign }
 
     static member internal Raw(value: BigInteger) = BigIntegerRadix.Prepare(value,1000000000UL,9,0)
+
+    static member internal ValidateRaw(value: BigInteger) =
+        let struct(sign,_,count) = BigIntegerMagnitude.Read(value)
+        // Each binary limb contributes fewer than ten decimal digits.
+        if sign <> 0 && int64 count * 10L + (if sign < 0 then 1L else 0L) > int64 Int32.MaxValue then
+            let prepared = BigIntegerRadix.Raw value
+            let mutable top = prepared.Chunks[prepared.Count - 1]
+            let mutable digits = 1
+            while top >= 10u do
+                top <- top / 10u
+                digits <- digits + 1
+            Checked.(+) (Checked.(+) (Checked.(*) (prepared.Count - 1) 9) digits) (if sign < 0 then 1 else 0) |> ignore
+
     static member internal Stored(value: BigInteger) = BigIntegerRadix.Prepare(value,100000000UL,8,1)

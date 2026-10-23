@@ -16,7 +16,7 @@ type internal CodecOptionalReaderApi<'T,'M> = {
 type internal CodecOptionalWriterApi<'T,'M> = {
     Result: 'T; Payload: 'T; ValueType: bool
     Presence: 'M option; Value: 'M option; Transfer: 'M option
-    Null: 'M; PayloadCall: 'M
+    Null: unit -> unit; PayloadCall: 'M
 }
 
 module internal CodecOptionalEmitter =
@@ -25,8 +25,7 @@ module internal CodecOptionalEmitter =
         let defaultRead target call primitiveRetry scalarRetry arguments =
             let value = il.Local target
             il.BeginException()
-            arguments(); il.EmitMethod(OpCodes.Call,call)
-            il.EmitLocal(OpCodes.Stloc,value)
+            CodecEmitter.readLocal il call arguments value
             il.Catch api.PrimitiveMismatch
             arguments(); il.EmitMethod(OpCodes.Call,primitiveRetry)
             il.EmitLocal(OpCodes.Stloc,value)
@@ -114,23 +113,23 @@ module internal CodecOptionalEmitter =
             il.EmitLocal(OpCodes.Ldloc,result); il.Emit OpCodes.Ret
 
     let writer (il: CodecIL<'T,'M,'F>) (api: CodecOptionalWriterApi<'T,'M>) =
-        let loadValue () = il.EmitInt((if api.ValueType then OpCodes.Ldarga else OpCodes.Ldarg),0)
+        let loadValue () = if api.ValueType then il.InputAddress() else il.InputValue()
         match api.Transfer with
         | Some _ -> ()
         | None ->
             let present = il.Label()
             match api.Presence with
             | Some presence -> loadValue(); il.EmitMethod(OpCodes.Call,presence)
-            | None -> il.Emit OpCodes.Ldarg_0
+            | None -> il.InputValue()
             il.EmitBranch(OpCodes.Brtrue,present)
-            il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2; il.EmitMethod(OpCodes.Call,api.Null); il.Emit OpCodes.Ret
+            api.Null(); il.Emit OpCodes.Ret
             il.Mark present
         let payload = il.Local api.Payload
         match api.Transfer with
         | Some transfer ->
-            il.EmitInt(OpCodes.Ldarga,0); il.EmitMethod(OpCodes.Call,transfer); il.EmitType(OpCodes.Ldobj,api.Payload)
+            il.InputAddress(); il.EmitMethod(OpCodes.Call,transfer); il.EmitType(OpCodes.Ldobj,api.Payload)
         | None -> loadValue(); il.EmitMethod(OpCodes.Call,api.Value.Value)
         il.EmitLocal(OpCodes.Stloc,payload)
-        let arguments () = il.EmitLocal(OpCodes.Ldloc,payload); il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
+        let arguments () = CodecEmitter.callLocal il api.PayloadCall 0 payload; il.Emit OpCodes.Ldarg_1; il.Emit OpCodes.Ldarg_2
         arguments(); il.EmitMethod(OpCodes.Call,api.PayloadCall)
         il.Emit OpCodes.Ret

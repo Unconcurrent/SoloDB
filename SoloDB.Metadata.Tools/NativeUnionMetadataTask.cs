@@ -31,6 +31,8 @@ public sealed class PrepareNativeUnionMetadata : ITask
             attribute.ConstructorArguments.Count != 0 && (Convert.ToInt32(attribute.ConstructorArguments[0].Value) & 31) == kind);
     private static bool Union(TypeDefinition type) => Mapping(type, 1) || (type.IsNested && Union(type.DeclaringType));
 
+    // SDK input/reference roles and generated witnesses select private corrections.
+    // Preserve original bytes, signed-input refusal and unchanged-output timestamps.
     public bool Execute()
     {
         var assemblies = new Dictionary<string, AssemblyDefinition>(StringComparer.Ordinal);

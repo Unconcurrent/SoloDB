@@ -175,7 +175,7 @@ type internal NativeBindingTarget(database: NativeDatabase, statement: sqlite3_s
 
 /// Direct primitive binding into the active statement. It does not own or retain the input state.
 [<Struct>]
-type SqlParameterWriter =
+type internal SqlParameterWriter =
     val private target: NativeBindingTarget
     val private session: int64
     internal new(target: NativeBindingTarget) = { target = target; session = target.Session }
@@ -219,7 +219,7 @@ type SqlParameterWriter =
 /// A stable binding shape with typed acquisition and typed captured state.
 /// Capture runs once when execution starts; every statement binds from that same state.
 [<Sealed>]
-type SqlParameterPlan<'Input, 'State> private (names: string[], capture: Func<'Input, 'State>, reusableCapture: Func<'Input, 'State, 'State>, bind: Action<SqlParameterWriter, 'State>, clear: Action<'State>, operationErrors: bool) =
+type internal SqlParameterPlan<'Input, 'State> private (names: string[], capture: Func<'Input, 'State>, reusableCapture: Func<'Input, 'State, 'State>, bind: Action<SqlParameterWriter, 'State>, clear: Action<'State>, operationErrors: bool) =
     do
         if isNull names then nullArg "names"
         if isNull capture && isNull reusableCapture then nullArg "capture"
@@ -270,7 +270,11 @@ type internal NativeCompiledArguments() =
         while same && j < packet.Names.Length do
             same <- previous.[packet.Constants.Length + j] = packet.Names.[j]
             j <- j + 1
-        if not same then layout <- NativeArgumentLayout(Array.append (packet.Constants |> Array.map _.Key) packet.Names)
+        if not same then
+            let names = Array.zeroCreate (packet.Constants.Length + packet.Names.Length)
+            for i = 0 to packet.Constants.Length - 1 do names.[i] <- packet.Constants.[i].Key
+            Array.Copy(packet.Names, 0, names, packet.Constants.Length, packet.Names.Length)
+            layout <- NativeArgumentLayout(names)
         constants <- packet.Constants
         values <- packet.Values
         offset <- packet.Offset

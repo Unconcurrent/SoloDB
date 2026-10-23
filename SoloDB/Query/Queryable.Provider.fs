@@ -109,18 +109,19 @@ module internal QueryableExecution =
                 let buffer = ResizeArray<'Elem>()
                 let owners = Array.init plan.Owners.Length (fun _ -> ResizeArray<int64 * obj>())
                 let hydration = Array.init plan.Owners.Length (fun _ -> Dictionary<int64, string>())
-                try
-                    for struct(row, entity, position) in queryRows<'Elem> connection query par batchCtx.IsSome do
-                        buffer.Add entity
-                        if position >= 0 && position < owners.Length && row.Id.HasValue && not(isNull(box entity))
-                           && plan.Owners[position].OwnerType.IsInstanceOfType(box entity) then
-                            owners[position].Add(row.Id.Value, box entity)
-                            if not(isNull row.HydrationJSON) then hydration[position][row.Id.Value] <- row.HydrationJSON
-                    for index = 0 to owners.Length - 1 do
-                        hydrateOwners connection source.InTransaction plan.Owners[index] (owners[index].ToArray()) hydration[index]
-                with error ->
-                    SQLiteToolsHandlerFaultState.tryRecordHandlerFault connection error
-                    reraiseAnywhere error
+                let () =
+                    try
+                        for struct(row, entity, position) in queryRows<'Elem> connection query par batchCtx.IsSome do
+                            buffer.Add entity
+                            if position >= 0 && position < owners.Length && row.Id.HasValue && not(isNull(box entity))
+                               && plan.Owners[position].OwnerType.IsInstanceOfType(box entity) then
+                                owners[position].Add(row.Id.Value, box entity)
+                                if not(isNull row.HydrationJSON) then hydration[position][row.Id.Value] <- row.HydrationJSON
+                        for index = 0 to owners.Length - 1 do
+                            hydrateOwners connection source.InTransaction plan.Owners[index] (owners[index].ToArray()) hydration[index]
+                    with error ->
+                        SQLiteToolsHandlerFaultState.tryRecordHandlerFault connection error
+                        reraiseAnywhere error
                 yield! buffer
             | _ ->
                 for struct(_, entity, _) in queryRows<'Elem> connection query par batchCtx.IsSome do

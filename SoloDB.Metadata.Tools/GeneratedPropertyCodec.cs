@@ -23,6 +23,7 @@ internal static class GeneratedPropertyCodec
         return new CodecNameApi<TypeReference,MethodReference>(module.TypeSystem.Int32,module.TypeSystem.Boolean,
             new ByReferenceType(module.TypeSystem.Byte),new ByReferenceType(module.TypeSystem.Int32),
             api.Operation("JsonNameInput","Begin",reader),Input("Length"),Input("Position"),Input("Reference"),offset,
+            api.Operation("JsonNameInput",reader.Name=="Utf16Reader"?"Utf16Pair":"Utf8Word"),api.Operation("JsonNameInput","Utf8Pair"),
             Name("Quoted"),Name("Identifier"),api.Operation("JsonNameInput","Invalid"),api.Operation("JsonNameInput","Unterminated"),
             Name("Unsupported"),Name("Colon"),Name("Value"),reader.Name=="Utf16Reader");
     }

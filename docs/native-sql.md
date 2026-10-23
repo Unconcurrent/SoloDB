@@ -44,24 +44,37 @@ A plain SQLite tool can inspect physical rows without those functions, while `PR
 
 ## Typed arguments and direct mapping
 
-A reusable parameter plan captures typed state once when execution begins, before SQL effects. Its binder writes primitives directly for each statement in a batch. The parameter writer is valid only during that binder invocation.
+Pass ordinary anonymous objects for named parameters and request a model with `Query<T>`. The same calls use generated argument capture and row mapping when the project registers generated operations:
 
 ```csharp
-static readonly SqlParameterPlan<(long Id, string Text), (long Id, string Text)> WriteNote =
-    new(new[] { "id", "text" }, value => value, (writer, value) => {
-        writer.Int64(0, value.Id);
-        writer.Text(1, value.Text);
-    });
+using System;
+using System.Linq;
+using SoloDatabase;
+using static SoloDatabase.NativeSQLiteTools.IDbConnectionExtensions;
 
-connection.Execute("CREATE TABLE IF NOT EXISTS NotesWithIds(Id INTEGER PRIMARY KEY, Value TEXT)");
+#if !DEBUG
+SoloDBAOT.Register();
+#endif
+
+using var connection = new NativeSqliteConnection("Data Source=:memory:");
+connection.Open();
+connection.Execute("CREATE TABLE NotesWithIds(Id INTEGER PRIMARY KEY, Value TEXT)");
 connection.Execute("INSERT INTO NotesWithIds(Id, Value) VALUES(@id, @text)",
-                   WriteNote, (17L, "hello"));
+    new { id = 17L, text = "hello" });
 
-var values = connection.Query("SELECT Value FROM Notes",
-    new Func<SqlRow, string>(row => row.GetString(0)));
+var note = connection.Query<Note>(
+    "SELECT Id, Value AS Text FROM NotesWithIds WHERE Id = @id",
+    new { id = 17L }).Single();
+Console.WriteLine(note.Text);
+
+public sealed class Note
+{
+    public long Id { get; set; }
+    public string Text { get; set; } = "";
+}
 ```
 
-Reuse a plan for its stable parameter shape. Anonymous objects, named dictionaries and `SqlArguments` provide dynamic input convenience. Values are captured at execution acquisition; capture exceptions occur before the first statement takes effect. Missing values fail instead of reusing earlier bindings. Supply null or `DBNull.Value` for SQL NULL. An unprefixed name must identify one SQL parameter; retain its symbol prefix when names would be ambiguous. Strings and blobs preserve empty values and embedded NUL.
+Argument capture and model row mapping are automatic in ordinary and registered execution. Anonymous objects, named dictionaries and `SqlArguments` provide named input values. Values are captured at execution acquisition; capture exceptions occur before the first statement takes effect. Missing values fail instead of reusing earlier bindings. Supply null or `DBNull.Value` for SQL NULL. An unprefixed name must identify one SQL parameter; retain its symbol prefix when names would be ambiguous. Strings and blobs preserve empty values and embedded NUL.
 
 Generated registration infers argument capture separately from JSON model roots at checked C# and F# SQL calls. It follows available original anonymous and named input types, including source-local helpers and factories; an unavailable runtime-selected concrete type cannot be inferred from an object or interface declaration alone.
 

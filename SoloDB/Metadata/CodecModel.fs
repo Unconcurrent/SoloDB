@@ -5,6 +5,10 @@ open System.Reflection.Emit
 /// Instruction destinations translate operands; codec policy belongs to CodecEmitter.
 [<AbstractClass>]
 type internal CodecIL<'Type, 'Method, 'Field>() =
+    abstract InputValue: unit -> unit
+    abstract InputAddress: unit -> unit
+    abstract ByRefParameter: 'Method * int -> bool
+    abstract ResultParameter: 'Method -> bool
     abstract Emit: OpCode -> unit
     abstract EmitInt: OpCode * int -> unit
     abstract EmitInt64: int64 -> unit
@@ -179,26 +183,19 @@ module internal CodecTypeAssignment =
         let rec visit source target = evaluate visit facts source target
         visit source target
 
-/// An exact implementation and its admitted concrete output operation.
-type internal CodecKnownWriter<'T,'M> = { Type: 'T; ValueType: bool; Operation: 'M }
-
 type internal CodecPolymorphicApi<'T,'M> = {
     RuntimeType: 'T
-    Equals: 'M
+    SameType: 'M
     IncludeType: 'M
     SetIncludeType: 'M
     Actual: 'M
-    Known: 'T -> CodecKnownWriter<'T,'M>[]
 }
 
 /// Array emission needs only its selected child and delimiter operations.
 type internal CodecArrayWriterApi<'Type,'Method> = {
     Operation: 'Type -> 'Method option
     Serialize: 'Type -> 'Method
-    Null: 'Method
-    BeginArray: 'Method
-    Separator: 'Method
-    EndArray: 'Method
+    Literal: string -> unit
 }
 
 /// Direct text destinations retain the same member admission and typed codec calls.
@@ -206,15 +203,10 @@ type internal CodecRawWriterApi<'Type,'Method> = {
     Boolean: 'Type
     Operation: 'Type -> 'Method option
     Polymorphic: CodecPolymorphicApi<'Type,'Method>
-    Null: 'Method
+    Literal: string -> unit
     SerializeActual: 'Method
-    BeginArray: 'Method
-    Separator: 'Method
-    EndArray: 'Method
-    BeginObject: 'Method
-    Property: string -> 'Method
+    Property: string * int -> unit
     TypeLiteral: 'Type -> 'Method
-    EndObject: 'Method
     OmitId: 'Method
     Discard: 'Type -> 'Method
     Serialize: 'Type -> 'Method
@@ -231,6 +223,8 @@ type internal CodecNameApi<'Type,'Method> = {
     Position: 'Method
     Reference: 'Method
     OffsetByte: 'Method
+    Word: 'Method
+    Pair: 'Method
     Quoted: 'Method
     Identifier: 'Method
     Invalid: 'Method

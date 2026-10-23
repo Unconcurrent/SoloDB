@@ -81,17 +81,17 @@ internal static class GeneratedOptionalCodec
         if (definitions.TryGet("optional-write",target,representation,"",out var existing)) return existing;
         var span = ((ByReferenceType)product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectWriter`2").Methods.Single(method => method.Name == "Invoke").Parameters[1].ParameterType).ElementType;
         var closedSpan = new GenericInstanceType(module.ImportReference(((GenericInstanceType)span).ElementType)); closedSpan.GenericArguments.Add(encoding);
-        var body = Body(module,owner,definitions.MethodName(name),module.TypeSystem.Void,target,new ByReferenceType(closedSpan),new ByReferenceType(Closed(module,product,"JsonWriteState`1",encoding)));
+        var body = Body(module,owner,definitions.MethodName(name),module.TypeSystem.Void,new ByReferenceType(target),new ByReferenceType(closedSpan),new ByReferenceType(Closed(module,product,"JsonWriteState`1",encoding)));
         definitions.Add("optional-write",target,representation,"",body);
         var payload = Payload(module,target,models);
-        var nullMethod = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonRawOutput`3").Methods.Single(method => method.Name == "Null"));
-        nullMethod.DeclaringType = api.RawType("JsonRawOutput",encoding,output);
+        var il = new CecilCodecIL(body);
         var operands = new CodecOptionalWriterApi<TypeReference,MethodReference>(target,payload,Kind(target,models) != 1,
             Kind(target,models) == 2 ? FSharpOption<MethodReference>.Some(Member(module,target,"get_HasValue",Kind(target,models))) : null!,
             Kind(target,models) == 3 ? null! : FSharpOption<MethodReference>.Some(Member(module,target,"get_Value",Kind(target,models))),
-            Kind(target,models) == 3 ? FSharpOption<MethodReference>.Some(Transfer(module,product,target,payload)) : null!,nullMethod,
+            Kind(target,models) == 3 ? FSharpOption<MethodReference>.Some(Transfer(module,product,target,payload)) : null!,
+            FSharpFunc<Unit,Unit>.FromConverter(new Converter<Unit,Unit>(_ => GeneratedOutputCodec.LiteralAction(definitions,module,product,encoding,il).Invoke("null"))),
             GeneratedChildCodec.WriteCall(definitions,module,owner,product,payload,encoding,output,name + "Payload",models));
-        CodecOptionalEmitter.writer(new CecilCodecIL(body),operands); return body;
+        CodecOptionalEmitter.writer(il,operands); return body;
     }
     internal static void Register(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,ILProcessor entry,AssemblyDefinition product,TypeReference target,int index,GeneratedModel[] models)
     {
@@ -107,12 +107,16 @@ internal static class GeneratedOptionalCodec
         {
             var reader = Type(name); Delegate(Closed(module,product,"JsonDirectReader`2",target,reader),Reader(definitions,module,owner,product,target,reader,"ReadOptional" + name + index,models));
         }
-        foreach(var name in new[] { "JsonUtf8Writer","JsonUtf16Writer" })
-        {
-            var encoding = name == "JsonUtf8Writer" ? module.TypeSystem.Byte : module.TypeSystem.Char;
-            var output = Type(name); Delegate(Closed(module,product,"JsonDirectWriter`2",target,encoding),Writer(definitions,module,owner,product,target,encoding,output,"WriteOptional" + name + index,models));
+        entry.Emit(OpCodes.Call,api.Metadata("RegisterRawReaders",target));
+        foreach(var outputKind in GeneratedJsonDefinitions.Outputs) {
+            var writes = definitions.OutputView(outputKind);
+            foreach(var encoding in new[] {module.TypeSystem.Byte,module.TypeSystem.Char}) {
+                var output = writes.OutputType(module,product,encoding);
+                Delegate(Closed(module,product,"JsonDirectWriter`2",target,encoding),Writer(writes,module,owner,product,target,encoding,output,"WriteOptional" + encoding.Name + index,models));
+            }
+            GeneratedJsonAssembly.BoxedWriters(definitions,module,owner,entry,product,target);
+            entry.Emit(OpCodes.Call,api.Metadata("RegisterOutputWriters",target,writes.OutputType(module,product,module.TypeSystem.Byte),writes.OutputType(module,product,module.TypeSystem.Char)));
         }
-        entry.Emit(OpCodes.Call,api.Metadata("RegisterRaw",target));
         if (definitions.Stored) return;
         var kind = Kind(target,models);
         foreach(var name in TypeSupport.OptionalQueryMembers(kind))

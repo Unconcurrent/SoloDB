@@ -14,26 +14,37 @@ open SoloDatabase.Metadata.Generation
 module internal JsonWriterRuntime =
     let private flags = BindingFlags.Static ||| BindingFlags.NonPublic
 
+    let runtimeWriter<'T,'E> (writer: JsonDirectWriter<'T,'E>): JsonDirectRuntimeWriter<'E> =
+        if not(MetadataRuntime.supportsDynamicCode()) then
+            JsonDirectRuntimeWriter<'E>(fun value destination state ->
+                let mutable value = unbox<'T> value
+                writer.Invoke(&value,&destination,&state))
+        else
+            let callable = typeof<JsonDirectWriter<'T,'E>>
+            let invoke = callable.GetMethod("Invoke",BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic)
+            let parameters = typeof<JsonDirectRuntimeWriter<'E>>.GetMethod("Invoke",BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic).GetParameters() |> Array.map _.ParameterType
+            let method = DynamicMethod("WriteBoxedJson",typeof<Void>,Array.append [|callable|] parameters,typeof<JsonWriterRegion>.Module,true)
+            CodecEmitter.boxedRawWriter (RuntimeCodecIL(method.GetILGenerator())) typeof<'T> typeof<'T>.IsValueType invoke
+            method.CreateDelegate(typeof<JsonDirectRuntimeWriter<'E>>,writer) :?> JsonDirectRuntimeWriter<'E>
+
     let private signature (element: Type) =
         let signature = typeof<JsonDirectWriter<obj,byte>>.GetMethod("Invoke",BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic).GetParameters()
-        signature[1..2] |> Array.map(fun parameter ->
-            parameter.ParameterType.GetElementType().GetGenericTypeDefinition().MakeGenericType(element).MakeByRefType())
+        Array.init 2 (fun index ->
+            signature[index + 1].ParameterType.GetElementType().GetGenericTypeDefinition().MakeGenericType(element).MakeByRefType())
 
-    let internal api (element: Type) =
+    let internal api (element: Type) (output: Type) =
         let helper name = typeof<JsonWriterRegion>.GetMethod(name,flags).MakeGenericMethod(element) :> MethodBase
         let state = typedefof<JsonWriteState<_>>.MakeGenericType(element)
-        let list = typedefof<System.Collections.Generic.IList<_>>.MakeGenericType(element)
-        let concrete = typedefof<System.Collections.Generic.List<_>>.MakeGenericType(element)
-        let collection = typedefof<System.Collections.Generic.ICollection<_>>.MakeGenericType(element)
         let field name = state.GetField(name,BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic)
         let offset = typeof<Unsafe>.GetMethods(BindingFlags.Public ||| BindingFlags.Static)
                      |> Array.find(fun method -> method.Name = "Add" && method.IsGenericMethodDefinition &&
                                                  method.GetParameters().Length = 2 && method.GetParameters().[0].ParameterType.IsByRef &&
                                                  method.GetParameters().[1].ParameterType.Equals(typeof<unativeint>))
-        { Int32 = typeof<int>; UInt32 = typeof<uint32>; UInt64 = typeof<uint64>; Reference = typeof<byte>.MakeByRefType()
-          List = list; ConcreteList = concrete; ListField = field "List@"; Written = field "Written"; Discard = field "Discard"
-          Add = collection.GetMethod("Add") :> MethodBase; ConcreteAdd = concrete.GetMethod("Add") :> MethodBase
-          ReserveSpan = helper "ReserveSpan"; ReserveList = helper "ReserveList"; FitsSpan = helper "FitsSpan"
+        { Kind = CodecOutputEmitter.kind (if output.IsGenericType then output.GetGenericTypeDefinition().FullName else output.FullName)
+          LittleEndian = typeof<BitConverter>.GetField("IsLittleEndian")
+          Int32 = typeof<int>; UInt32 = typeof<uint32>; UInt64 = typeof<uint64>; Reference = typeof<byte>.MakeByRefType()
+          Written = field "Written"; Add = helper "AddList"
+          ReserveSpan = helper "ReserveSpan"; FitsSpan = helper "FitsSpan"
           Start = helper "Start"; Position = helper "Position"; Advance = helper "Advance"
           Offset = offset.MakeGenericMethod(typeof<byte>) :> MethodBase }
 
@@ -49,41 +60,38 @@ module internal JsonWriterRuntime =
                                                   method.GetParameters().Length=2 && method.GetParameters().[0].ParameterType.Equals(typeof<byte>.MakeByRefType()))
                       |> fun method -> method.MakeGenericMethod(if element.Equals(typeof<char>) then typeof<uint32> else typeof<uint16>) :> MethodBase }
 
-    let private createProperty (element: Type) (text: string) =
+    let inlineLiteral element output (il: CodecIL<Type,MethodBase,FieldInfo>) (text: string) =
         let utf16 = typeof<char>.Equals(element)
-        let units = if utf16 then text |> Seq.map int |> Seq.toArray else Encoding.UTF8.GetBytes(text) |> Array.map int
-        let method = DynamicMethod("WriteProperty",typeof<Void>,Array.append [|typeof<bool>|] (signature element),typeof<JsonWriterRegion>.Module,true)
-        CodecOutputEmitter.property (RuntimeCodecIL(method.GetILGenerator())) (api element) utf16 units
-        method
+        let units = if utf16 then text.ToCharArray() |> Array.map int else Encoding.UTF8.GetBytes(text) |> Array.map int
+        CodecOutputEmitter.literal il (api element output) utf16 units
+            (fun () -> il.Emit OpCodes.Ldarg_1) (fun () -> il.Emit OpCodes.Ldarg_2)
 
-    let private createConstant (element: Type) (text: string) =
+    let inlineProperty element output (il: CodecIL<Type,MethodBase,FieldInfo>) (text: string, comma: int) =
         let utf16 = typeof<char>.Equals(element)
-        let units = if utf16 then text |> Seq.map int |> Seq.toArray else Encoding.UTF8.GetBytes(text) |> Array.map int
-        let method = DynamicMethod("WriteLiteral",typeof<Void>,signature element,typeof<JsonWriterRegion>.Module,true)
-        CodecOutputEmitter.constant (RuntimeCodecIL(method.GetILGenerator())) (api element) utf16 units
+        let units = if utf16 then text.ToCharArray() |> Array.map int else Encoding.UTF8.GetBytes(text) |> Array.map int
+        CodecOutputEmitter.inlineProperty il (api element output) utf16 units comma
+
+    let private createBoolean (element: Type) (output: Type) =
+        let method = DynamicMethod("WriteBoolean",typeof<Void>,Array.append [|typeof<bool>.MakeByRefType()|] (signature element),typeof<JsonWriterRegion>.Module,true)
+        CodecOutputEmitter.boolean (RuntimeCodecIL(method.GetILGenerator(),typeof<bool>.MakeByRefType())) (api element output) (typeof<char>.Equals(element))
         method
 
-    let private createBoolean (element: Type) =
-        let method = DynamicMethod("WriteBoolean",typeof<Void>,Array.append [|typeof<bool>|] (signature element),typeof<JsonWriterRegion>.Module,true)
-        CodecOutputEmitter.boolean (RuntimeCodecIL(method.GetILGenerator())) (api element) (typeof<char>.Equals(element))
-        method
-
-    let private createTypeName target (element: Type) =
+    let private createTypeName target (element: Type) (output: Type) =
         let method = DynamicMethod("WriteTypeLiteral",typeof<Void>,signature element,typeof<JsonWriterRegion>.Module,true)
         let value = typeof<JsonWriterRegion>.GetMethod("TypeNameLiteral",flags).MakeGenericMethod(target,element)
         let reference = typeof<JsonWriterRegion>.GetMethod("LiteralReference",flags).MakeGenericMethod(element)
-        CodecOutputEmitter.encodedLiteral (RuntimeCodecIL(method.GetILGenerator())) (api element)
+        CodecOutputEmitter.encodedLiteral (RuntimeCodecIL(method.GetILGenerator())) (api element output)
             (element.MakeArrayType()) (value :> MethodBase) (reference :> MethodBase) (element.Equals(typeof<char>))
         method
 
-    let private createNumber (target: Type) element =
+    let private createNumber (target: Type) element output =
         if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "direct JSON write" target
         let plan = CodecNumericPreparation.writer target.FullName false (Some IntPtr.Size)
         let coreName = plan.Core
         let core = if coreName = target.FullName then target else typeof<int>.Assembly.GetType(coreName,true)
-        let method = DynamicMethod("WriteNumber" + target.Name,typeof<Void>,Array.append [|target|] (signature element),typeof<JsonWriterRegion>.Module,true)
-        let il = RuntimeCodecIL(method.GetILGenerator())
-        let output = api element
+        let method = DynamicMethod("WriteNumber" + target.Name,typeof<Void>,Array.append [|target.MakeByRefType()|] (signature element),typeof<JsonWriterRegion>.Module,true)
+        let il = RuntimeCodecIL(method.GetILGenerator(),target.MakeByRefType())
+        let output = api element output
         let steps = plan.Steps |> Array.map(fun (owner,name,address,result) ->
             let owner = if owner = target.FullName then target else typeof<int>.Assembly.GetType(owner,true)
             let result = typeof<int>.Assembly.GetType(result,true)
@@ -100,6 +108,7 @@ module internal JsonWriterRuntime =
             let memberFlags = BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic
             let facts = { Output = output; Prepared = prepared; UInt32Array = typeof<uint32[]>
                           Prepare = typeof<SoloDatabase.Numerics.BigIntegerRadix>.GetMethod("Raw",flags) :> MethodBase
+                          Validate = typeof<SoloDatabase.Numerics.BigIntegerRadix>.GetMethod("ValidateRaw",flags) :> MethodBase
                           Sign = prepared.GetProperty("Sign",memberFlags).GetMethod :> MethodBase
                           Count = prepared.GetProperty("Count",memberFlags).GetMethod :> MethodBase
                           Chunks = prepared.GetProperty("Chunks",memberFlags).GetMethod :> MethodBase }
@@ -132,27 +141,27 @@ module internal JsonWriterRuntime =
 
         method
 
-    let private createGuid element =
+    let private createGuid element output =
         if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "direct JSON write" typeof<Guid>
-        let method = DynamicMethod("WriteGuid",typeof<Void>,Array.append [|typeof<Guid>|] (signature element),typeof<JsonWriterRegion>.Module,true)
+        let method = DynamicMethod("WriteGuid",typeof<Void>,Array.append [|typeof<Guid>.MakeByRefType()|] (signature element),typeof<JsonWriterRegion>.Module,true)
         let unaligned = typeof<Unsafe>.GetMethods(BindingFlags.Static ||| BindingFlags.Public)
                         |> Array.find(fun method -> method.Name = "ReadUnaligned" && method.IsGenericMethodDefinition &&
                                                     method.GetParameters().Length = 1 && method.GetParameters().[0].ParameterType.Equals(typeof<byte>.MakeByRefType()))
-        let facts = { Output = api element
+        let facts = { Output = api element output
                       ReserveKnownSpan = typeof<JsonWriterRegion>.GetMethod("TryReserveKnownSpan",flags).MakeGenericMethod(element) :> MethodBase
                       Source = typeof<JsonWriterRegion>.GetMethod("Source",flags).MakeGenericMethod(typeof<Guid>) :> MethodBase
                       Read32 = unaligned.MakeGenericMethod(typeof<uint32>) :> MethodBase
                       Read16 = unaligned.MakeGenericMethod(typeof<uint16>) :> MethodBase }
-        CodecGuidWriterEmitter.writer (RuntimeCodecIL(method.GetILGenerator())) facts (typeof<char>.Equals(element))
+        CodecGuidWriterEmitter.writer (RuntimeCodecIL(method.GetILGenerator(),typeof<Guid>.MakeByRefType())) facts (typeof<char>.Equals(element))
         method
 
-    let private createString element =
+    let private createString element output =
         if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "direct JSON write" typeof<string>
-        let method = DynamicMethod("WriteString",typeof<Void>,Array.append [|typeof<string>|] (signature element),typeof<JsonWriterRegion>.Module,true)
+        let method = DynamicMethod("WriteString",typeof<Void>,Array.append [|typeof<string>.MakeByRefType()|] (signature element),typeof<JsonWriterRegion>.Module,true)
         let read = typeof<Unsafe>.GetMethods(BindingFlags.Public ||| BindingFlags.Static)
                    |> Array.find(fun method -> method.Name = "ReadUnaligned" && method.IsGenericMethodDefinition &&
                                                method.GetParameters().Length = 1 && method.GetParameters().[0].ParameterType.Equals(typeof<byte>.MakeByRefType()))
-        let facts = { Output = api element
+        let facts = { Output = api element output
                       Reference = typeof<JsonWriterRegion>.GetMethod("StringReference",flags) :> MethodBase
                       Length = typeof<string>.GetProperty("Length").GetMethod :> MethodBase
                       ReadWord = read.MakeGenericMethod(typeof<uint64>) :> MethodBase
@@ -160,7 +169,7 @@ module internal JsonWriterRuntime =
                                   |> Array.find(fun method -> method.Name = "WriteUnaligned" && method.IsGenericMethodDefinition &&
                                                               method.GetParameters().Length = 2 && method.GetParameters().[0].ParameterType.Equals(typeof<byte>.MakeByRefType()))
                                   |> fun method -> method.MakeGenericMethod(typeof<uint32>) :> MethodBase }
-        CodecStringWriterEmitter.writer (RuntimeCodecIL(method.GetILGenerator())) facts (element.Equals(typeof<char>))
+        CodecStringWriterEmitter.writer (RuntimeCodecIL(method.GetILGenerator(),typeof<string>.MakeByRefType())) facts (element.Equals(typeof<char>))
         method
 
     let private base64Vector (write: MethodInfo) utf16: CodecBase64VectorApi<Type,MethodBase> option =
@@ -198,13 +207,13 @@ module internal JsonWriterRuntime =
         None
 #endif
 
-    let private createBytes element ordinarySequence =
+    let private createBytes element output ordinarySequence =
         if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "direct JSON write" typeof<byte[]>
-        let method = DynamicMethod("WriteBytes",typeof<Void>,Array.append [|typeof<byte[]>|] (signature element),typeof<JsonWriterRegion>.Module,true)
+        let method = DynamicMethod("WriteBytes",typeof<Void>,Array.append [|typeof<byte[]>.MakeByRefType()|] (signature element),typeof<JsonWriterRegion>.Module,true)
         let write = typeof<Unsafe>.GetMethods(BindingFlags.Public ||| BindingFlags.Static)
                     |> Array.find(fun method -> method.Name = "WriteUnaligned" && method.IsGenericMethodDefinition &&
                                                 method.GetParameters().Length = 2 && method.GetParameters().[0].ParameterType.Equals(typeof<byte>.MakeByRefType()))
-        let facts = { Output = api element; Bytes = typeof<byte[]>
+        let facts = { Output = api element output; Bytes = typeof<byte[]>
                       ReserveKnownSpan = if ordinarySequence then None else Some(typeof<JsonWriterRegion>.GetMethod("TryReserveKnownSpan",flags).MakeGenericMethod(element) :> MethodBase)
                       LengthOverflow = if ordinarySequence then Some(typeof<JsonWriterRegion>.GetMethod("Base64LengthOverflow",flags) :> MethodBase) else None
                       Capture = typeof<JsonWriterRegion>.GetMethod("CaptureBytes" + (if element.Equals(typeof<char>) then "Utf16" else "Utf8"),flags) :> MethodBase
@@ -213,36 +222,30 @@ module internal JsonWriterRuntime =
                       Vector = base64Vector write (element.Equals(typeof<char>))
                       LittleEndian = typeof<BitConverter>.GetField("IsLittleEndian")
                       WriteWord = write.MakeGenericMethod(if element.Equals(typeof<char>) then typeof<uint64> else typeof<uint32>) :> MethodBase }
-        CodecBase64WriterEmitter.writer (RuntimeCodecIL(method.GetILGenerator())) facts (typeof<char>.Equals(element)) ordinarySequence
+        CodecBase64WriterEmitter.writer (RuntimeCodecIL(method.GetILGenerator(),typeof<byte[]>.MakeByRefType())) facts (typeof<char>.Equals(element)) ordinarySequence
         method
 
-    let property (element: Type) (text: string) =
-        JsonDefaultMethods.get typeof<JsonWriterRegion> element ("property-write:" + text) (fun () -> createProperty element text)
+    let boolean (element: Type) output =
+        JsonDefaultMethods.withContract typeof<bool> element output "boolean-write" (fun () -> createBoolean element output)
 
-    let constant (element: Type) (text: string) =
-        JsonDefaultMethods.get typeof<JsonWriterRegion> element ("literal-write:" + text) (fun () -> createConstant element text)
+    let number (target: Type) element output =
+        JsonDefaultMethods.withContract target element output "numeric-write" (fun () -> createNumber target element output)
 
-    let boolean (element: Type) =
-        JsonDefaultMethods.get typeof<bool> element "boolean-write" (fun () -> createBoolean element)
+    let guid element output =
+        JsonDefaultMethods.withContract typeof<Guid> element output "guid-write" (fun () -> createGuid element output)
 
-    let number (target: Type) element =
-        JsonDefaultMethods.get target element "numeric-write" (fun () -> createNumber target element)
+    let text element output =
+        JsonDefaultMethods.withContract typeof<string> element output "string-write" (fun () -> createString element output)
 
-    let guid element =
-        JsonDefaultMethods.get typeof<Guid> element "guid-write" (fun () -> createGuid element)
+    let typeName target element output =
+        JsonDefaultMethods.withContract target element output "type-literal" (fun () -> createTypeName target element output)
 
-    let text element =
-        JsonDefaultMethods.get typeof<string> element "string-write" (fun () -> createString element)
+    let bytes element output =
+        JsonDefaultMethods.withContract typeof<byte[]> element output "bytes-write" (fun () -> createBytes element output false)
 
-    let typeName target element =
-        JsonDefaultMethods.get target element "type-literal" (fun () -> createTypeName target element)
+    let sequenceBytes<'E,'O>() =
+        JsonDefaultMethods.callable<JsonDirectWriter<byte[],'E>> typeof<byte[]> typeof<'E> typeof<'O> "sequence-bytes-write"
+            (fun () -> createBytes typeof<'E> typeof<'O> true :> MethodBase)
 
-    let bytes element =
-        JsonDefaultMethods.get typeof<byte[]> element "bytes-write" (fun () -> createBytes element false)
-
-    let sequenceBytes<'E>() =
-        JsonDefaultMethods.callable<JsonDirectWriter<byte[],'E>> typeof<byte[]> typeof<'E> typeof<'E> "sequence-bytes-write"
-            (fun () -> createBytes typeof<'E> true :> MethodBase)
-
-    let writer<'T,'E>() =
-        (number typeof<'T> typeof<'E>).CreateDelegate(typeof<JsonDirectWriter<'T,'E>>) :?> JsonDirectWriter<'T,'E>
+    let writer<'T,'E,'O>() =
+        (number typeof<'T> typeof<'E> typeof<'O>).CreateDelegate(typeof<JsonDirectWriter<'T,'E>>) :?> JsonDirectWriter<'T,'E>

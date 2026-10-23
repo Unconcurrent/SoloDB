@@ -89,7 +89,7 @@ internal static partial class GeneratedSequenceCodec
             FSharpFunc<TypeReference, FSharpOption<MethodReference>>.FromConverter(
                 new Converter<TypeReference, FSharpOption<MethodReference>>(child => FSharpOption<MethodReference>.Some(
                     GeneratedChildCodec.ReadCall(definitions, module, owner, product, child, reader, name + "Element" + serial++, models)))),
-            FSharpFunc<TypeReference, MethodReference>.FromConverter(new Converter<TypeReference, MethodReference>(child => api.Operation("JsonRawRead", "ReadMember", child, reader))),
+            FSharpFunc<TypeReference, MethodReference>.FromConverter(new Converter<TypeReference, MethodReference>(child => api.Operation("JsonRawRead", "ReadMemberInto", child, reader))),
             target, element, wrapper, array, facts.Item3, facts.Item4, discardAdd);
         return method;
     }
@@ -111,24 +111,15 @@ internal static partial class GeneratedSequenceCodec
         var element = module.ImportReference(((GenericInstanceType)model.Type).GenericArguments[0]);
         var policy = TypeSupport.ForShape(model.Facts.Shape).Factory;
         entry.Emit(OpCodes.Ldstr,policy);
-        if (!readersOnly) entry.Emit(element.FullName == "System.Byte" ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
         foreach (var name in new[] { "Utf8Reader", "Utf16Reader" })
         {
             var reader = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator." + name));
             var body = Reader(definitions, module, owner, product, model.Type, element, reader, policy, false, "ReadSequence" + name + index, models);
             Delegate(entry, module, product, "JsonDirectReader`2", body, model.Type, reader);
         }
+        entry.Emit(OpCodes.Call,api.Metadata("RegisterSequenceReaders",model.Type));
         if (!readersOnly)
-        {
-            foreach (var pair in new[] { (module.TypeSystem.Byte, "JsonUtf8Writer"), (module.TypeSystem.Char, "JsonUtf16Writer") })
-            {
-                var output = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator." + pair.Item2));
-                var body = Writer(definitions, module, owner, product, model.Type, element, pair.Item1, output,
-                    model.Type.IsValueType, element.FullName == "System.Byte", "WriteSequence" + pair.Item2 + index, models);
-                Delegate(entry, module, product, "JsonDirectWriter`2", body, model.Type, pair.Item1);
-            }
-        }
-        entry.Emit(OpCodes.Call, api.Metadata(readersOnly ? "RegisterSequenceReaders" : "RegisterSequenceBodies", model.Type));
+            RegisterWriters(definitions,module,owner,entry,product,model.Type,element,model.Type.IsValueType,"WriteSequence"+index,models);
         if (TypeSupport.SequenceProducesResult(model.Facts.Shape))
             RegisterResultBodies(definitions, module, owner, entry, product, element, "SequenceResult" + index, models);
     }
@@ -138,27 +129,30 @@ internal static partial class GeneratedSequenceCodec
     {
         var api = new GeneratedJsonAssembly.Api(module, product,definitions.Stored);
         var enumerable = Closed(module, module.ImportReference(typeof(IEnumerable<>)), element);
-        foreach (var pair in new[] { (module.TypeSystem.Byte, "JsonUtf8Writer"), (module.TypeSystem.Char, "JsonUtf16Writer") })
-        {
-            var output = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator." + pair.Item2));
-            var body = Writer(definitions, module, owner, product, enumerable, element, pair.Item1, output, false,
-                element.FullName == "System.Byte", name + pair.Item2, models);
-            Delegate(entry, module, product, "JsonDirectWriter`2", body, enumerable, pair.Item1);
+        foreach(var kind in GeneratedJsonDefinitions.Outputs) {
+            var writes = definitions.OutputView(kind);
+            foreach(var encoding in new[] {module.TypeSystem.Byte,module.TypeSystem.Char}) {
+                var output = writes.OutputType(module,product,encoding);
+                var body = Writer(writes,module,owner,product,enumerable,element,encoding,output,false,element.FullName == "System.Byte",name+(encoding.FullName == "System.Char" ? "Utf16" : "Utf8"),models);
+                Delegate(entry,module,product,"JsonDirectWriter`2",body,enumerable,encoding);
+            }
+            entry.Emit(OpCodes.Call,api.Metadata("RegisterSequenceOutputBodies",element,writes.OutputType(module,product,module.TypeSystem.Byte),writes.OutputType(module,product,module.TypeSystem.Char)));
         }
-        entry.Emit(OpCodes.Call, api.Metadata("RegisterSequenceWriterBodies", element));
     }
 
     internal static void RegisterWriters(GeneratedJsonDefinitions definitions, ModuleDefinition module, TypeDefinition owner,
         ILProcessor entry, AssemblyDefinition product, TypeReference target, TypeReference element, bool valueType, string name, GeneratedModel[] models)
     {
         var api = new GeneratedJsonAssembly.Api(module,product,definitions.Stored);
-        foreach (var pair in new[] { (module.TypeSystem.Byte, "JsonUtf8Writer"), (module.TypeSystem.Char, "JsonUtf16Writer") })
-        {
-            var output = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator." + pair.Item2));
-            var body = Writer(definitions,module,owner,product,target,element,pair.Item1,output,valueType,element.FullName == "System.Byte",name + pair.Item2,models);
-            Delegate(entry,module,product,"JsonDirectWriter`2",body,target,pair.Item1);
+        foreach(var kind in GeneratedJsonDefinitions.Outputs) {
+            var writes = definitions.OutputView(kind);
+            foreach(var encoding in new[] {module.TypeSystem.Byte,module.TypeSystem.Char}) {
+                var output = writes.OutputType(module,product,encoding);
+                var body = Writer(writes,module,owner,product,target,element,encoding,output,valueType,element.FullName == "System.Byte",name+(encoding.FullName == "System.Char" ? "Utf16" : "Utf8"),models);
+                Delegate(entry,module,product,"JsonDirectWriter`2",body,target,encoding);
+            }
+            entry.Emit(OpCodes.Call,api.Metadata("RegisterSequenceOutputs",target,element,writes.OutputType(module,product,module.TypeSystem.Byte),writes.OutputType(module,product,module.TypeSystem.Char)));
         }
-        entry.Emit(OpCodes.Call,api.Metadata("RegisterRawWriters",target));
     }
 
     internal static void RegisterRangeArrayBodies(GeneratedJsonDefinitions definitions, ModuleDefinition module, TypeDefinition owner,
@@ -189,7 +183,7 @@ internal static partial class GeneratedSequenceCodec
             .Methods.Single(method => method.Name == "Invoke").Parameters[1].ParameterType).ElementType;
         var method = new MethodDefinition(definitions.MethodName(name), MethodAttributes.Assembly | MethodAttributes.Static | MethodAttributes.HideBySig, module.TypeSystem.Void);
         method.Body.InitLocals = true;
-        method.Parameters.Add(new ParameterDefinition(module.ImportReference(target)));
+        method.Parameters.Add(new ParameterDefinition(new ByReferenceType(module.ImportReference(target))));
         method.Parameters.Add(new ParameterDefinition(new ByReferenceType(Closed(module, span.ElementType, encoding))));
         method.Parameters.Add(new ParameterDefinition(new ByReferenceType(Closed(module, Product("JsonWriteState`1"), encoding))));
         owner.Methods.Add(method);
@@ -201,21 +195,21 @@ internal static partial class GeneratedSequenceCodec
         getEnumerator.DeclaringType = enumerable;
         var current = module.ImportReference((nonGeneric ? typeof(IEnumerator) : typeof(IEnumerator<>)).GetProperty("Current")!.GetMethod!);
         current.DeclaringType = enumerator;
-        var sequence = new CodecSequenceWriterApi<TypeReference, MethodReference>(enumerator, getEnumerator,
+        var sequence = new CodecSequenceWriterApi<TypeReference, MethodReference>(new ArrayType(module.TypeSystem.Byte),enumerator, getEnumerator,
             module.ImportReference(typeof(IEnumerator).GetMethod("MoveNext")!), current,
             module.ImportReference(typeof(IDisposable).GetMethod("Dispose")!),
             nonGeneric ? FSharpOption<TypeReference>.Some(module.ImportReference(typeof(IDisposable))) : null!,
             api.Operation("JsonRawCollections", "CaptureSequenceBytes"),
             binary ? GeneratedOutputCodec.Bytes(definitions, module, owner, product, new ArrayType(module.TypeSystem.Byte), encoding, name + "Bytes") : null!);
         var serial = 0;
-        MethodReference Literal(string value) => GeneratedOutputCodec.Constant(definitions, module, owner, product, encoding, value, name + "Literal" + serial++);
+        var il = new CecilCodecIL(method);
         var outputApi = new CodecRawWriterApi<TypeReference, MethodReference>(module.TypeSystem.Boolean,
             FSharpFunc<TypeReference, FSharpOption<MethodReference>>.FromConverter(
                 new Converter<TypeReference, FSharpOption<MethodReference>>(child =>
                     FSharpOption<MethodReference>.Some(GeneratedChildCodec.WriteCall(
                         definitions, module, owner, product, child, encoding, output, name + "Element" + serial++, models)))),
-            null!, Literal("null"), null!, Literal("["), Literal(","), Literal("]"), null!, null!, null!, null!, null!, null!, null!);
-        CodecSequenceEmitter.writer(new CecilCodecIL(method), outputApi, sequence, target, element, valueType, binary);
+            null!, GeneratedOutputCodec.LiteralAction(definitions,module,product,encoding,il), null!, null!, null!, null!, null!, null!);
+        CodecSequenceEmitter.writer(il, outputApi, sequence, target, element, valueType, binary);
         return method;
     }
 }

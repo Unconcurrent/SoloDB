@@ -1,13 +1,25 @@
 <Project>
-  <Import Project="$(MSBuildThisFileDirectory)SoloDB.Metadata.targets" Condition="'$(MSBuildProjectExtension)' == '.csproj'" />
-  <ItemGroup Condition="'$(MSBuildProjectExtension)' == '.fsproj'">
+  <PropertyGroup>
+    <_SoloDBCompilerHostVersion Condition="'$(NETCoreSdkVersion)' != ''">$([System.String]::Copy('$(NETCoreSdkVersion)').Split('-')[0])</_SoloDBCompilerHostVersion>
+    <_SoloDBCompilerHostSupported>false</_SoloDBCompilerHostSupported>
+    <_SoloDBCompilerHostSupported Condition="'$(_SoloDBCompilerHostVersion)' != '' and '$(_SoloDBCompilerHostVersion)' &gt;= '8.0'">true</_SoloDBCompilerHostSupported>
+  </PropertyGroup>
+  <Import Project="$(MSBuildThisFileDirectory)SoloDB.Metadata.targets" Condition="'$(_SoloDBCompilerHostSupported)' == 'true' and '$(MSBuildProjectExtension)' == '.csproj'" />
+  <ItemGroup Condition="'$(_SoloDBCompilerHostSupported)' == 'true' and '$(MSBuildProjectExtension)' == '.csproj'">
+    <Analyzer Include="$(MSBuildThisFileDirectory)../tools/netstandard2.0/csharp/SoloDB.Metadata.CSharp.dll;$(MSBuildThisFileDirectory)../tools/netstandard2.0/csharp/SoloDB.Metadata.Codecs.dll;$(MSBuildThisFileDirectory)../tools/netstandard2.0/csharp/FSharp.Core.dll" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(_SoloDBCompilerHostSupported)' == 'true' and '$(MSBuildProjectExtension)' == '.fsproj'">
     <Reference Include="SoloDB.Metadata.FSharp">
       <HintPath>$(MSBuildThisFileDirectory)../tools/netstandard2.0/SoloDB.Metadata.FSharp.dll</HintPath>
       <Private>false</Private>
       <ExternallyResolved>true</ExternallyResolved>
     </Reference>
   </ItemGroup>
-  <Import Project="$(MSBuildThisFileDirectory)SoloDB.FSharp.Context.targets" Condition="'$(MSBuildProjectExtension)' == '.fsproj'" />
+  <Import Project="$(MSBuildThisFileDirectory)SoloDB.FSharp.Context.targets" Condition="'$(_SoloDBCompilerHostSupported)' == 'true' and '$(MSBuildProjectExtension)' == '.fsproj'" />
+  <ItemGroup Condition="'$(_SoloDBCompilerHostSupported)' != 'true'">
+    <Compile Include="$(MSBuildThisFileDirectory)SoloDB.Unsupported.cs" Condition="'$(MSBuildProjectExtension)' == '.csproj'" />
+    <CompileBefore Include="$(MSBuildThisFileDirectory)SoloDB.Unsupported.fs" Condition="'$(MSBuildProjectExtension)' == '.fsproj'" />
+  </ItemGroup>
   <Target Name="SoloDBFrameworkNativeAssets" BeforeTargets="AssignTargetPaths"
           DependsOnTargets="ResolvePackageAssets;AdjustDefaultPlatformTargetForNetFrameworkExeWithNoNativeCopyLocalItems"
           Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework' and '$(DesignTimeBuild)' != 'true' and

@@ -20,6 +20,19 @@ internal sealed class CecilCodecIL : CodecIL<TypeReference, MethodReference, Fie
     private ModuleDefinition Module => il.Body.Method.Module;
 
     internal CecilCodecIL(MethodDefinition method) { il = method.Body.GetILProcessor(); }
+    public override void InputValue()
+    {
+        il.Emit(OpCodes.Ldarg_0);
+        if (il.Body.Method.Parameters[0].ParameterType is ByReferenceType reference)
+            il.Emit(OpCodes.Ldobj,Module.ImportReference(reference.ElementType));
+    }
+    public override void InputAddress()
+    {
+        if (il.Body.Method.Parameters[0].ParameterType is ByReferenceType) il.Emit(OpCodes.Ldarg_0);
+        else il.Emit(OpCodes.Ldarga,il.Body.Method.Parameters[0]);
+    }
+    public override bool ByRefParameter(MethodReference method,int index) => method.Parameters[index].ParameterType is ByReferenceType;
+    public override bool ResultParameter(MethodReference method) => method.ReturnType.MetadataType==MetadataType.Void && method.Parameters.Count==2 && method.Parameters[1].ParameterType is ByReferenceType;
     public override void Emit(EmitCode code) => il.Emit(Codes[code.Value]);
     // ECMA-335 III: compact argument/local aliases retain the original slot.
     private static OpCode Slot(OpCode code, int value) => code.Code switch

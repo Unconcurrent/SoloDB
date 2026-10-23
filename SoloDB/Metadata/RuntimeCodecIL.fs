@@ -5,10 +5,21 @@ open System.Reflection
 open System.Reflection.Emit
 open System.Collections.Generic
 
-type internal RuntimeCodecIL(generator: ILGenerator) =
+type internal RuntimeCodecIL(generator: ILGenerator, ?input: Type) =
     inherit CodecIL<Type,MethodBase,FieldInfo>()
     let locals = List<LocalBuilder>()
     let labels = List<Label>()
+    new(generator: ILGenerator) = RuntimeCodecIL(generator, ?input = None)
+    override _.InputValue() =
+        generator.Emit(OpCodes.Ldarg_0)
+        match input with Some target when target.IsByRef -> generator.Emit(OpCodes.Ldobj,target.GetElementType()) | _ -> ()
+    override _.InputAddress() =
+        match input with Some target when target.IsByRef -> generator.Emit(OpCodes.Ldarg_0) | _ -> generator.Emit(OpCodes.Ldarga,0s)
+    override _.ByRefParameter(method,index) = method.GetParameters().[index].ParameterType.IsByRef
+    override _.ResultParameter(method) =
+        let parameters = method.GetParameters()
+        method :? MethodInfo && (method :?> MethodInfo).ReturnType.Equals(typeof<Void>) &&
+        parameters.Length = 2 && parameters.[1].ParameterType.IsByRef
     override _.Emit(code) = generator.Emit(code)
     override _.EmitInt(code, value) =
         if code.Equals(OpCodes.Unaligned) then generator.Emit(code,byte value)

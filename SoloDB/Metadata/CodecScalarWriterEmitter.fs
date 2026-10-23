@@ -12,10 +12,10 @@ module internal CodecScalarWriterEmitter =
     /// Capture required conversions once, before any output callback or discard admission.
     let prepare (il: CodecIL<'T,'M,'F>) target core (steps: CodecWriterConversion<'T,'M>[]) castInteger addressInput =
         if steps.Length = 0 && not castInteger then
-            fun () -> il.EmitInt((if addressInput then OpCodes.Ldarga else OpCodes.Ldarg),0)
+            fun () -> if addressInput then il.InputAddress() else il.InputValue()
         else
             let mutable value = il.Local target
-            il.Emit OpCodes.Ldarg_0; il.EmitLocal(OpCodes.Stloc,value)
+            il.InputValue(); il.EmitLocal(OpCodes.Stloc,value)
             for step in steps do
                 il.EmitLocal((if step.Address then OpCodes.Ldloca else OpCodes.Ldloc),value)
                 il.EmitMethod(OpCodes.Call,step.Call)

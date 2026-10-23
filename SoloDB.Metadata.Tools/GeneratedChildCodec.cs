@@ -19,7 +19,7 @@ internal static class GeneratedChildCodec
         var api = new GeneratedJsonAssembly.Api(module,product,definitions.Stored);
         var selected = TypeSupport.RawChildReader(Definition(target),GeneratedOptionalCodec.Kind(target,models) == 3,
             target is ArrayType array ? array.Rank : 0,definitions.Stored);
-        if(selected.IsMember) return required ? api.Operation("JsonRawRead","ReadMember",target,reader) : null!;
+        if(selected.IsMember) return required ? api.Operation("JsonRawRead","ReadMemberInto",target,reader) : null!;
         if(selected.IsStoredNumeric) return api.Operation("JsonStoredNumeric",TypeSupport.StoredNumeric(target.FullName).Value.Item2,reader);
         if(selected is RawChildOperation.Adapted) return GeneratedOptionalCodec.Reader(definitions,module,owner,product,target,reader,name,models);
         if(selected is RawChildOperation.Sequence sequence)
@@ -76,7 +76,7 @@ internal static class GeneratedChildCodec
         var span = new GenericInstanceType(module.ImportReference(originalSpan.ElementType)); span.GenericArguments.Add(encoding);
         var method = new MethodDefinition(definitions.MethodName(name),MethodAttributes.Assembly | MethodAttributes.Static | MethodAttributes.HideBySig,module.TypeSystem.Void);
         method.Body.InitLocals = true;
-        method.Parameters.Add(new ParameterDefinition(module.ImportReference(target)));
+        method.Parameters.Add(new ParameterDefinition(new ByReferenceType(module.ImportReference(target))));
         method.Parameters.Add(new ParameterDefinition(new ByReferenceType(span)));
         var state = new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonWriteState`1"))); state.GenericArguments.Add(encoding);
         method.Parameters.Add(new ParameterDefinition(new ByReferenceType(state)));
@@ -88,10 +88,10 @@ internal static class GeneratedChildCodec
                 ? FSharpOption<MethodReference>.Some(call) : null!));
         var serialize = FSharpFunc<TypeReference,MethodReference>.FromConverter(
             new Converter<TypeReference,MethodReference>(child => Member(api,module,product,child,encoding,output)));
-        MethodReference Literal(string text,string suffix) => GeneratedOutputCodec.Constant(definitions,module,owner,product,encoding,text,name + suffix);
-        var operands = new CodecArrayWriterApi<TypeReference,MethodReference>(operation,serialize,Literal("null","Null"),
-            Literal("[","Begin"),Literal(",","Separator"),Literal("]","End"));
-        CodecArrayEmitter.rawArrayWriter(new CecilCodecIL(method),module.TypeSystem.Int32,operands,target.ElementType);
+        var il = new CecilCodecIL(method);
+        var operands = new CodecArrayWriterApi<TypeReference,MethodReference>(operation,serialize,
+            GeneratedOutputCodec.LiteralAction(definitions,module,product,encoding,il));
+        CodecArrayEmitter.rawArrayWriter(il,module.TypeSystem.Int32,operands,target.ElementType);
         return method;
     }
 }

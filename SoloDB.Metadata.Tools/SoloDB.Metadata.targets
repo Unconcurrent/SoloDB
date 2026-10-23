@@ -62,14 +62,14 @@
           Inputs="$(_SoloDBHelperInputFile);@(IntermediateAssembly);@(_SoloDBOriginalHelperReferences);@(_SoloDBOriginalHelperCompilerReferences);$(_SoloDBGeneratedKeyFile);@(_SoloDBHelperImplementationFiles);$(MSBuildProjectFullPath);$(MSBuildAllProjects)"
           Outputs="$(_SoloDBHelperStamp)" Condition="'$(SoloDBGeneratedHelper)' == 'true' and '$(MSBuildProjectExtension)' == '.csproj' and '$(DesignTimeBuild)' != 'true'">
     <Delete Files="$(_SoloDBHelperStamp)" />
-    <SoloDatabase.Metadata.Tools.GenerateHelper Consumer="@(IntermediateAssembly)" Output="$(SoloDBGeneratedImplementation)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" PublicSign="$(PublicSign)" DelaySign="$(DelaySign)" References="@(_SoloDBOriginalHelperReferences)" CompilerReferences="@(_SoloDBOriginalHelperCompilerReferences)" Selection="$(_SoloDBHelperSelection)">
+    <SoloDatabase.Metadata.Tools.GenerateHelper Consumer="@(IntermediateAssembly)" Output="$(SoloDBGeneratedImplementation)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" PublicSign="$(PublicSign)" DelaySign="$(DelaySign)" References="@(_SoloDBOriginalHelperReferences)" CompilerReferences="@(_SoloDBOriginalHelperCompilerReferences)" Selection="$(_SoloDBHelperSelection)" Condition="'$(SoloDBGeneratedActive)' == 'true'">
       <Output TaskParameter="Active" PropertyName="SoloDBGeneratedActive" />
     </SoloDatabase.Metadata.Tools.GenerateHelper>
     <Touch Files="$(_SoloDBHelperStamp)" AlwaysCreate="true" />
   </Target>
   <Target Name="SoloDBGenerateHelperImplementation" AfterTargets="CoreCompile" BeforeTargets="GenerateBuildDependencyFile;CopyFilesToOutputDirectory;_ComputeResolvedCopyLocalPublishAssets;ComputeResolvedFilesToPublishList;BuiltProjectOutputGroup;DebugSymbolsProjectOutputGroup"
           DependsOnTargets="$(_SoloDBHelperImplementationDependsOn)"
-          Condition="'$(SoloDBGeneratedHelper)' == 'true' and '$(DesignTimeBuild)' != 'true' and '$(_SoloDBRetainedCompilation)' != 'true'">
+          Condition="'$(SoloDBGeneratedHelper)' == 'true' and '$(DesignTimeBuild)' != 'true'">
     <!-- Binding and dependency shape always run after a work skip. Compiler aliases
          keep the immutable contract; runtime copy selects the actual implementation. -->
     <GetAssemblyIdentity AssemblyFiles="$(SoloDBGeneratedImplementation)" Condition="'$(SoloDBGeneratedActive)' == 'true'">

@@ -20,7 +20,7 @@ module internal CodecScalarAdapterEmitter =
         il.Emit OpCodes.Ret
 
     let rawWriter (il: CodecIL<'T,'M,'F>) widen write =
-        il.Emit OpCodes.Ldarg_0
+        il.InputValue()
         il.EmitMethod(OpCodes.Call,widen)
         il.Emit OpCodes.Ldarg_1
         il.Emit OpCodes.Ldarg_2

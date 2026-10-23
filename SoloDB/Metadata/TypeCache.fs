@@ -87,7 +87,7 @@ type internal NativeOperationArgumentLayout(names: string[]) =
 
 /// Raw JSON operations retain their typed entry and exact runtime adapter.
 type internal JsonRawReadOperations = { Reader: Delegate; ReadRuntime: Delegate; Intrinsic: Delegate }
-type internal JsonRawWriteOperations = { Writer: Delegate; WriteRuntime: Delegate }
+type internal JsonRawWriteOperations = { Writer: Delegate; WriteRuntime: Delegate; WriteActual: Delegate }
 
 [<Struct>]
 type internal StringIndexerOperations = {
@@ -201,12 +201,9 @@ type internal TypeMetadataRecord = {
     JsonDefaultMethods: Dictionary<struct(Type * Type * string), MetadataValue<JsonDefaultMethod>> option
     JsonUtf8Read: MetadataValue<JsonRawReadOperations> voption
     JsonUtf16Read: MetadataValue<JsonRawReadOperations> voption
-    JsonUtf8Write: MetadataValue<JsonRawWriteOperations> voption
-    JsonUtf16Write: MetadataValue<JsonRawWriteOperations> voption
+    JsonWrites: Dictionary<struct(Type * Type * Type), MetadataValue<JsonRawWriteOperations>> option
     StoredJsonUtf8Read: MetadataValue<JsonRawReadOperations> voption
     StoredJsonUtf16Read: MetadataValue<JsonRawReadOperations> voption
-    StoredJsonUtf8Write: MetadataValue<JsonRawWriteOperations> voption
-    StoredJsonUtf16Write: MetadataValue<JsonRawWriteOperations> voption
     JsonReader: MetadataValue<Delegate> voption
     JsonWriter: MetadataValue<struct (Delegate * Func<obj>)> voption
     RuntimeJsonRead: MetadataValue<Func<obj,obj>> voption
@@ -286,8 +283,8 @@ type internal TypeMetadataCache private () =
         TypeFacts = ValueNone; NullableUnderlying = ValueNone; EnumUnderlying = ValueNone
         MemberTypes = ValueNone; MemberTemplates = None; DefinitionRepresentative = ValueNone
         StringIndexer = ValueNone; SequenceElement = ValueNone; EqualityComparer = ValueNone
-        ObjectModel = ValueNone; JsonDefaultMethods = None; JsonUtf8Read = ValueNone; JsonUtf16Read = ValueNone; JsonUtf8Write = ValueNone; JsonUtf16Write = ValueNone; PhysicalIdentity = ValueNone
-        StoredJsonUtf8Read = ValueNone; StoredJsonUtf16Read = ValueNone; StoredJsonUtf8Write = ValueNone; StoredJsonUtf16Write = ValueNone
+        ObjectModel = ValueNone; JsonDefaultMethods = None; JsonUtf8Read = ValueNone; JsonUtf16Read = ValueNone; JsonWrites = None; PhysicalIdentity = ValueNone
+        StoredJsonUtf8Read = ValueNone; StoredJsonUtf16Read = ValueNone
         JsonReader = ValueNone; JsonWriter = ValueNone
         RuntimeJsonRead = ValueNone; RuntimeJsonWrite = ValueNone
         CustomIdentity = ValueNone; ReferenceType = ValueNone; Relations = ValueNone
@@ -353,21 +350,6 @@ type internal TypeMetadataCache private () =
         gate.EnterWriteLock()
         try entries.[modelType] <- update (get modelType)
         finally gate.ExitWriteLock()
-    static member KnownJsonWriterBodies(declared: Type, element: Type, contract: Type, operation: string) =
-        let known =
-            gate.EnterReadLock()
-            try
-                let key = struct(element,contract,operation)
-                [|for KeyValue(target,metadata) in entries do
-                      if Metadata.Generation.TypeSupport.KnownWriterCandidate(target.IsAbstract,target.Equals declared) && declared.IsAssignableFrom target then
-                          match metadata.JsonDefaultMethods with
-                          | Some methods ->
-                              match methods.TryGetValue key with
-                              | true, method -> yield struct(target,method.Value)
-                              | _ -> ()
-                          | None -> ()|]
-            finally gate.ExitReadLock()
-        known |> Array.map(fun struct(target,method) -> struct(target,method.Operand))
     static member RegisterName(modelType: Type) =
         gate.EnterWriteLock()
         try

@@ -53,6 +53,7 @@ public static partial class GeneratedJsonAssembly
         public MethodReference Helper(string name, params TypeReference[] arguments) => ProductMethod("JsonImpl",name,arguments);
         public MethodReference Metadata(string name, params TypeReference[] arguments) => ProductMethod("JsonMetadata",
             Stored && name is "RegisterRaw" or "RegisterRawReaders" or "RegisterRawWriters" or "RegisterWriterBodies"
+                or "RegisterSequenceOutputs" or "RegisterOutputWriters" or "RegisterOutputBodies" or "RegisterSequenceOutputBodies"
                 or "RegisterSequenceWriterBodies" or "RegisterSequenceReaders" or "RegisterSequenceBodies"
                 or "RegisterRangeArrayBodies" or "RegisterGroupingBodies" or "RegisterReferenceSequenceBodies"
                 ? "RegisterStored" + name.Substring("Register".Length) : name, arguments);
@@ -66,10 +67,13 @@ public static partial class GeneratedJsonAssembly
         {
             var rawContract = owner is "JsonRawRead" or "JsonRawInput" or "JsonRawCollections";
             var definition = product.MainModule.GetType("SoloDatabase.JsonSerializator." + owner + (rawContract ? "`1" : ""));
-            var methods = definition.Methods.Where(method =>
-                method.Name == name && (method.IsPublic || method.IsAssembly) && method.GenericParameters.Count == arguments.Length && (!count.HasValue || method.Parameters.Count == count)).ToArray();
-            if (methods.Length != 1) throw new InvalidOperationException("Generated API signature is not unique: " + owner + "." + name);
-            var method = Module.ImportReference(methods[0]);
+            MethodDefinition? selected = null;
+            var matches = 0;
+            foreach (var candidate in definition.Methods)
+                if (candidate.Name == name && (candidate.IsPublic || candidate.IsAssembly) && candidate.GenericParameters.Count == arguments.Length && (!count.HasValue || candidate.Parameters.Count == count))
+                { selected = candidate; matches++; }
+            if (matches != 1) throw new InvalidOperationException("Generated API signature is not unique: " + owner + "." + name);
+            var method = Module.ImportReference(selected!);
             if (rawContract)
                 method.DeclaringType = Closed(Module.ImportReference(definition),Contract);
             if (arguments.Length == 0) return method;

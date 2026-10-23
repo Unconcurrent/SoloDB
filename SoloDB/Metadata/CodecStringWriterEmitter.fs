@@ -73,17 +73,17 @@ module internal CodecStringWriterEmitter =
             il.Mark four
             body 4
             il.Mark complete
-        CodecOutputEmitter.withDestination il output state (fun selected mode concrete ->
+        CodecOutputEmitter.withDestination il output state (fun selected mode ->
             let complete = il.Label()
             let present = il.Label()
-            il.Emit OpCodes.Ldarg_0; il.EmitBranch(OpCodes.Brtrue,present)
-            CodecOutputEmitter.literalMode il output utf16 selected mode concrete [|110;117;108;108|] destination state
+            il.InputValue(); il.EmitBranch(OpCodes.Brtrue,present)
+            CodecOutputEmitter.literalMode il output utf16 selected mode [|110;117;108;108|] destination state
             il.EmitBranch(OpCodes.Br,complete)
             il.Mark present
             if mode <> 0 then
-                CodecOutputEmitter.literalMode il output utf16 selected mode concrete [|34|] destination state
-                il.Emit OpCodes.Ldarg_0; il.EmitMethod(OpCodes.Call,api.Reference); save source
-                il.Emit OpCodes.Ldarg_0; il.EmitMethod(OpCodes.Callvirt,api.Length); save length
+                CodecOutputEmitter.literalMode il output utf16 selected mode [|34|] destination state
+                il.InputValue(); il.EmitMethod(OpCodes.Call,api.Reference); save source
+                il.InputValue(); il.EmitMethod(OpCodes.Callvirt,api.Length); save length
                 constant 0; save index; constant 0; save run; constant 0; save byteCount
                 let writeRun() =
                     let count() = if utf16 then load index; load run; il.Emit OpCodes.Sub else load byteCount
@@ -104,22 +104,17 @@ module internal CodecStringWriterEmitter =
                             state(); count(); il.EmitMethod(OpCodes.Call,output.Advance)
                         else
                             CodecOutputEmitter.checkCount il output state count; il.Emit OpCodes.Pop
-                            if concrete then load selected.ConcreteList; count(); il.EmitMethod(OpCodes.Call,output.ReserveList)
                             let current = il.Local output.Int32
                             let loop = il.Label()
                             let doneRun = il.Label()
                             load run; save current
                             il.Mark loop
                             load current; load index; il.EmitBranch(OpCodes.Bge,doneRun)
-                            CodecOutputEmitter.listAppend il output utf16 selected state concrete (not concrete) (fun () -> read(fun () -> load current))
+                            CodecOutputEmitter.listAppend il output utf16 state (fun () -> read(fun () -> load current))
                             load current; constant 1; il.Emit OpCodes.Add; save current
                             il.EmitBranch(OpCodes.Br,loop)
                             il.Mark doneRun
-                            if concrete then state(); count(); il.EmitMethod(OpCodes.Call,output.Advance)
                     else
-                        if mode = 2 && concrete then
-                            CodecOutputEmitter.checkCount il output state count; il.Emit OpCodes.Pop
-                            load selected.ConcreteList; count(); il.EmitMethod(OpCodes.Call,output.ReserveList)
                         let current = il.Local output.Int32
                         let code = il.Local output.Int32
                         let low = il.Local output.Int32
@@ -130,7 +125,7 @@ module internal CodecStringWriterEmitter =
                             if mode = 1 then
                                 CodecOutputEmitter.store il output false target (fun () -> load position) value
                                 load position; constant 1; il.Emit OpCodes.Add; save position
-                            else CodecOutputEmitter.listAppend il output false selected state concrete (not concrete) value
+                            else CodecOutputEmitter.listAppend il output false state value
                         let unicodeRun = il.Label()
                         load byteCount; load index; load run; il.Emit OpCodes.Sub; il.EmitBranch(OpCodes.Bne_Un,unicodeRun)
                         if mode = 1 then
@@ -160,8 +155,7 @@ module internal CodecStringWriterEmitter =
                             let ascii = il.Label()
                             il.Mark ascii
                             load current; load index; il.EmitBranch(OpCodes.Bge,doneRun)
-                            if not concrete then
-                                CodecOutputEmitter.checkCount il output state (fun () -> constant 1); il.Emit OpCodes.Pop
+                            CodecOutputEmitter.checkCount il output state (fun () -> constant 1); il.Emit OpCodes.Pop
                             store(fun () -> read(fun () -> load current))
                             load current; constant 1; il.Emit OpCodes.Add; save current
                             il.EmitBranch(OpCodes.Br,ascii)
@@ -171,7 +165,7 @@ module internal CodecStringWriterEmitter =
                         read(fun () -> load current); save code
                         codePoint current index code low
                         width code (fun units ->
-                            if mode = 2 && not concrete then
+                            if mode = 2 then
                                 CodecOutputEmitter.checkCount il output state (fun () -> constant units); il.Emit OpCodes.Pop
                             if units = 1 then store(fun () -> load code)
                             else
@@ -184,7 +178,7 @@ module internal CodecStringWriterEmitter =
                         load current; constant 1; il.Emit OpCodes.Add; save current
                         il.EmitBranch(OpCodes.Br,loop)
                         il.Mark doneRun
-                        if mode = 1 || concrete then state(); count(); il.EmitMethod(OpCodes.Call,output.Advance)
+                        if mode = 1 then state(); count(); il.EmitMethod(OpCodes.Call,output.Advance)
                 let scan = il.Label()
                 let scalar = il.Label()
                 let plain = il.Label()
@@ -238,7 +232,7 @@ module internal CodecStringWriterEmitter =
                         il.Mark next
                 il.EmitBranch(OpCodes.Br,unicode)
                 il.Mark shortEscape
-                CodecOutputEmitter.fragmentMode il output utf16 selected mode concrete
+                CodecOutputEmitter.fragmentMode il output utf16 selected mode
                     [|(fun () -> constant 92);(fun () -> load digit)|] destination state
                 il.EmitBranch(OpCodes.Br,nextRun)
                 il.Mark unicode
@@ -247,7 +241,7 @@ module internal CodecStringWriterEmitter =
                     if shift <> 0 then constant shift; il.Emit OpCodes.Shr_Un
                     constant 15; il.Emit OpCodes.And; save digit
                     CodecOutputEmitter.lowerHex il digit
-                CodecOutputEmitter.fragmentMode il output utf16 selected mode concrete
+                CodecOutputEmitter.fragmentMode il output utf16 selected mode
                     [|(fun () -> constant 92);(fun () -> constant 117);hex 12;hex 8;hex 4;hex 0|] destination state
                 il.Mark nextRun
                 load index; constant 1; il.Emit OpCodes.Add; save index
@@ -258,6 +252,6 @@ module internal CodecStringWriterEmitter =
                 load index; load run; il.EmitBranch(OpCodes.Beq,finish)
                 writeRun()
                 il.Mark finish
-                CodecOutputEmitter.literalMode il output utf16 selected mode concrete [|34|] destination state
+                CodecOutputEmitter.literalMode il output utf16 selected mode [|34|] destination state
             il.Mark complete)
         il.Emit OpCodes.Ret

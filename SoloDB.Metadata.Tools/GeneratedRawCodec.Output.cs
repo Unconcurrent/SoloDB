@@ -13,6 +13,8 @@ internal static partial class GeneratedRawCodec
     internal static MethodDefinition Writer(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,
         GeneratedModel model,int index,GeneratedModel[] models,TypeReference encoding,TypeReference writer,string suffix,bool exact)
     {
+        if (!exact && model.Facts.ValueType && model.Facts.Shape == TypeShape.Object)
+            return Writer(definitions,module,owner,product,model,index,models,encoding,writer,suffix,true);
         if(model.Type is ArrayType { Rank: 1 } rootArray)
             return GeneratedChildCodec.ArrayWriter(definitions,module,owner,product,rootArray,encoding,writer,"WriteArray"+suffix+index,models);
         var api = new GeneratedJsonAssembly.Api(module,product,definitions.Stored);
@@ -55,12 +57,14 @@ internal static partial class GeneratedRawCodec
             var representation = api.RawType("JsonRawOutput",encoding,writer);
             var role = model.Facts.Shape==TypeShape.Tuple ? "tuple-write" : exact ? "model-exact-write" : "model-write";
             if (definitions.TryGet(role,model.Type,representation,"",out var prepared)) return prepared;
-            var method = Body((exact ? "WriteMembers" : "Write") + suffix + index,module.TypeSystem.Void,module.ImportReference(model.Type),new ByReferenceType(closedSpan),new ByReferenceType(Closed("JsonWriteState`1",encoding)));
+            var method = Body((exact ? "WriteMembers" : "Write") + suffix + index,module.TypeSystem.Void,new ByReferenceType(module.ImportReference(model.Type)),new ByReferenceType(closedSpan),new ByReferenceType(Closed("JsonWriteState`1",encoding)));
             definitions.Add(role,model.Type,representation,"",method);
+            var il = new CecilCodecIL(method);
+            var literal = GeneratedOutputCodec.LiteralAction(definitions,module,product,encoding,il);
             if (TypeSupport.RawPolymorphicFactory(model.Facts.Shape,model.Facts.AbstractType)) {
-                var nullWriter=GeneratedOutputCodec.Constant(definitions,module,owner,product,encoding,"null","WriteNull"+suffix+index);
-                CodecPolymorphicEmitter.abstractWriter(new CecilCodecIL(method),GeneratedCodec.Api(api),
-                    Polymorphic(definitions,module,owner,product,model,models,encoding,writer,suffix),model.Type,nullWriter);
+                CodecPolymorphicEmitter.abstractWriter(il,GeneratedCodec.Api(api),
+                    Polymorphic(definitions,module,product,encoding,writer),model.Type,
+                    Function<Unit,Unit>(_ => literal.Invoke("null")));
                 return method;
             }
             if (model.Facts.Shape != TypeShape.Object && model.Facts.Shape != TypeShape.Tuple) {
@@ -73,11 +77,10 @@ internal static partial class GeneratedRawCodec
             var serial = 0;
             raw = new CodecRawWriterApi<TypeReference,MethodReference>(module.TypeSystem.Boolean,
                 Function<TypeReference,FSharpOption<MethodReference>>(target => GeneratedChildCodec.WriteCall(definitions,module,owner,product,target,encoding,writer,"WriteChild"+suffix+index+"_"+serial++,models!,false) is { } operation ? FSharpOption<MethodReference>.Some(operation) : null!),
-                Polymorphic(definitions,module,owner,product,model,models,encoding,writer,suffix),
-                GeneratedOutputCodec.Constant(definitions,module,owner,product,encoding,"null","WriteNull"+suffix+index+"_"+serial++),Output("SerializeActual",encoding,writer),
-                GeneratedOutputCodec.Constant(definitions,module,owner,product,encoding,"[","WriteBeginArray"+suffix+index+"_"+serial++),GeneratedOutputCodec.Constant(definitions,module,owner,product,encoding,",","WriteSeparator"+suffix+index+"_"+serial++),GeneratedOutputCodec.Constant(definitions,module,owner,product,encoding,"]","WriteEndArray"+suffix+index+"_"+serial++),
-                GeneratedOutputCodec.Constant(definitions,module,owner,product,encoding,"{","WriteBeginObject"+suffix+index+"_"+serial++),Function<string,MethodReference>(text => GeneratedOutputCodec.Property(definitions,module,owner,product,encoding,text,"WriteLiteral" + suffix + index + "_" + serial++)),Function<TypeReference,MethodReference>(target => GeneratedOutputCodec.TypeLiteral(definitions,module,owner,product,target,encoding,"WriteTypeLiteral"+suffix+index+"_"+serial++)),
-                GeneratedOutputCodec.Constant(definitions,module,owner,product,encoding,"}","WriteEndObject"+suffix+index+"_"+serial++),
+                Polymorphic(definitions,module,product,encoding,writer),
+                literal,Output("SerializeActual",encoding,writer),
+                GeneratedOutputCodec.PropertyAction(definitions,module,product,encoding,il),
+                Function<TypeReference,MethodReference>(target => GeneratedOutputCodec.TypeLiteral(definitions,module,owner,product,target,encoding,"WriteTypeLiteral"+suffix+index+"_"+serial++)),
                 Output("OmitId",encoding,writer),Function<TypeReference,MethodReference>(target => Discard(target,encoding,writer)),
                 Function<TypeReference,MethodReference>(target => Serialize(target,encoding,writer)));
             if (model.Facts.Shape == TypeShape.Tuple)
@@ -89,10 +92,10 @@ internal static partial class GeneratedRawCodec
                 }
                 var scope=new CodecTupleWriterScope<TypeReference,FieldReference>(module.TypeSystem.Boolean,StateField("IncludeType"),StateField("OmitId"),
                     Function<TypeReference,bool>(target=>TypeSupport.TupleMemberScope(TypeSupport.RawPrimitive(target.FullName),GeneratedOptionalCodec.Kind(target,models))));
-                CodecTupleEmitter.rawWriter(new CecilCodecIL(method),raw,scope,GeneratedCodec.Tuple(model,models!));
+                CodecTupleEmitter.rawWriter(il,raw,scope,GeneratedCodec.Tuple(model,models!));
             }
-            else if (exact) CodecRawEmitter.rawBody(new CecilCodecIL(method),GeneratedCodec.Api(api),raw,GeneratedCodec.Model(model));
-            else CodecRawEmitter.rawWriter(new CecilCodecIL(method),GeneratedCodec.Api(api),raw,GeneratedCodec.Model(model),model.Facts.AbstractType ? null! : GeneratedRawCodec.Writer(definitions,module,owner,product,model,index,models,encoding,writer,suffix,true));
+            else if (exact) CodecRawEmitter.rawBody(il,GeneratedCodec.Api(api),raw,GeneratedCodec.Model(model));
+            else CodecRawEmitter.rawWriter(il,GeneratedCodec.Api(api),raw,GeneratedCodec.Model(model),model.Facts.AbstractType ? null! : GeneratedRawCodec.Writer(definitions,module,owner,product,model,index,models,encoding,writer,suffix,true));
         return method;
     }
 
@@ -100,41 +103,28 @@ internal static partial class GeneratedRawCodec
         ILProcessor entry,AssemblyDefinition product,GeneratedModel model,int index,GeneratedModel[] models)
     {
         var api=new GeneratedJsonAssembly.Api(module,product,definitions.Stored);
-        void Writer(TypeReference encoding,string output,string suffix) {
-            var writer=module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator."+output));
-            var body=GeneratedRawCodec.Writer(definitions,module,owner,product,model,index,models,encoding,writer,suffix,false);
-            var callable=new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectWriter`2")));
-            callable.GenericArguments.Add(module.ImportReference(model.Type));callable.GenericArguments.Add(module.ImportReference(encoding));
-            var constructor=new MethodReference(".ctor",module.TypeSystem.Void,callable){HasThis=true};
-            constructor.Parameters.Add(new ParameterDefinition(module.TypeSystem.Object));constructor.Parameters.Add(new ParameterDefinition(module.TypeSystem.IntPtr));
-            entry.Emit(OpCodes.Ldnull);entry.Emit(OpCodes.Ldftn,body);entry.Emit(OpCodes.Newobj,constructor);
+        foreach(var kind in GeneratedJsonDefinitions.Outputs) {
+            var writes = definitions.OutputView(kind);
+            foreach(var encoding in new[] {module.TypeSystem.Byte,module.TypeSystem.Char}) {
+                var output = writes.OutputType(module,product,encoding);
+                var body = GeneratedRawCodec.Writer(writes,module,owner,product,model,index,models,encoding,output,encoding.FullName == "System.Char" ? "Utf16" : "Utf8",false);
+                var callable = new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectWriter`2")));
+                callable.GenericArguments.Add(module.ImportReference(model.Type));callable.GenericArguments.Add(module.ImportReference(encoding));
+                GeneratedJsonAssembly.Delegate(entry,callable,body);
+            }
+            GeneratedJsonAssembly.BoxedWriters(definitions,module,owner,entry,product,model.Type);
+            entry.Emit(OpCodes.Call,api.Metadata("RegisterOutputWriters",model.Type,writes.OutputType(module,product,module.TypeSystem.Byte),writes.OutputType(module,product,module.TypeSystem.Char)));
         }
-        Writer(module.TypeSystem.Byte,"JsonUtf8Writer","Utf8");
-        Writer(module.TypeSystem.Char,"JsonUtf16Writer","Utf16");
-        entry.Emit(OpCodes.Call,api.Metadata("RegisterRawWriters",model.Type));
     }
 
-    private static CodecPolymorphicApi<TypeReference,MethodReference> Polymorphic(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,
-        AssemblyDefinition product,GeneratedModel model,GeneratedModel[] models,TypeReference encoding,TypeReference output,string suffix)
+    private static CodecPolymorphicApi<TypeReference,MethodReference> Polymorphic(GeneratedJsonDefinitions definitions,ModuleDefinition module,
+        AssemblyDefinition product,TypeReference encoding,TypeReference output)
     {
         var api=new GeneratedJsonAssembly.Api(module,product,definitions.Stored);
         var raw=api.RawType("JsonRawOutput",encoding,output);
         MethodReference Method(string name) {var result=module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonRawOutput`3").Methods.Single(method=>method.Name==name));result.DeclaringType=raw;return result;}
         var runtimeType=module.ImportReference(GeneratedCodec.Api(api).TypeFromHandle.ReturnType);
         var equals=new MethodReference("Equals",module.TypeSystem.Boolean,runtimeType){HasThis=true};equals.Parameters.Add(new ParameterDefinition(runtimeType));
-        return new CodecPolymorphicApi<TypeReference,MethodReference>(runtimeType,equals,Method("IncludeType"),Method("SetIncludeType"),Method("Actual"),
-            Function<TypeReference,CodecKnownWriter<TypeReference,MethodReference>[]>(declared=>models.Select((candidate,index)=>(candidate,index))
-                .Where(item=>TypeSupport.KnownWriterCandidate(item.candidate.Facts.AbstractType,GeneratedJsonDefinitions.SameType(item.candidate.Type,declared)) &&
-                    (item.candidate.AssignableTo.Any(target=>GeneratedJsonDefinitions.SameType(target,declared)) ||
-                    item.candidate.UnknownInterfaces.Any(target=>GeneratedJsonDefinitions.SameType(target,declared))))
-                .Select(item=> {
-                    var candidate=item.candidate;
-                    var candidateDefinitions=TypeSupport.PolymorphicNative(definitions.Stored,candidate.Type.FullName)
-                        ? definitions.NativeView : definitions;
-                    var body=GeneratedChildCodec.WriteCall(candidateDefinitions,module,owner,product,candidate.Type,encoding,output,"WriteKnown"+suffix+item.index,models,false)
-                        ?? Writer(definitions,module,owner,product,candidate,item.index,models,encoding,output,suffix,true);
-                    return new CodecKnownWriter<TypeReference,MethodReference>(candidate.Type,candidate.Facts.ValueType,body);
-                }).ToArray()));
+        return new CodecPolymorphicApi<TypeReference,MethodReference>(runtimeType,equals,Method("IncludeType"),Method("SetIncludeType"),Method("Actual"));
     }
-
 }

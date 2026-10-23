@@ -170,7 +170,7 @@ module NativeSQLiteTools =
             queryFirstOrDefault<'T> this sql parameters
         /// Direct typed mapping avoids dynamic mapper discovery and expression compilation.
         [<Extension>]
-        static member Query<'T>(this: NativeSqliteConnection, sql: string, map: Func<SqlRow, 'T>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+        static member internal Query<'T>(this: NativeSqliteConnection, sql: string, map: Func<SqlRow, 'T>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             if isNull map then nullArg "map"
             seq {
                 raiseIfHandlerFaultRecorded this
@@ -184,10 +184,10 @@ module NativeSQLiteTools =
         static member Query<'T1, 'T2, 'TReturn>(this: NativeSqliteConnection, sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) =
             multiQuery<'T1, 'T2, 'TReturn> this sql map parameters splitOn
         [<Extension>]
-        static member Execute<'Input, 'State>(this: NativeSqliteConnection, sql: string, plan: SqlParameterPlan<'Input, 'State>, input: 'Input) =
+        static member internal Execute<'Input, 'State>(this: NativeSqliteConnection, sql: string, plan: SqlParameterPlan<'Input, 'State>, input: 'Input) =
             withHandlerFaultWrap this (fun () -> this.ExecuteSql(sql, plan, input))
         [<Extension>]
-        static member Query<'T, 'Input, 'State>(this: NativeSqliteConnection, sql: string, plan: SqlParameterPlan<'Input, 'State>, input: 'Input) =
+        static member internal Query<'T, 'Input, 'State>(this: NativeSqliteConnection, sql: string, plan: SqlParameterPlan<'Input, 'State>, input: 'Input) =
             seq {
                 raiseIfHandlerFaultRecorded this
                 let mutable rows = this.AcquireScript(sql, plan, input)
@@ -200,7 +200,7 @@ module NativeSQLiteTools =
                 finally rows.Dispose()
             }
         [<Extension>]
-        static member QueryFirst<'T, 'Input, 'State>(this: NativeSqliteConnection, sql: string, plan: SqlParameterPlan<'Input, 'State>, input: 'Input) =
+        static member internal QueryFirst<'T, 'Input, 'State>(this: NativeSqliteConnection, sql: string, plan: SqlParameterPlan<'Input, 'State>, input: 'Input) =
             withHandlerFaultWrap this (fun () ->
                 let mutable statement = this.OpenStatement(sql)
                 let mutable result = Unchecked.defaultof<'T>

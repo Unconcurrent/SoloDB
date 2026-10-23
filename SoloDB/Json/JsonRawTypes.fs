@@ -29,7 +29,7 @@ type internal JsonDirectRuntimeReader<'R when 'R : struct and 'R :> IJsonReader>
     delegate of byref<JsonReadContext<'R>> -> obj
 
 type internal JsonDirectWriter<'T,'Element> =
-    delegate of 'T * byref<Span<'Element>> * byref<JsonWriteState<'Element>> -> unit
+    delegate of byref<'T> * byref<Span<'Element>> * byref<JsonWriteState<'Element>> -> unit
 
 type internal JsonDirectRuntimeWriter<'Element> =
     delegate of obj * byref<Span<'Element>> * byref<JsonWriteState<'Element>> -> unit

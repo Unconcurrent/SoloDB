@@ -315,11 +315,65 @@ public static partial class GeneratedJsonAssembly
 
     internal static void Delegate(ILProcessor il, GenericInstanceType type, MethodReference method)
     {
+        if(type.ElementType.Name=="JsonDirectWriter`2" && method.Parameters[0].ParameterType is not ByReferenceType)
+        {
+            var module=il.Body.Method.Module;
+            var adapter=new MethodDefinition(method.Name+"Ref"+il.Body.Method.DeclaringType.Methods.Count,MethodAttributes.Assembly|MethodAttributes.Static|MethodAttributes.HideBySig,module.TypeSystem.Void);
+            adapter.Parameters.Add(new ParameterDefinition(new ByReferenceType(module.ImportReference(type.GenericArguments[0]))));
+            var arguments=method is GenericInstanceMethod closed?closed.GenericArguments.ToArray():Array.Empty<TypeReference>();
+            foreach(var parameter in method.Parameters.Skip(1))adapter.Parameters.Add(new ParameterDefinition(module.ImportReference(OriginalArgumentSources.Close(parameter.ParameterType,method.DeclaringType,arguments))));
+            il.Body.Method.DeclaringType.Methods.Add(adapter);
+            var body=adapter.Body.GetILProcessor();body.Emit(OpCodes.Ldarg_0);body.Emit(OpCodes.Ldobj,module.ImportReference(type.GenericArguments[0]));
+            body.Emit(OpCodes.Ldarg_1);body.Emit(OpCodes.Ldarg_2);body.Emit(OpCodes.Call,module.ImportReference(method));body.Emit(OpCodes.Ret);
+            method=adapter;
+        }
         il.Emit(OpCodes.Ldnull); il.Emit(OpCodes.Ldftn, method);
         var ctor = new MethodReference(".ctor", il.Body.Method.Module.TypeSystem.Void, type) { HasThis = true };
         ctor.Parameters.Add(new ParameterDefinition(il.Body.Method.Module.TypeSystem.Object));
         ctor.Parameters.Add(new ParameterDefinition(il.Body.Method.Module.TypeSystem.IntPtr));
         il.Emit(OpCodes.Newobj, ctor);
+    }
+
+    internal static void BoxedWriters(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,
+        ILProcessor entry,AssemblyDefinition product,TypeReference target)
+    {
+        GenericInstanceType Callable(string name,TypeReference element)
+        {
+            var type=new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator."+name)));
+            type.GenericArguments.Add(module.ImportReference(target));type.GenericArguments.Add(element);return type;
+        }
+        var byteWriter=Callable("JsonDirectWriter`2",module.TypeSystem.Byte);
+        var charWriter=Callable("JsonDirectWriter`2",module.TypeSystem.Char);
+        var bytes=new VariableDefinition(byteWriter);var chars=new VariableDefinition(charWriter);
+        entry.Body.Variables.Add(bytes);entry.Body.Variables.Add(chars);entry.Body.InitLocals=true;
+        entry.Emit(OpCodes.Stloc,chars);entry.Emit(OpCodes.Stloc,bytes);
+        entry.Emit(OpCodes.Ldloc,bytes);entry.Emit(OpCodes.Ldloc,chars);
+        foreach(var element in new[]{module.TypeSystem.Byte,module.TypeSystem.Char})
+        {
+            var typed=element.MetadataType==MetadataType.Byte?byteWriter:charWriter;
+            var runtime=new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectRuntimeWriter`1")));
+            runtime.GenericArguments.Add(element);
+            if(!definitions.TryGet("boxed-writer",target,element,"",out var bridge))
+            {
+                var original=product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectWriter`2").Methods.Single(method=>method.Name=="Invoke");
+                var span=(GenericInstanceType)((ByReferenceType)original.Parameters[1].ParameterType).ElementType;
+                var state=(GenericInstanceType)((ByReferenceType)original.Parameters[2].ParameterType).ElementType;
+                TypeReference Closed(GenericInstanceType type)
+                {
+                    var closed=new GenericInstanceType(module.ImportReference(type.ElementType));closed.GenericArguments.Add(element);return new ByReferenceType(closed);
+                }
+                bridge=new MethodDefinition(definitions.MethodName("WriteBoxed"),MethodAttributes.Assembly|MethodAttributes.Static|MethodAttributes.HideBySig,module.TypeSystem.Void);
+                foreach(var argument in new[]{(TypeReference)typed,module.TypeSystem.Object,Closed(span),Closed(state)})bridge.Parameters.Add(new ParameterDefinition(argument));
+                owner.Methods.Add(bridge);definitions.Add("boxed-writer",target,element,"",bridge);
+                var invoke=module.ImportReference(original);invoke.DeclaringType=typed;
+                CodecEmitter.boxedRawWriter(new CecilCodecIL(bridge),target,target.IsValueType,invoke);
+            }
+            entry.Emit(OpCodes.Ldloc,element.MetadataType==MetadataType.Byte?bytes:chars);
+            entry.Emit(OpCodes.Ldftn,bridge);
+            var constructor=new MethodReference(".ctor",module.TypeSystem.Void,runtime){HasThis=true};
+            constructor.Parameters.Add(new ParameterDefinition(module.TypeSystem.Object));constructor.Parameters.Add(new ParameterDefinition(module.TypeSystem.IntPtr));
+            entry.Emit(OpCodes.Newobj,constructor);
+        }
     }
 
 }

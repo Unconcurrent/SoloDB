@@ -23,6 +23,7 @@
     <VersionPrefix>1.4.0</VersionPrefix>
     <EnablePackageValidation>true</EnablePackageValidation>
     <LangVersion>10</LangVersion>
+    <CompressMetadata>false</CompressMetadata>
     <Deterministic>false</Deterministic>
 	<GenerateDocumentationFile>true</GenerateDocumentationFile>
 	<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
@@ -469,6 +470,8 @@
   <ItemGroup>
     <None Include="../SoloDB.Metadata.Tools/SoloDB.targets;../SoloDB.Metadata.Tools/SoloDB.Metadata.targets;../SoloDB.Metadata.Tools/SoloDB.FSharp.Context.targets;../SoloDB.Metadata.Tools/SoloDB.NativeMetadata.targets"
           Pack="true" PackagePath="buildTransitive" />
+    <None Include="../SoloDB.Metadata.Tools/SoloDB.Unsupported.cs;../SoloDB.Metadata.Tools/SoloDB.Unsupported.fs"
+          Pack="true" PackagePath="buildTransitive" />
   </ItemGroup>
 
   <Target Name="SoloDBCollectMetadataTools" BeforeTargets="_GetPackageFiles">
@@ -477,7 +480,7 @@
     </ReadLinesFromFile>
     <ItemGroup>
       <None Include="../SoloDB.Metadata.CSharp/bin/$(Configuration)/netstandard2.0/SoloDB.Metadata.CSharp.dll;../SoloDB.Metadata.CSharp/bin/$(Configuration)/netstandard2.0/SoloDB.Metadata.Codecs.dll;../SoloDB.Metadata.CSharp/bin/$(Configuration)/netstandard2.0/FSharp.Core.dll"
-            Pack="true" PackagePath="analyzers/dotnet/cs" />
+            Pack="true" PackagePath="tools/netstandard2.0/csharp" />
       <None Include="../SoloDB.Metadata.FSharp/bin/$(Configuration)/netstandard2.0/%(_SoloDBFSharpFile.Identity)"
             Pack="true" PackagePath="tools/netstandard2.0/%(_SoloDBFSharpFile.Identity)" />
       <None Include="../SoloDB.Metadata.FSharp/FSharp.TypeProviders.SDK.LICENSE.txt"
@@ -486,7 +489,7 @@
   </Target>
 
   <ItemGroup>
-    <PackageReference Update="FSharp.Core" Version="8.0.100" />
+    <PackageReference Update="FSharp.Core" Version="6.0.7" />
   </ItemGroup>
 
 </Project>

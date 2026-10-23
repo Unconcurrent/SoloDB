@@ -239,16 +239,16 @@ module internal QueryStructuralShape =
             if comma then JsonWriteBuffer.append &destination &state ','
             comma <- true
             JsonWriteBuffer.append &destination &state '['
-            JsonRawNumericWriter.int64Utf16 (int64 item.Parent) &destination &state
+            JsonRawNumericWriter.int64Utf16 (JsonUtf16Output()) (int64 item.Parent) &destination &state
             JsonWriteBuffer.append &destination &state ','
-            JsonRawNumericWriter.int64Utf16 (int64 item.Ordinal) &destination &state
+            JsonRawNumericWriter.int64Utf16 (JsonUtf16Output()) (int64 item.Ordinal) &destination &state
             JsonWriteBuffer.append &destination &state ','
             JsonOutputOperations.literal (Unchecked.defaultof<JsonUtf16Writer>) (if isNull value then "true" else "false") &destination &state
             match node.Kind with
             | ScalarNode ->
                 JsonWriteBuffer.append &destination &state ','
                 if typeof<char>.Equals node.Target then
-                    JsonRawNumericWriter.int64Utf16 (int64(unbox<char> value)) &destination &state
+                    JsonRawNumericWriter.int64Utf16 (JsonUtf16Output()) (int64(unbox<char> value)) &destination &state
                 elif typeof<string>.Equals node.Target then
                     let encoded = if isNull value then null else Convert.ToBase64String(QueryTranslatorCharacters.ordinalBytes(unbox<string> value))
                     JsonRawPrimitive.WriteString<char,JsonUtf16Writer>(encoded,&destination,&state)

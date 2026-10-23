@@ -7,13 +7,14 @@ type internal CodecBigIntegerWriterApi<'Type,'Method,'Field> = {
     Prepared: 'Type
     UInt32Array: 'Type
     Prepare: 'Method
+    Validate: 'Method
     Sign: 'Method
     Count: 'Method
     Chunks: 'Method
 }
 
 module internal CodecBigIntegerWriterEmitter =
-    let writer (il: CodecIL<'T,'M,'F>) (api: CodecBigIntegerWriterApi<'T,'M,'F>) utf16 =
+    let private outputWriter (il: CodecIL<'T,'M,'F>) (api: CodecBigIntegerWriterApi<'T,'M,'F>) utf16 =
         let output = api.Output
         let prepared = il.Local api.Prepared
         let negative = il.Local output.Int32
@@ -27,7 +28,7 @@ module internal CodecBigIntegerWriterEmitter =
         let context () = il.Emit OpCodes.Ldarg_2
         let zero = il.Label()
         let complete = il.Label()
-        il.Emit OpCodes.Ldarg_0; il.EmitMethod(OpCodes.Call,api.Prepare); save prepared
+        il.InputValue(); il.EmitMethod(OpCodes.Call,api.Prepare); save prepared
         il.EmitLocal(OpCodes.Ldloca,prepared); il.EmitMethod(OpCodes.Call,api.Sign)
         il.Emit OpCodes.Dup; il.EmitBranch(OpCodes.Brfalse,zero)
         constant 0; il.Emit OpCodes.Clt; save negative
@@ -55,27 +56,28 @@ module internal CodecBigIntegerWriterEmitter =
             store(fun () -> constant(int '-'))
             il.Mark positive
             CodecMagnitudeEmitter.decimalDigits il chunks store
-        let list = il.Label()
-        let discarded = il.Label()
         let selected = CodecOutputEmitter.beginOperation il output context (fun () -> load length)
-        il.Emit OpCodes.Dup; il.EmitBranch(OpCodes.Brfalse,discarded)
-        constant 1; il.EmitBranch(OpCodes.Bne_Un,list)
-        CodecOutputEmitter.admitSpan il output selected destination context
-        destination(); il.EmitMethod(OpCodes.Call,output.Start); save reference
-        context(); il.EmitMethod(OpCodes.Call,output.Position); save position
-        body(fun value ->
-            CodecOutputEmitter.store il output utf16 reference (fun () -> load position) value
-            load position; constant 1; il.Emit OpCodes.Add; save position)
-        context(); load length; il.EmitMethod(OpCodes.Call,output.Advance)
-        il.EmitBranch(OpCodes.Br,complete)
-        il.Mark list
-        CodecOutputEmitter.listBody il output utf16 selected context false None (Some (fun () -> load length)) body
+        if output.Kind = CodecOutputKind.Span then
+            CodecOutputEmitter.admitSpan il output selected destination context
+            destination(); il.EmitMethod(OpCodes.Call,output.Start); save reference
+            context(); il.EmitMethod(OpCodes.Call,output.Position); save position
+            body(fun value ->
+                CodecOutputEmitter.store il output utf16 reference (fun () -> load position) value
+                load position; constant 1; il.Emit OpCodes.Add; save position)
+            context(); load length; il.EmitMethod(OpCodes.Call,output.Advance)
+        elif output.Kind <> CodecOutputKind.Validation then
+            CodecOutputEmitter.listBody il output utf16 context body
         il.EmitBranch(OpCodes.Br,complete)
         il.Mark zero
         il.Emit OpCodes.Pop
         CodecOutputEmitter.literal il output utf16 [|48|] destination context
         il.EmitBranch(OpCodes.Br,complete)
-        il.Mark discarded
-        il.Emit OpCodes.Pop
         il.Mark complete
         il.Emit OpCodes.Ret
+
+    let writer (il: CodecIL<'T,'M,'F>) (api: CodecBigIntegerWriterApi<'T,'M,'F>) utf16 =
+        if api.Output.Kind = CodecOutputKind.Validation then
+            il.InputValue()
+            il.EmitMethod(OpCodes.Call,api.Validate)
+            il.Emit OpCodes.Ret
+        else outputWriter il api utf16

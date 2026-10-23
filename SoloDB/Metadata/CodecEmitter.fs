@@ -3,6 +3,45 @@ namespace SoloDatabase.Metadata.CodecGeneration
 open System.Reflection.Emit
 
 module internal CodecEmitter =
+    let internal boxedRawWriter (il: CodecIL<'T,'M,'F>) target valueType invoke =
+        il.Emit OpCodes.Ldarg_0
+        il.Emit OpCodes.Ldarg_1
+        if valueType then il.EmitType(OpCodes.Unbox,target)
+        else
+            il.EmitType(OpCodes.Castclass,target)
+            let value = il.Local target
+            il.EmitLocal(OpCodes.Stloc,value)
+            il.EmitLocal(OpCodes.Ldloca,value)
+        il.Emit OpCodes.Ldarg_2
+        il.Emit OpCodes.Ldarg_3
+        il.EmitMethod(OpCodes.Callvirt,invoke)
+        il.Emit OpCodes.Ret
+
+    let internal callLocal (il: CodecIL<'T,'M,'F>) method index local =
+        il.EmitLocal((if il.ByRefParameter(method,index) then OpCodes.Ldloca else OpCodes.Ldloc),local)
+
+    let internal readLocal (il: CodecIL<'T,'M,'F>) method arguments local =
+        arguments()
+        if il.ResultParameter method then il.EmitLocal(OpCodes.Ldloca,local)
+        il.EmitMethod(OpCodes.Call,method)
+        if not(il.ResultParameter method) then il.EmitLocal(OpCodes.Stloc,local)
+
+    let internal readValue (il: CodecIL<'T,'M,'F>) method target arguments =
+        if il.ResultParameter method then
+            let value = il.Local target
+            readLocal il method arguments value
+            il.EmitLocal(OpCodes.Ldloc,value)
+        else
+            arguments()
+            il.EmitMethod(OpCodes.Call,method)
+
+    let internal loadRawMember (il: CodecIL<'T,'M,'F>) valueType (memberValue: CodecMember<'T,'M,'F>) =
+        if not memberValue.Static then
+            if valueType then il.InputAddress() else il.InputValue()
+        match memberValue.Field, memberValue.Getter with
+        | Some field, _ -> il.EmitField((if memberValue.Static then OpCodes.Ldsfld else OpCodes.Ldfld),field)
+        | _, Some getter -> il.EmitMethod((if valueType || memberValue.Static then OpCodes.Call else OpCodes.Callvirt),getter)
+        | _ -> invalidOp "A stored JSON member has no getter."
     let writtenMembers (model: CodecModel<'T,'M,'F>) =
         model.Members
         |> Array.mapi (fun index memberValue -> index, memberValue)

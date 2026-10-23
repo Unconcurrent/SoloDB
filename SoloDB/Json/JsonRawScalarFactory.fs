@@ -28,17 +28,19 @@ type internal JsonRawScalarWriter =
     static member Create<'T,'E,'O when 'O : struct and 'O :> IJsonValueOutput<'E>>(): JsonDirectWriter<'T,'E> voption =
         let convert (writer: Delegate) = ValueSome(writer :?> JsonDirectWriter<'T,'E>)
         if (SoloDatabase.Metadata.Generation.TypeSupport.NumericWriterCore typeof<'T>.FullName).IsSome then
-            ValueSome(JsonWriterRuntime.writer<'T,'E>())
+            ValueSome(JsonWriterRuntime.writer<'T,'E,'O>())
         else
         match SoloDatabase.Metadata.Generation.TypeSupport.RawPrimitive typeof<'T>.FullName with
-        | "Boolean" -> convert((JsonWriterRuntime.boolean typeof<'E>).CreateDelegate(typeof<JsonDirectWriter<bool,'E>>))
-        | "String" -> convert((JsonWriterRuntime.text typeof<'E>).CreateDelegate(typeof<JsonDirectWriter<string,'E>>))
-        | "Bytes" -> convert((JsonWriterRuntime.bytes typeof<'E>).CreateDelegate(typeof<JsonDirectWriter<byte[],'E>>))
-        | "Guid" -> convert((JsonWriterRuntime.guid typeof<'E>).CreateDelegate(typeof<JsonDirectWriter<Guid,'E>>))
+        | "Boolean" -> convert((JsonWriterRuntime.boolean typeof<'E> typeof<'O>).CreateDelegate(typeof<JsonDirectWriter<bool,'E>>))
+        | "String" -> convert((JsonWriterRuntime.text typeof<'E> typeof<'O>).CreateDelegate(typeof<JsonDirectWriter<string,'E>>))
+        | "Bytes" -> convert((JsonWriterRuntime.bytes typeof<'E> typeof<'O>).CreateDelegate(typeof<JsonDirectWriter<byte[],'E>>))
+        | "Guid" -> convert((JsonWriterRuntime.guid typeof<'E> typeof<'O>).CreateDelegate(typeof<JsonDirectWriter<Guid,'E>>))
         | _ when SoloDatabase.Metadata.Generation.TypeSupport.SequenceBytes(typeof<'T>.IsArray,
                      (if typeof<System.Collections.Generic.IEnumerable<byte>>.IsAssignableFrom typeof<'T> then "System.Byte" else "")) ->
-            let writer = JsonWriterRuntime.sequenceBytes<'E>()
+            let writer = JsonWriterRuntime.sequenceBytes<'E,'O>()
             ValueSome(JsonDirectWriter<'T,'E>(fun value destination state ->
                 if isNull(box value) then JsonOutputOperations.literal Unchecked.defaultof<'O> "null" &destination &state
-                else writer.Invoke(Seq.toArray(box value :?> seq<byte>),&destination,&state)))
+                else
+                    let mutable bytes = Seq.toArray(box value :?> seq<byte>)
+                    writer.Invoke(&bytes,&destination,&state)))
         | _ -> ValueNone
