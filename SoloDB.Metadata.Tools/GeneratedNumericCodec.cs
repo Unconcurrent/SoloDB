@@ -88,6 +88,16 @@ internal static class GeneratedNumericCodec
             else CodecIntegerEmitter.decimalReader(new CecilCodecIL(leaf),integerApi,width,plan.Signed,utf16,plan.Native);
             return leaf;
         }
+        MethodDefinition PredicateLeaf(bool hex)
+        {
+            var role = hex ? "predicate-hex" : "predicate-decimal";
+            if (definitions.TryGet(role,core,reader,"",out var existingLeaf)) return existingLeaf;
+            var leaf = Body(hex ? "Hex" : "Decimal",rawArguments);
+            definitions.Add(role,core,reader,"",leaf);
+            if (hex) CodecNumericBooleanEmitter.hexReader(new CecilCodecIL(leaf),integerApi,utf16);
+            else CodecNumericBooleanEmitter.decimalReader(new CecilCodecIL(leaf),integerApi,utf16);
+            return leaf;
+        }
         MethodDefinition SelectWidth(bool hex)
         {
             if (!plan.DeferredWidth) return Leaf(plan.Width,hex);
@@ -166,10 +176,8 @@ internal static class GeneratedNumericCodec
                 CodecNumericTextEmitter.hexReader(new CecilCodecIL(hexRead),textApi,textMagnitude,new ArrayType(module.TypeSystem.UInt32),utf16);
                 break;
             case NumericKind.Predicate:
-                decimalRead = Body("Decimal",rawArguments);
-                CodecNumericBooleanEmitter.decimalReader(new CecilCodecIL(decimalRead),integerApi,utf16);
-                hexRead = Body("Hex",rawArguments);
-                CodecNumericBooleanEmitter.hexReader(new CecilCodecIL(hexRead),integerApi,utf16);
+                decimalRead = PredicateLeaf(false);
+                hexRead = PredicateLeaf(true);
                 break;
             case NumericKind.ArbitraryInteger:
                 var construction=product.MainModule.GetType("SoloDatabase.Numerics.BigIntegerMagnitude");

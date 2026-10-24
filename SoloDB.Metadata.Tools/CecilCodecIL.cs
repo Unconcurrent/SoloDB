@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using Microsoft.FSharp.Core;
 using SoloDatabase.Metadata.CodecGeneration;
 using EmitCode = System.Reflection.Emit.OpCode;
 
@@ -15,11 +16,13 @@ internal sealed class CecilCodecIL : CodecIL<TypeReference, MethodReference, Fie
         .Select(field => (OpCode)field.GetValue(null)!)
         .ToDictionary(code => code.Value);
     private readonly ILProcessor il;
+    private readonly Action<string>? access;
     private readonly List<Instruction> labels = new();
     private readonly Stack<(Instruction Start, Instruction End, List<ExceptionHandler> Handlers)> regions = new();
     private ModuleDefinition Module => il.Body.Method.Module;
 
-    internal CecilCodecIL(MethodDefinition method) { il = method.Body.GetILProcessor(); }
+    internal CecilCodecIL(MethodDefinition method, Action<string>? access = null)
+    { il = method.Body.GetILProcessor(); this.access = access; }
     public override void InputValue()
     {
         il.Emit(OpCodes.Ldarg_0);
@@ -33,6 +36,25 @@ internal sealed class CecilCodecIL : CodecIL<TypeReference, MethodReference, Fie
     }
     public override bool ByRefParameter(MethodReference method,int index) => method.Parameters[index].ParameterType is ByReferenceType;
     public override bool ResultParameter(MethodReference method) => method.ReturnType.MetadataType==MetadataType.Void && method.Parameters.Count==2 && method.Parameters[1].ParameterType is ByReferenceType;
+    public override FSharpOption<FieldReference> PropertyStorage(MethodReference method)
+    {
+        var getter = Module.MetadataResolver.Resolve(method);
+        if (!getter.HasThis || !getter.HasBody) return null!;
+        var instructions = getter.Body.Instructions;
+        var direct = instructions.Count == 3 && instructions[0].OpCode == OpCodes.Ldarg_0 &&
+            instructions[1].OpCode == OpCodes.Ldfld && instructions[2].OpCode == OpCodes.Ret;
+        if (!direct || instructions[1].Operand is not FieldReference field) return null!;
+        var definition = field.Resolve();
+        if (!CodecMemberStorage.allowed(direct,getter.IsVirtual,getter.IsFinal,getter.DeclaringType.IsSealed,
+            definition.IsStatic,definition.IsInitOnly || definition.IsLiteral,
+            GeneratedJsonDefinitions.SameType(definition.DeclaringType,getter.DeclaringType),
+            GeneratedJsonDefinitions.SameType(OriginalArgumentSources.Close(field.FieldType,method.DeclaringType),
+                OriginalArgumentSources.Close(method.ReturnType,method.DeclaringType)),getter.IsSynchronized)) return null!;
+        access?.Invoke(definition.Module.Assembly.Name.Name);
+        var storage = Module.ImportReference(definition);
+        storage.DeclaringType = Module.ImportReference(method.DeclaringType);
+        return FSharpOption<FieldReference>.Some(Module.ImportReference(storage));
+    }
     public override void Emit(EmitCode code) => il.Emit(Codes[code.Value]);
     // ECMA-335 III: compact argument/local aliases retain the original slot.
     private static OpCode Slot(OpCode code, int value) => code.Code switch

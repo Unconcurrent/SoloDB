@@ -202,16 +202,20 @@ internal static class GeneratedOutputCodec
     internal static MethodDefinition StoredNumber(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,
         AssemblyDefinition product,TypeReference target,TypeReference element,string name)
     {
-        if(definitions.TryGet("stored-number-write",target,element,"",out var existing))return existing;
         var api = new GeneratedJsonAssembly.Api(module,product,true);
-        var method=Body(definitions,module,owner,product,element,target,name);
-        var prepared=module.ImportReference(api.Operation("JsonStoredNumeric","PrepareDecimal").ReturnType);
         var prepare=CodecNumericPreparation.writer(target.FullName,true,null!).StoredOperation.Value;
+        var preparation=api.Operation("JsonStoredNumeric",prepare);
+        var input=preparation.Parameters[0].ParameterType.GetElementType();
+        if (!SourceTypeIdentity.SameSignature(target,input,module.AssemblyResolver))
+            throw new InvalidOperationException("The stored numeric input differs from its original preparation signature: " + target.FullName);
+        if(definitions.TryGet("stored-number-write",input,element,prepare,out var existing))return existing;
+        var method=Body(definitions,module,owner,product,element,input,name);
+        var prepared=module.ImportReference(api.Operation("JsonStoredNumeric","PrepareDecimal").ReturnType);
         var facts=new CodecStoredNumericApi<TypeReference,MethodReference,FieldReference>(Api(definitions,module,product,element),prepared,
-            api.Operation("JsonStoredNumeric",prepare),api.Operation("JsonStoredNumeric","Validate"+prepare.Substring("Prepare".Length)),
+            preparation,api.Operation("JsonStoredNumeric","Validate"+prepare.Substring("Prepare".Length)),
             api.Operation("JsonStoredNumeric","Length"),api.Operation("JsonStoredNumeric","Utf8Length"),api.Operation("JsonStoredNumeric","Unit"));
         CodecStoredNumericEmitter.writer(new CecilCodecIL(method),facts,element.FullName=="System.Char");
-        definitions.Add("stored-number-write",target,element,"",method);
+        definitions.Add("stored-number-write",input,element,prepare,method);
         return method;
     }
 

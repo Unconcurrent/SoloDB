@@ -149,7 +149,7 @@ Some F# union field accessors need a metadata flag correction for NativeAOT quot
 
 Direct JSON operations share model conversion policies across ordinary execution and generated support.
 
-`JsonValue.ParseInto<T>` reads a string, `ReadOnlySpan<byte>` containing UTF-8, or `ReadOnlySpan<char>` containing UTF-16 directly into a supported type. `JsonValue.WriteJson<T>` writes that type to a destination. Existing `Serialize<T>` still returns a `JsonValue` tree, and `Parse` still creates a tree. Writers take the model by `ref`, including class references. Mutable struct getters operate on that supplied location; values returned by properties are captured once before their child writer runs. `ParseInto<T>` keeps its returning API.
+`JsonValue.ParseInto<T>` reads a string, `ReadOnlySpan<byte>` containing UTF-8, or `ReadOnlySpan<char>` containing UTF-16 directly into a supported type. `JsonValue.WriteJson<T>` writes that type to a destination. Existing `Serialize<T>` still returns a `JsonValue` tree, and `Parse` still creates a tree. Writers take the model by `ref`, including class references. Mutable struct getters operate on that supplied location. Writers borrow proven mutable auto-property backing storage, so child getter mutations persist there; computed, effectful and readonly property results are captured once before their child writer runs. `ParseInto<T>` keeps its returning API.
 
 The overloads below use C# API notation:
 

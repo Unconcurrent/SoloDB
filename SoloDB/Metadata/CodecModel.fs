@@ -9,6 +9,7 @@ type internal CodecIL<'Type, 'Method, 'Field>() =
     abstract InputAddress: unit -> unit
     abstract ByRefParameter: 'Method * int -> bool
     abstract ResultParameter: 'Method -> bool
+    abstract PropertyStorage: 'Method -> 'Field option
     abstract Emit: OpCode -> unit
     abstract EmitInt: OpCode * int -> unit
     abstract EmitInt64: int64 -> unit
@@ -28,6 +29,12 @@ type internal CodecIL<'Type, 'Method, 'Field>() =
     abstract Finally: unit -> unit
     abstract Catch: 'Type -> unit
     abstract EndException: unit -> unit
+
+/// Original direct getters can expose writable storage without changing property identity.
+module internal CodecMemberStorage =
+    let allowed (directRead, isVirtual, isFinal, sealedOwner, fieldStatic, fieldReadonly, sameOwner, sameType, synchronizedGetter) =
+        directRead && (not isVirtual || isFinal || sealedOwner) &&
+        not fieldStatic && not fieldReadonly && sameOwner && sameType && not synchronizedGetter
 
 /// Expands byte addressing from admitted element offsets at the target native width.
 module internal CodecAddressEmitter =

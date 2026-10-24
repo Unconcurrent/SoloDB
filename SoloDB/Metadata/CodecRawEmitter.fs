@@ -22,14 +22,27 @@ module internal CodecRawEmitter =
             let opening = members.Length > 0 && model.Members[members[0]].Name <> "Id"
             if not opening then output.Literal "{"
             let mutable names = Set.empty
+            let storage memberValue call =
+                if not memberValue.Writable || memberValue.Name = "$type" || not(il.ByRefParameter(call,0)) then None
+                else
+                    match memberValue.Field,memberValue.Getter,memberValue.Setter with
+                    | Some field,_,_ -> Some field
+                    | _,Some getter,Some _ -> il.PropertyStorage getter
+                    | _ -> None
+            let address field =
+                if model.ValueType then il.InputAddress() else il.InputValue()
+                il.EmitField(OpCodes.Ldflda,field)
             for index in members do
                 let memberValue = model.Members[index]
                 let discard () =
-                    let value = il.Local memberValue.Type
-                    loadRawMember il model.ValueType memberValue
-                    il.EmitLocal(OpCodes.Stloc,value)
                     let call = output.Discard memberValue.Type
-                    callLocal il call 0 value
+                    match storage memberValue call with
+                    | Some field -> address field
+                    | None ->
+                        let value = il.Local memberValue.Type
+                        loadRawMember il model.ValueType memberValue
+                        il.EmitLocal(OpCodes.Stloc,value)
+                        callLocal il call 0 value
                     il.EmitMethod(OpCodes.Call,call)
                 let next = il.Label()
                 let optionalId = memberValue.Name = "Id" && not(names.Contains memberValue.Name)
@@ -54,16 +67,15 @@ module internal CodecRawEmitter =
                         il.Emit OpCodes.Ldc_I4_1
                         il.EmitLocal(OpCodes.Stloc,comma)
                     let call = match output.Operation memberValue.Type with Some call -> call | None -> output.Serialize memberValue.Type
-                    let fieldAddress = memberValue.Field.IsSome && memberValue.Writable && memberValue.Name <> "$type" && il.ByRefParameter(call,0)
-                    let value = if fieldAddress then -1 else il.Local memberValue.Type
-                    if not fieldAddress then
+                    let fieldAddress = storage memberValue call
+                    let value = if fieldAddress.IsSome then -1 else il.Local memberValue.Type
+                    if fieldAddress.IsNone then
                         loadRawMember il model.ValueType memberValue
                         il.EmitLocal(OpCodes.Stloc,value)
                     let arguments () =
-                        if fieldAddress then
-                            if model.ValueType then il.InputAddress() else il.InputValue()
-                            il.EmitField(OpCodes.Ldflda,memberValue.Field.Value)
-                        else callLocal il call 0 value
+                        match fieldAddress with
+                        | Some field -> address field
+                        | None -> callLocal il call 0 value
                         il.Emit OpCodes.Ldarg_1
                         il.Emit OpCodes.Ldarg_2
                     match memberValue.Name, SoloDatabase.Metadata.Generation.TypeSupport.StoredTypeName model.RuntimeName with

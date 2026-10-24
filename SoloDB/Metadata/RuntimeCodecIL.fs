@@ -20,6 +20,20 @@ type internal RuntimeCodecIL(generator: ILGenerator, ?input: Type) =
         let parameters = method.GetParameters()
         method :? MethodInfo && (method :?> MethodInfo).ReturnType.Equals(typeof<Void>) &&
         parameters.Length = 2 && parameters.[1].ParameterType.IsByRef
+    override _.PropertyStorage(method) =
+        match method with
+        | :? MethodInfo as getter when not getter.IsStatic ->
+            let body = getter.GetMethodBody()
+            let bytes = if isNull body then null else body.GetILAsByteArray()
+            let direct = not(isNull bytes) && bytes.Length = 7 && bytes[0] = 0x02uy && bytes[1] = 0x7buy && bytes[6] = 0x2auy
+            if not direct then None else
+            let field = getter.Module.ResolveField(BitConverter.ToInt32(bytes,2),getter.DeclaringType.GetGenericArguments(),getter.GetGenericArguments())
+            if CodecMemberStorage.allowed(direct,getter.IsVirtual,getter.IsFinal,getter.DeclaringType.IsSealed,
+                    field.IsStatic,field.IsInitOnly || field.IsLiteral,
+                    field.DeclaringType.Equals(getter.DeclaringType),field.FieldType.Equals(getter.ReturnType),
+                    (getter.GetMethodImplementationFlags() &&& MethodImplAttributes.Synchronized) <> enum 0) then Some field
+            else None
+        | _ -> None
     override _.Emit(code) = generator.Emit(code)
     override _.EmitInt(code, value) =
         if code.Equals(OpCodes.Unaligned) then generator.Emit(code,byte value)

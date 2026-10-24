@@ -59,7 +59,7 @@ internal static partial class GeneratedRawCodec
             if (definitions.TryGet(role,model.Type,representation,"",out var prepared)) return prepared;
             var method = Body((exact ? "WriteMembers" : "Write") + suffix + index,module.TypeSystem.Void,new ByReferenceType(module.ImportReference(model.Type)),new ByReferenceType(closedSpan),new ByReferenceType(Closed("JsonWriteState`1",encoding)));
             definitions.Add(role,model.Type,representation,"",method);
-            var il = new CecilCodecIL(method);
+            var il = new CecilCodecIL(method, assembly => model.AccessAssemblies.Add(assembly));
             var literal = GeneratedOutputCodec.LiteralAction(definitions,module,product,encoding,il);
             if (TypeSupport.RawPolymorphicFactory(model.Facts.Shape,model.Facts.AbstractType)) {
                 CodecPolymorphicEmitter.abstractWriter(il,GeneratedCodec.Api(api),

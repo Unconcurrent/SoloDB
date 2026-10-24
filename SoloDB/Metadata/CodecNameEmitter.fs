@@ -146,7 +146,14 @@ module internal CodecNameEmitter =
                         chains.Add(run,finishNode,il.Label())
                         for at,_,_ in run do owned.Add at |> ignore
             let basePosition = il.Local api.Int32
-            for currentNode,entry,loaded in nodes do
+            let continuation = il.Local api.Int32
+            let decode,decodeLoaded = il.Label(),il.Label()
+            let decoded = Array.init (nodes.Count + 1) (fun _ -> il.Label())
+            let resume index target =
+                il.EmitInt(OpCodes.Ldc_I4,index); il.EmitLocal(OpCodes.Stloc,continuation)
+                il.EmitBranch(OpCodes.Br,target)
+            for index = 0 to nodes.Count - 1 do
+                let currentNode,entry,loaded = nodes[index]
                 il.Mark entry
                 let first = obj.ReferenceEquals(currentNode,root)
                 if quoted && currentNode.Target.IsSome && currentNode.Children.Count = 0 then
@@ -196,7 +203,12 @@ module internal CodecNameEmitter =
                     il.EmitLocal(OpCodes.Ldloc,point); il.EmitInt(OpCodes.Ldc_I4,92); il.EmitBranch(OpCodes.Bne_Un,loaded)
                     il.Mark boundary; alias currentNode.Keyword.Value
                     il.Mark read
-                unit quoted (initial && first) first (Some loaded)
+                if initial && first then unit quoted true true (Some loaded)
+                else
+                    resume index decode
+                    il.Mark loaded
+                    resume index decodeLoaded
+                il.Mark decoded[index]
                 let more = il.Label()
                 il.EmitLocal(OpCodes.Ldloc,point); il.Emit OpCodes.Ldc_I4_M1; il.EmitBranch(OpCodes.Bne_Un,more)
                 finish quoted currentNode
@@ -256,7 +268,12 @@ module internal CodecNameEmitter =
                     publish offset
                     il.EmitBranch(OpCodes.Br,snd labels[at])
             il.Mark unknownLoop
-            unit quoted false false None
+            resume nodes.Count decode
+            il.Mark decode
+            unit quoted false false (Some decodeLoaded)
+            il.EmitLocal(OpCodes.Ldloc,continuation); il.EmitSwitch decoded
+            il.EmitBranch(OpCodes.Br,unknown)
+            il.Mark decoded[nodes.Count]
             il.EmitLocal(OpCodes.Ldloc,point); il.Emit OpCodes.Ldc_I4_M1; il.EmitBranch(OpCodes.Bne_Un,unknownLoop)
             il.EmitBranch(OpCodes.Br,unknown)
         let quoted = il.Label()

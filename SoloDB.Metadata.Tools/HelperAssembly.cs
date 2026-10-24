@@ -66,14 +66,15 @@ internal static class HelperAssembly
         }
         var runtimePath = references.Select(reference => reference.ItemSpec).First(path => Path.GetFileName(path) == "SoloDB.dll");
         using var product = AssemblyDefinition.ReadAssembly(runtimePath);
-        using var imports = new TargetReflectionImports((compilerReferences ?? references).Select(reference => reference.ItemSpec).ToArray(),resolver,product.MainModule);
+        var compilerPaths = (compilerReferences ?? references).Select(reference => reference.ItemSpec).ToArray();
+        using var imports = new TargetReflectionImports(compilerPaths,resolver,product.MainModule);
         using var helper = Create(identity,resolver,imports);
         var module = helper.MainModule;
         var entry = EntryPoint(module);
         var runtime = product.Name.Name;
         var il = entry.Body.GetILProcessor();
         var access = new HashSet<string>(StringComparer.Ordinal) { runtime };
-        var definitions = new GeneratedJsonDefinitions(references.Select(reference=>reference.ItemSpec).ToArray());
+        var definitions = new GeneratedJsonDefinitions(compilerPaths);
         CSharpQueryOperations.RegisterArguments(definitions,consumer,product,module,entry.DeclaringType,il,name=>access.Add(name));
         CSharpCodecFacts.Register(definitions,consumer, product, module, entry.DeclaringType, il, name => access.Add(name));
         CSharpQueryOperations.Register(definitions,consumer, product, module, entry.DeclaringType, il, name => access.Add(name));
