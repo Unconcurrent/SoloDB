@@ -45,7 +45,7 @@ internal sealed class GeneratedJsonDefinitions
     internal string MethodName(string name) => (Stored ? name + "Stored" : name) + (Output == CodecOutputKind.Span ? "" : Output.ToString());
     internal GeneratedJsonDefinitions NativeView => View(false,Output);
     internal GeneratedJsonDefinitions StoredView() => View(true,Output);
-    private string Role(string role) => (Output != CodecOutputKind.Span && (role.Contains("write") || role == "raw-model-body" || role == "type-literal") ? Output.ToString() + ":" : "") + TypeSupport.OperationRole(Stored,role);
+    private string Role(string role) => (Output != CodecOutputKind.Span && role != "boxed-writer" && (role.Contains("write") || role == "raw-model-body" || role == "type-literal") ? Output.ToString() + ":" : "") + TypeSupport.OperationRole(Stored,role);
 
     internal GeneratedQueries.Preservation Preservation(ModuleDefinition module,MethodDefinition entry,AssemblyDefinition product)
     {
@@ -101,11 +101,22 @@ internal sealed class GeneratedJsonDefinitions
     }
     private static string Part(string value) => value.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + value;
 
+    internal static string CallIdentity(MethodReference method)
+    {
+        if (method is GenericInstanceMethod generic)
+            return "G" + Part(CallIdentity(generic.ElementMethod)) + string.Concat(generic.GenericArguments.Select(value => Part(Identity(value))));
+        return "M" + Part(Identity(method.DeclaringType)) + Part(method.Name) + ":" + method.HasThis + ":" + method.ExplicitThis + ":" +
+            method.CallingConvention + ":" + method.GenericParameters.Count + ":" + Part(SignatureIdentity(method.ReturnType)) +
+            string.Concat(method.Parameters.Select(parameter => Part(SignatureIdentity(parameter.ParameterType))));
+    }
+    private static string TargetIdentity(string role,TypeReference target) =>
+        role is "optional-write" or "array-write" or "boxed-writer" ? SignatureIdentity(target) : Identity(target);
+
     internal static bool SameType(TypeReference left,TypeReference right) => Identity(left) == Identity(right);
 
     internal bool TryGet(string role,TypeReference target,TypeReference representation,string policy,out MethodDefinition method)
-        => methods.TryGetValue((Role(role),Identity(target),Identity(representation),policy),out method!);
+        => methods.TryGetValue((Role(role),TargetIdentity(role,target),Identity(representation),policy),out method!);
 
     internal void Add(string role,TypeReference target,TypeReference representation,string policy,MethodDefinition method)
-        => methods.Add((Role(role),Identity(target),Identity(representation),policy),method);
+        => methods.Add((Role(role),TargetIdentity(role,target),Identity(representation),policy),method);
 }

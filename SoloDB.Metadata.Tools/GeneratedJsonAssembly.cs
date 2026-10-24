@@ -325,6 +325,10 @@ public static partial class GeneratedJsonAssembly
     internal static void BoxedWriters(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,
         ILProcessor entry,AssemblyDefinition product,TypeReference target)
     {
+        var identity = target;
+        var primitive = TypeSupport.RawPrimitive(target.FullName);
+        if (primitive.Length != 0 && target is not TypeDefinition && target is not TypeSpecification)
+            identity = SourceTypeIdentity.Original(target,module.AssemblyResolver);
         GenericInstanceType Callable(string name,TypeReference element)
         {
             var type=new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator."+name)));
@@ -341,7 +345,7 @@ public static partial class GeneratedJsonAssembly
             var typed=element.MetadataType==MetadataType.Byte?byteWriter:charWriter;
             var runtime=new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectRuntimeWriter`1")));
             runtime.GenericArguments.Add(element);
-            if(!definitions.TryGet("boxed-writer",target,element,"",out var bridge))
+            if(!definitions.TryGet("boxed-writer",identity,element,"",out var bridge))
             {
                 var original=product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectWriter`2").Methods.Single(method=>method.Name=="Invoke");
                 var span=(GenericInstanceType)((ByReferenceType)original.Parameters[1].ParameterType).ElementType;
@@ -352,7 +356,7 @@ public static partial class GeneratedJsonAssembly
                 }
                 bridge=new MethodDefinition(definitions.MethodName("WriteBoxed"),MethodAttributes.Assembly|MethodAttributes.Static|MethodAttributes.HideBySig,module.TypeSystem.Void);
                 foreach(var argument in new[]{(TypeReference)typed,module.TypeSystem.Object,Closed(span),Closed(state)})bridge.Parameters.Add(new ParameterDefinition(argument));
-                owner.Methods.Add(bridge);definitions.Add("boxed-writer",target,element,"",bridge);
+                owner.Methods.Add(bridge);definitions.Add("boxed-writer",identity,element,"",bridge);
                 var invoke=module.ImportReference(original);invoke.DeclaringType=typed;
                 CodecEmitter.boxedRawWriter(new CecilCodecIL(bridge),target,target.IsValueType,invoke);
             }

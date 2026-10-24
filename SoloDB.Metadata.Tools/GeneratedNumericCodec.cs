@@ -17,12 +17,13 @@ internal static class GeneratedNumericCodec
         if(plan.ReuseNative)
             return Reader(definitions.NativeView,module,owner,product,target,reader,name);
         var storedName = plan.StoredReader;
-        if (definitions.TryGet("numeric-read",target,reader,"",out var existing)) return existing;
         var api = new GeneratedJsonAssembly.Api(module, product,definitions.Stored);
         var coreName = plan.Core;
         var scalarAdapter = plan.ScalarAdapter;
         var core = scalarAdapter ? module.ImportReference(target)
             : module.ImportReference(api.Operation("JsonRawPrimitive","Read" + TypeSupport.NumericIntrinsicOperation(coreName),reader).ReturnType);
+        var identity = SourceTypeIdentity.SameSignature(target,core,module.AssemblyResolver) ? core : target;
+        if (definitions.TryGet("numeric-read",identity,reader,"",out var existing)) return existing;
         var adapter = plan.TargetCompatibility;
         var utf16 = reader.Name == "Utf16Reader";
         MethodDefinition BodyResult(string suffix, TypeReference result, params TypeReference[] arguments)
@@ -39,7 +40,7 @@ internal static class GeneratedNumericCodec
         var context = new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonReadContext`1")));
         context.GenericArguments.Add(module.ImportReference(reader));
         var entry = BodyResult(plan.StringWrapper ? "String" : "",target,new ByReferenceType(context));
-        definitions.Add("numeric-read",target,reader,"",entry);
+        definitions.Add("numeric-read",identity,reader,"",entry);
         var unsafeScope = product.MainModule.AssemblyReferences.Single(reference => reference.Name == "System.Runtime.CompilerServices.Unsafe");
         var unsafeType = module.ImportReference(new TypeReference("System.Runtime.CompilerServices", "Unsafe", product.MainModule, unsafeScope));
         GenericInstanceMethod Offset(TypeReference value, TypeReference index)

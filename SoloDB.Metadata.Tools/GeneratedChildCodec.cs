@@ -69,8 +69,11 @@ internal static class GeneratedChildCodec
         AssemblyDefinition product,ArrayType target,TypeReference encoding,TypeReference output,string name,GeneratedModel[] models)
     {
         var api = new GeneratedJsonAssembly.Api(module,product,definitions.Stored);
-        var representation = api.RawType("JsonRawOutput",encoding,output);
-        if(definitions.TryGet("array-write",target,representation,"",out var existing)) return existing;
+        var child = WriteCall(definitions,module,owner,product,target.ElementType,encoding,output,name + "Child",models,false)
+            ?? Member(api,module,product,target.ElementType,encoding,output);
+        var shared = definitions.NativeView;
+        var policy = GeneratedJsonDefinitions.Identity(encoding) + GeneratedJsonDefinitions.CallIdentity(child);
+        if(shared.TryGet("array-write",target,output,policy,out var existing)) return existing;
         var originalSpan = (GenericInstanceType)((ByReferenceType)product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectWriter`2")
             .Methods.Single(value => value.Name == "Invoke").Parameters[1].ParameterType).ElementType;
         var span = new GenericInstanceType(module.ImportReference(originalSpan.ElementType)); span.GenericArguments.Add(encoding);
@@ -81,13 +84,11 @@ internal static class GeneratedChildCodec
         var state = new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonWriteState`1"))); state.GenericArguments.Add(encoding);
         method.Parameters.Add(new ParameterDefinition(new ByReferenceType(state)));
         owner.Methods.Add(method);
-        definitions.Add("array-write",target,representation,"",method);
-        var serial = 0;
+        shared.Add("array-write",target,output,policy,method);
         FSharpFunc<TypeReference,FSharpOption<MethodReference>> operation = FSharpFunc<TypeReference,FSharpOption<MethodReference>>.FromConverter(
-            new Converter<TypeReference,FSharpOption<MethodReference>>(child => WriteCall(definitions,module,owner,product,child,encoding,output,name + "Child" + serial++,models,false) is { } call
-                ? FSharpOption<MethodReference>.Some(call) : null!));
+            new Converter<TypeReference,FSharpOption<MethodReference>>(_ => FSharpOption<MethodReference>.Some(child)));
         var serialize = FSharpFunc<TypeReference,MethodReference>.FromConverter(
-            new Converter<TypeReference,MethodReference>(child => Member(api,module,product,child,encoding,output)));
+            new Converter<TypeReference,MethodReference>(_ => child));
         var il = new CecilCodecIL(method);
         var operands = new CodecArrayWriterApi<TypeReference,MethodReference>(operation,serialize,
             GeneratedOutputCodec.LiteralAction(definitions,module,product,encoding,il));

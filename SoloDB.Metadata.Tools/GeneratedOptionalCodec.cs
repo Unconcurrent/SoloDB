@@ -76,21 +76,22 @@ internal static class GeneratedOptionalCodec
     }
     internal static MethodDefinition Writer(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference encoding,TypeReference output,string name,GeneratedModel[] models)
     {
-        var api = new GeneratedJsonAssembly.Api(module,product,definitions.Stored);
-        var representation = api.RawType("JsonRawOutput",encoding,output);
-        if (definitions.TryGet("optional-write",target,representation,"",out var existing)) return existing;
+        var payload = Payload(module,target,models);
+        var child = GeneratedChildCodec.WriteCall(definitions,module,owner,product,payload,encoding,output,name + "Payload",models);
+        var shared = definitions.NativeView;
+        var policy = Kind(target,models) + ":" + GeneratedJsonDefinitions.Identity(encoding) + GeneratedJsonDefinitions.CallIdentity(child);
+        if (shared.TryGet("optional-write",target,output,policy,out var existing)) return existing;
         var span = ((ByReferenceType)product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectWriter`2").Methods.Single(method => method.Name == "Invoke").Parameters[1].ParameterType).ElementType;
         var closedSpan = new GenericInstanceType(module.ImportReference(((GenericInstanceType)span).ElementType)); closedSpan.GenericArguments.Add(encoding);
         var body = Body(module,owner,definitions.MethodName(name),module.TypeSystem.Void,new ByReferenceType(target),new ByReferenceType(closedSpan),new ByReferenceType(Closed(module,product,"JsonWriteState`1",encoding)));
-        definitions.Add("optional-write",target,representation,"",body);
-        var payload = Payload(module,target,models);
+        shared.Add("optional-write",target,output,policy,body);
         var il = new CecilCodecIL(body);
         var operands = new CodecOptionalWriterApi<TypeReference,MethodReference>(target,payload,Kind(target,models) != 1,
             Kind(target,models) == 2 ? FSharpOption<MethodReference>.Some(Member(module,target,"get_HasValue",Kind(target,models))) : null!,
             Kind(target,models) == 3 ? null! : FSharpOption<MethodReference>.Some(Member(module,target,"get_Value",Kind(target,models))),
             Kind(target,models) == 3 ? FSharpOption<MethodReference>.Some(Transfer(module,product,target,payload)) : null!,
             FSharpFunc<Unit,Unit>.FromConverter(new Converter<Unit,Unit>(_ => GeneratedOutputCodec.LiteralAction(definitions,module,product,encoding,il).Invoke("null"))),
-            GeneratedChildCodec.WriteCall(definitions,module,owner,product,payload,encoding,output,name + "Payload",models));
+            child);
         CodecOptionalEmitter.writer(il,operands); return body;
     }
     internal static void Register(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,ILProcessor entry,AssemblyDefinition product,TypeReference target,int index,GeneratedModel[] models)
