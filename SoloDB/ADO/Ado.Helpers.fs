@@ -5,6 +5,7 @@ open System.Data.Common
 open System.Runtime.CompilerServices
 open System.Runtime.InteropServices
 open SoloDatabase.Data.Sqlite
+open SoloDatabase.JsonSerializator
 
 module internal PublicSqlExecution =
     let guard (connection: SqliteConnection) action =
@@ -30,6 +31,16 @@ module internal PublicSqlExecution =
     let firstOrDefault<'T> connection sql parameters = guard connection (fun () -> SQLiteToolsExecution.queryFirstOrDefault<'T> connection.NativeConnection sql parameters)
     let multi<'A, 'B, 'R> connection sql map parameters splitOn =
         guard connection (fun () -> SQLiteToolsExecution.multiQuery<'A, 'B, 'R> connection.NativeConnection sql map parameters splitOn)
+        |> sequence connection
+    let queryWithFormat<'T> connection sql numericStrings parameters =
+        guard connection (fun () -> SQLiteToolsExecution.queryWithFormat<'T> connection.NativeConnection (NativeStatementSource.Text sql) numericStrings parameters)
+        |> sequence connection
+    let firstWithFormat<'T> connection sql numericStrings parameters =
+        guard connection (fun () -> SQLiteToolsExecution.queryFirstWithFormat<'T> connection.NativeConnection sql numericStrings parameters)
+    let firstOrDefaultWithFormat<'T> connection sql numericStrings parameters =
+        guard connection (fun () -> SQLiteToolsExecution.queryFirstOrDefaultWithFormat<'T> connection.NativeConnection sql numericStrings parameters)
+    let multiWithFormat<'A,'B,'R> connection sql numericStrings map parameters splitOn =
+        guard connection (fun () -> SQLiteToolsExecution.multiQueryWithFormat<'A,'B,'R> connection.NativeConnection sql numericStrings map parameters splitOn)
         |> sequence connection
     let openReader (connection: SqliteConnection) sql parameters =
         guard connection (fun () ->
@@ -64,6 +75,10 @@ module SQLiteTools =
         member _.QueryFirst<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.first<'T> this sql parameters
         member _.QueryFirstOrDefault<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.firstOrDefault<'T> this sql parameters
         member _.Query<'A, 'B, 'R>(sql: string, map: Func<'A, 'B, 'R>, parameters: obj, splitOn: string) = PublicSqlExecution.multi<'A, 'B, 'R> this sql map parameters splitOn
+        member _.Query<'T>(sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.queryWithFormat<'T> this sql numericStrings parameters
+        member _.QueryFirst<'T>(sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.firstWithFormat<'T> this sql numericStrings parameters
+        member _.QueryFirstOrDefault<'T>(sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.firstOrDefaultWithFormat<'T> this sql numericStrings parameters
+        member _.Query<'A,'B,'R>(sql: string, numericStrings: NumericStringFormat, map: Func<'A,'B,'R>, parameters: obj, splitOn: string) = PublicSqlExecution.multiWithFormat<'A,'B,'R> this sql numericStrings map parameters splitOn
         member _.OpenReader(sql: string, [<Out>] reader: byref<SqliteDataReader>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             let result = PublicSqlExecution.openReader this sql parameters
             reader <- result
@@ -81,6 +96,14 @@ module SQLiteTools =
         static member QueryFirstOrDefault<'T>(connection: SqliteConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.firstOrDefault<'T> connection sql parameters
         [<Extension>]
         static member Query<'A, 'B, 'R>(connection: SqliteConnection, sql: string, map: Func<'A, 'B, 'R>, parameters: obj, splitOn: string) = PublicSqlExecution.multi<'A, 'B, 'R> connection sql map parameters splitOn
+        [<Extension>]
+        static member Query<'T>(connection: SqliteConnection, sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.queryWithFormat<'T> connection sql numericStrings parameters
+        [<Extension>]
+        static member QueryFirst<'T>(connection: SqliteConnection, sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.firstWithFormat<'T> connection sql numericStrings parameters
+        [<Extension>]
+        static member QueryFirstOrDefault<'T>(connection: SqliteConnection, sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.firstOrDefaultWithFormat<'T> connection sql numericStrings parameters
+        [<Extension>]
+        static member Query<'A,'B,'R>(connection: SqliteConnection, sql: string, numericStrings: NumericStringFormat, map: Func<'A,'B,'R>, parameters: obj, splitOn: string) = PublicSqlExecution.multiWithFormat<'A,'B,'R> connection sql numericStrings map parameters splitOn
         [<Extension>]
         static member OpenReader<'R>(connection: SqliteConnection, sql: string, [<Out>] reader: byref<DbDataReader>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             let result = PublicSqlExecution.openReader connection sql parameters
@@ -101,6 +124,14 @@ module SQLiteToolsExtensions =
         static member QueryFirstOrDefault<'T>(connection: SqliteConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.firstOrDefault<'T> connection sql parameters
         [<Extension>]
         static member Query<'A, 'B, 'R>(connection: SqliteConnection, sql: string, map: Func<'A, 'B, 'R>, parameters: obj, splitOn: string) = PublicSqlExecution.multi<'A, 'B, 'R> connection sql map parameters splitOn
+        [<Extension>]
+        static member Query<'T>(connection: SqliteConnection, sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.queryWithFormat<'T> connection sql numericStrings parameters
+        [<Extension>]
+        static member QueryFirst<'T>(connection: SqliteConnection, sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.firstWithFormat<'T> connection sql numericStrings parameters
+        [<Extension>]
+        static member QueryFirstOrDefault<'T>(connection: SqliteConnection, sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.firstOrDefaultWithFormat<'T> connection sql numericStrings parameters
+        [<Extension>]
+        static member Query<'A,'B,'R>(connection: SqliteConnection, sql: string, numericStrings: NumericStringFormat, map: Func<'A,'B,'R>, parameters: obj, splitOn: string) = PublicSqlExecution.multiWithFormat<'A,'B,'R> connection sql numericStrings map parameters splitOn
         [<Extension>]
         static member OpenReader<'R>(connection: SqliteConnection, sql: string, [<Out>] reader: byref<DbDataReader>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             let result = PublicSqlExecution.openReader connection sql parameters

@@ -57,14 +57,14 @@ internal static class GeneratedCodec
         return new CodecApi<TypeReference, MethodReference>(api.Json, module.TypeSystem.Int32, api.Dictionary,
             api.ObjectDictionary, api.JsonMethod("get_Null"), api.JsonMethod("get_IsNull"), api.ObjectMethod("GetType", api.Type),
             typeFromHandle, api.Metadata("SerializeActual"), Function<TypeReference, MethodReference>(type => api.Metadata("ActualType", type)),
-            api.JsonMethod("ToObject", Array.Empty<TypeReference>(), 1),
+            api.JsonMethod("ToObject", Array.Empty<TypeReference>(), 2),
             api.DictionaryMethod(".ctor", module.TypeSystem.Void, module.TypeSystem.Int32),
             api.DictionaryMethod("Add", module.TypeSystem.Void, api.KeyParameter, api.ValueParameter),
             api.JsonMethod("NewObject"), api.Metadata("ObjectProperties"),
             api.ObjectDictionaryMethod("TryGetValue", module.TypeSystem.Boolean, api.ObjectKeyParameter, new ByReferenceType(api.ObjectValueParameter)),
             Function<TypeReference, MethodReference>(type => api.Metadata("Uninitialized", type)),
             Function<TypeReference, MethodReference>(type => api.JsonMethod("Serialize", type)),
-            Function<TypeReference, MethodReference>(type => api.JsonMethod("ToObject", type)),
+            Function<TypeReference, MethodReference>(type => api.JsonMethod("ToObject", new[] {type}, 1)),
             Constructor("Exception", module.TypeSystem.String),
             Constructor("ArgumentException", module.TypeSystem.String,module.TypeSystem.String),
             Constructor("TypeInitializationException", module.TypeSystem.String, exception),
@@ -85,7 +85,7 @@ internal static class GeneratedCodec
     private static void CollectionReader(MethodDefinition method, GeneratedModel model, GeneratedJsonAssembly.Api api)
     {
         var operation = TypeSupport.CollectionTreeReader(model.Facts.Shape,model.Type,Some(model.Constructor),model.Facts.AbstractType,model.Facts.PopulateCollection,
-            model.CollectionArguments,new Func<string,TypeReference[],MethodReference>((name,types) => name == "MissingCollectionConstructor" ? api.Metadata(name,types) : api.Helper(name,types)));
+            model.CollectionArguments,new Func<string,TypeReference[],MethodReference>((name,types) => name == "MissingCollectionConstructor" ? api.Metadata(name + "WithOptions",types) : api.Helper(name + "WithOptions",types)));
         CodecEmitter.readerCall(new CecilCodecIL(method),api.JsonMethod("get_IsNull"),operation);
     }
 
@@ -114,7 +114,7 @@ internal static class GeneratedCodec
         var instance = model.Type as GenericInstanceType;
         var selected = TypeSupport.TreeValueReader(instance?.ElementType.FullName ?? model.Type.FullName,model.Type,
             instance?.GenericArguments.ToArray() ?? Array.Empty<TypeReference>(),
-            new Func<string,TypeReference[],MethodReference>((name,types) => api.Helper(name,types)));
+            new Func<string,TypeReference[],MethodReference>((name,types) => api.Helper(name + "WithOptions",types)));
         if (selected != null)
         {
             CodecEmitter.readerCall(new CecilCodecIL(method),api.JsonMethod("get_IsNull"),selected.Value);
@@ -146,7 +146,7 @@ internal static class GeneratedCodec
     internal static void TupleWriter(MethodDefinition method, CodecTuple<TypeReference, MethodReference, FieldReference> tuple, GeneratedJsonAssembly.Api api) =>
         CodecTupleEmitter.writer(new CecilCodecIL(method),api.Json,Function<TypeReference,MethodReference>(type => api.JsonMethod("Serialize",type)),tuple);
     internal static void TupleReader(MethodDefinition method, CodecTuple<TypeReference, MethodReference, FieldReference> tuple, GeneratedJsonAssembly.Api api) =>
-        CodecTupleEmitter.reader(new CecilCodecIL(method),api.Metadata("TupleElement"),Function<TypeReference,MethodReference>(type => api.JsonMethod("ToObject",type)),tuple);
+        CodecTupleEmitter.reader(new CecilCodecIL(method),api.Metadata("TupleElement"),Function<TypeReference,MethodReference>(type => api.JsonMethod("ToObject",new[] {type},1)),tuple);
     internal static void TupleGetter(MethodDefinition method, CodecTuple<TypeReference, MethodReference, FieldReference> tuple, Tuple<bool,CodecMember<TypeReference,MethodReference,FieldReference>>[] path) =>
         CodecTupleEmitter.getter(new CecilCodecIL(method),false,tuple,path,false);
 }

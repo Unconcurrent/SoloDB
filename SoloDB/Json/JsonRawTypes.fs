@@ -20,7 +20,9 @@ type internal JsonReadContext<'R when 'R : struct and 'R :> IJsonReader> =
     val mutable Consumed: bool
     val mutable TypeSelected: bool
     val mutable Elements: List<JsonSourceRange>
-    new(cursor, range) = { Cursor = cursor; Range = range; Properties = null; Elements = null; Consumed = false; TypeSelected = false }
+    val NumericStrings: NumericStringFormat
+    new(cursor, range, numericStrings) = { Cursor = cursor; Range = range; Properties = null; Elements = null; Consumed = false; TypeSelected = false; NumericStrings = numericStrings }
+    new(cursor, range) = JsonReadContext(cursor,range,NumericStringFormat.NumberText)
 
 type internal JsonDirectReader<'T,'R when 'R : struct and 'R :> IJsonReader> =
     delegate of byref<JsonReadContext<'R>> -> 'T
@@ -83,7 +85,7 @@ module internal JsonReadCursor =
         token
 
     let child<'R when 'R : struct and 'R :> IJsonReader> (context: byref<JsonReadContext<'R>>) range =
-        JsonReadContext(context.Cursor,range)
+        JsonReadContext(context.Cursor,range,context.NumericStrings)
 
     let tryProperty<'R when 'R : struct and 'R :> IJsonReader>
         (context: byref<JsonReadContext<'R>>) name (result: byref<JsonReadContext<'R>>) =

@@ -74,6 +74,7 @@ module internal CodecTupleEmitter =
                     il.EmitInt(OpCodes.Ldc_I4,ordinal)
                     ordinal <- ordinal + 1
                     il.EmitMethod(OpCodes.Call,tupleElement)
+                    il.Emit OpCodes.Ldarg_1
                     il.EmitMethod(OpCodes.Callvirt,deserialize item.Member.Type)
             il.EmitMethod(OpCodes.Newobj,tuple.Constructor)
         construct model

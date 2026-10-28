@@ -42,6 +42,7 @@
     <Compile Include="Core/Types.fs" />
     <Compile Include="Metadata/Attributes.fs" />
     <Compile Include="Json/JsonStringLiteral.fs" />
+    <Compile Include="Json/JsonReadOptions.fs" />
     <Compile Include="Metadata/CodecModel.fs" />
     <Compile Include="Metadata/TypeSupport.fs" />
     <Compile Include="Metadata/CodecPreparation.fs" />
@@ -153,6 +154,7 @@
     <Compile Include="Numerics/BigIntegerRadix.fs" />
     <Compile Include="Numerics/ExactNumber.fs" />
     <Compile Include="Numerics/NumericKey.fs" />
+    <Compile Include="Numerics/StoredNumeric.fs" />
     <Compile Include="Json/JsonStoredNumeric.fs" />
     <Compile Include="Json/JsonNumericRuntime.fs" />
     <Compile Include="Json/JsonNameInput.fs" />

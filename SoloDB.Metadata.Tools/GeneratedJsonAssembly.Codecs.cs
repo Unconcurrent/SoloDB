@@ -180,7 +180,7 @@ public static partial class GeneratedJsonAssembly
         var write = Writer(owner, model, index, api, codec);
         var read = Reader(owner, model, index, api, codec);
         Delegate(il, api.Function(type, api.Json), write);
-        Delegate(il, api.Function(api.Json, type), read);
+        Delegate(il, api.Function(api.Json, api.ReadOptions, type), read);
         if (model.Facts.Shape == TypeShape.CustomSequence)
         {
             il.Emit(OpCodes.Call,api.SequenceCodec(type,model.CollectionArguments[0]));
@@ -194,7 +194,7 @@ public static partial class GeneratedJsonAssembly
             }
             else if (model.Facts.NonGenericEnumerable || model.Facts.Shape is TypeShape.BsonDocument or TypeShape.NonGenericDictionary) il.Emit(OpCodes.Call,api.ShapeMethod("get_Uninterpreted"));
             else Shape(definitions, il, owner, model, index, api, codec);
-            il.Emit(OpCodes.Newobj, api.CodecConstructor(type));
+            il.Emit(OpCodes.Newobj, api.CodecConstructor(type,true));
         }
         il.Emit(OpCodes.Call, api.Metadata("RegisterGenerated", type));
         GeneratedRawCodec.Register(definitions,module,owner,il,product,model,index,models);
@@ -269,7 +269,7 @@ public static partial class GeneratedJsonAssembly
     private static MethodDefinition Reader(TypeDefinition owner, GeneratedModel model, int index, Api api,
         CodecModel<TypeReference,MethodReference,FieldReference> codec)
     {
-        var method = Method(owner, "Read" + index, api.Module.ImportReference(model.Type), api.Json);
+        var method = Method(owner, "Read" + index, api.Module.ImportReference(model.Type), api.Json, api.ReadOptions);
         GeneratedCodec.Reader(method, model, api, codec);
         return method;
     }

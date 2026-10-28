@@ -18,6 +18,7 @@ type internal CodecNumericReaderPreparation = {
     QuotedContext: bool
     Quote: CodecNumericQuote
     StoredReader: string option
+    OptionalStoredString: bool
     StoredCoreArgument: bool
     TargetCompatibility: bool
     ScalarAdapter: bool
@@ -51,9 +52,13 @@ module internal CodecNumericPreparation =
         let core = (TypeSupport.NumericCore definition).Value
         let shape = (TypeSupport.Numeric core).Value
         let adapter = core <> definition
-        let storedReader = if stored then TypeSupport.StoredNumericReader definition else None
+        let optionalStored = not stored && (definition = "System.Decimal" || definition = "System.Numerics.BigInteger")
+        let storedReader =
+            if stored then TypeSupport.StoredNumericReader definition
+            elif optionalStored then Some(if definition = "System.Decimal" then "ReadDecimalString" else "ReadBigIntegerString")
+            else None
         let quote =
-            if storedReader.IsSome then CodecNumericQuote.Stored
+            if stored && storedReader.IsSome then CodecNumericQuote.Stored
             elif adapter then CodecNumericQuote.None else
             match shape.Kind with
             | NumericKind.Integer -> CodecNumericQuote.Integer
@@ -66,7 +71,7 @@ module internal CodecNumericPreparation =
           DecimalContext = shape.Kind = NumericKind.Binary || shape.Kind = NumericKind.Inferred
           HexContext = shape.Kind = NumericKind.Inferred
           QuotedContext = quote = CodecNumericQuote.Integer || quote = CodecNumericQuote.Binary || quote = CodecNumericQuote.Decimal
-          Quote = quote; StoredReader = storedReader; StoredCoreArgument = storedReader = Some "ReadKeyHalf"
+          Quote = quote; StoredReader = storedReader; OptionalStoredString = optionalStored; StoredCoreArgument = storedReader = Some "ReadKeyHalf"
           TargetCompatibility = adapter; ScalarAdapter = (TypeSupport.NumericTextAdapter core).IsSome
           Finish = TypeSupport.NumericFinish definition
           Predicate = TypeSupport.NumericPredicate definition && shape.Kind <> NumericKind.Predicate

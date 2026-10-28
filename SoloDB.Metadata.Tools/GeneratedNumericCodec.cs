@@ -305,11 +305,11 @@ internal static class GeneratedNumericCodec
             var readKey=plan.StoredCoreArgument ? api.Operation("JsonStoredNumeric",storedName.Value,core,reader)
                 : api.Operation("JsonStoredNumeric",storedName.Value,reader);
             storedQuoted=Microsoft.FSharp.Core.FSharpOption<MethodReference>.Some(readKey);
-            quoted=null!;
+            if (!plan.OptionalStoredString) quoted=null!;
         }
         var driverApi = new CodecNumericDriverApi<TypeReference, MethodReference>(module.ImportReference(target),core,after,predicate,text,module.TypeSystem.Int32,
             rawArguments[0],rawArguments[2],Input("Begin"),Input("Reference"),Input("Length"),Input("Position"),Input("Complete"),offset,
-            decimalRead,hexRead,quoted,storedQuoted,plan.DecimalContext,plan.HexContext,targetCompatibility);
+            decimalRead,hexRead,quoted,storedQuoted,plan.OptionalStoredString ? Microsoft.FSharp.Core.FSharpOption<MethodReference>.Some(Input("StoredStrings")) : null!,plan.DecimalContext,plan.HexContext,targetCompatibility);
         CodecNumericDriverEmitter.reader(new CecilCodecIL(method),driverApi,utf16);
         if (plan.StringWrapper)
         {

@@ -19,7 +19,7 @@ type internal JsonOptionalInput =
         context.Cursor.codeUnitIndex <- context.Cursor.codeUnitIndex + 1
 
     static member internal Capture<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>, value: byref<JsonReadContext<'R>>): unit =
-        value <- JsonReadContext(context.Cursor,{ context.Range with Length = context.Cursor.codeUnitIndex - context.Range.Start })
+        value <- JsonReadCursor.child &context { context.Range with Length = context.Cursor.codeUnitIndex - context.Range.Start }
 
     static member internal End<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>, original: byref<JsonReadContext<'R>>): unit =
         original.Range <- { original.Range with Length = context.Cursor.codeUnitIndex - original.Range.Start }

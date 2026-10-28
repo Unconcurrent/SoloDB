@@ -10,6 +10,15 @@ open SoloDatabase.Metadata.CodecGeneration
 /// Stored numerical leaves consume only the admitted comparable representation.
 [<AbstractClass; Sealed>]
 type internal JsonStoredNumeric private () =
+    static member internal ReadDecimalString<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>) =
+        match JsonReadCursor.token &context with
+        | StringToken key -> StoredNumeric.DecodeDecimal key
+        | _ -> raise(FormatException("A stored numerical key string is required."))
+    static member internal ReadBigIntegerString<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>) =
+        match JsonReadCursor.token &context with
+        | StringToken key -> StoredNumeric.DecodeBigInteger key
+        | _ -> raise(FormatException("A stored numerical key string is required."))
+
     static member internal PrepareDecimal(value: decimal) = NumericKey.prepare(ExactNumber.ofDecimal value)
     static member internal PrepareBigInteger(value: BigInteger) = NumericKey.prepareInteger value
     static member internal ValidateDecimal(_value: decimal, _utf16: bool): unit = ()

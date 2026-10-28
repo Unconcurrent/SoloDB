@@ -130,7 +130,7 @@ module internal NumericKey =
             if int(unitAt prepared index) >= 128 then count <- Checked.(+) count 1
         count
 
-    let decode (text: string) =
+    let decodeSpan (text: ReadOnlySpan<char>) =
         if text.Length = 0 then invalid ()
         let header = digit text[0]
         if header = 44 then
@@ -180,3 +180,5 @@ module internal NumericKey =
             if count > 0 then coefficient <- coefficient * BigInteger(pairPowers[count - 1] * 100u) + BigInteger chunk
             let exponent = BigInteger(int64 exponent)
             ExactNumber.create (if negative then -coefficient else coefficient) (2I * (exponent + 1I - BigInteger pairs))
+
+    let decode (text: string) = decodeSpan(text.AsSpan(0,text.Length))

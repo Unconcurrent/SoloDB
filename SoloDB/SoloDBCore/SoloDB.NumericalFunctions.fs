@@ -234,6 +234,16 @@ module internal NumericalFunctions =
                 | _ -> invalidArg "kind" "An exact numerical type is required."),SqliteFunctionFlags.Deterministic)
         for domain in [NumericKind.Decimal;NumericKind.ArbitraryInteger] do
             let name = ExactNumericNames.scalar domain
+            // Parameterless CLR formatting observes the invoking thread's current culture.
+            // Existing opcode arities retain their invariant, deterministic contracts.
+            connection.RegisterManagedScalar(name,1,RawScalarFunc(fun context arguments ->
+                if arguments[0].IsNull then context.SetNull()
+                else
+                    let value = read arguments[0]
+                    let text =
+                        if domain = NumericKind.Decimal then (ExactNumber.toDecimal value).ToString()
+                        else (ExactNumber.toBigInteger value).ToString()
+                    context.SetText(text)),SqliteFunctionFlags.None)
             connection.RegisterManagedScalar(name,2,RawScalarFunc(fun context arguments -> unary domain &context arguments),SqliteFunctionFlags.Deterministic)
             connection.RegisterManagedScalar(name,4,RawScalarFunc(fun context arguments ->
                 match enum<ExactNumericOperation>(arguments[0].GetInt32()) with

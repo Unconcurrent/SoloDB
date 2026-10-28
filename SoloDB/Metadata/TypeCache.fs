@@ -206,7 +206,7 @@ type internal TypeMetadataRecord = {
     StoredJsonUtf16Read: MetadataValue<JsonRawReadOperations> voption
     JsonReader: MetadataValue<Delegate> voption
     JsonWriter: MetadataValue<struct (Delegate * Func<obj>)> voption
-    RuntimeJsonRead: MetadataValue<Func<obj,obj>> voption
+    RuntimeJsonRead: MetadataValue<Func<obj,JsonSerializator.JsonReadOptions,obj>> voption
     RuntimeJsonWrite: MetadataValue<Func<obj,obj>> voption
     PhysicalIdentity: MetadataValue<PhysicalIdTypeOperations> voption
     CustomIdentity: MetadataValue<CustomIdMember[]> voption

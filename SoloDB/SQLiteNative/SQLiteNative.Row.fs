@@ -6,6 +6,7 @@ open System.Text
 open System.Diagnostics
 open Microsoft.FSharp.NativeInterop
 open SQLitePCL
+open SoloDatabase.JsonSerializator
 
 #nowarn "9"
 
@@ -15,7 +16,11 @@ type SqlRow =
     val private statement: NativePreparedStatement
     val private version: int64
     val private generation: int64
-    internal new(statement, version, generation) = { statement = statement; version = version; generation = generation }
+    val private numericStrings: NumericStringFormat
+    private new(statement, version, generation, numericStrings) = { statement = statement; version = version; generation = generation; numericStrings = numericStrings }
+    internal new(statement, version, generation) = SqlRow(statement,version,generation,NumericStringFormat.NumberText)
+    member internal this.NumericStrings = this.numericStrings
+    member internal this.WithNumericStrings(format) = SqlRow(this.statement,this.version,this.generation,format)
     member private this.Check() =
         if isNull (box this.statement) then raise (InvalidOperationException("There is no SQL row."))
         this.statement.Database.EnsureGeneration(this.generation)
@@ -55,12 +60,27 @@ type SqlRow =
             let text = this.GetString ordinal
             if text.Length = 1 then text.[0] else Checked.char (this.GetInt64 ordinal)
         else Checked.char (this.GetInt64 ordinal)
-    member this.GetDecimal(ordinal: int) = Decimal.Parse(this.GetString ordinal, NumberStyles.Number ||| NumberStyles.AllowExponent, CultureInfo.InvariantCulture)
-    member internal this.GetBigInteger(ordinal: int) =
+    member private this.Decimal(ordinal: int, format: NumericStringFormat) =
+        if format = NumericStringFormat.StoredKey && this.Kind ordinal = raw.SQLITE_TEXT then
+            StoredNumeric.DecodeDecimal(this.GetString ordinal)
+        else Decimal.Parse(this.GetString ordinal, NumberStyles.Number ||| NumberStyles.AllowExponent, CultureInfo.InvariantCulture)
+    member this.GetDecimal(ordinal: int) = this.Decimal(ordinal,this.numericStrings)
+    /// Converts a TEXT numerical leaf using the selected representation; other SQL kinds retain their native policy.
+    member this.GetDecimal(ordinal: int, numericStrings: NumericStringFormat) =
+        NumericStringPolicy.validate numericStrings
+        this.Decimal(ordinal,numericStrings)
+    member private this.BigInteger(ordinal: int, format: NumericStringFormat) =
         this.NonNull ordinal
         let row=this
-        NativeValueConversion.bigInteger (row.Kind ordinal)
-            (fun () -> row.GetInt64 ordinal) (fun () -> row.GetDouble ordinal) (fun () -> row.GetString ordinal)
+        if format = NumericStringFormat.StoredKey && row.Kind ordinal = raw.SQLITE_TEXT then
+            StoredNumeric.DecodeBigInteger(row.GetString ordinal)
+        else NativeValueConversion.bigInteger (row.Kind ordinal)
+                (fun () -> row.GetInt64 ordinal) (fun () -> row.GetDouble ordinal) (fun () -> row.GetString ordinal)
+    member internal this.GetBigInteger(ordinal: int) = this.BigInteger(ordinal,this.numericStrings)
+    /// Converts a TEXT numerical leaf without narrowing arbitrary-width integers through Decimal or Double.
+    member this.GetBigInteger(ordinal: int, numericStrings: NumericStringFormat) =
+        NumericStringPolicy.validate numericStrings
+        this.BigInteger(ordinal,numericStrings)
     member this.GetBlob(ordinal: int) = this.NonNull ordinal; raw.sqlite3_column_blob(this.statement.Handle, ordinal).ToArray()
     member internal this.BlobLength(ordinal: int) =
         this.NonNull ordinal

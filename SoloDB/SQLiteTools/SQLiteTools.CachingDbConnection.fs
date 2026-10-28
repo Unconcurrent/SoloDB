@@ -4,6 +4,7 @@ open System
 open System.Collections.Generic
 open System.Runtime.CompilerServices
 open System.Runtime.InteropServices
+open SoloDatabase.JsonSerializator
 open SQLiteToolsMapper
 
 module NativeSQLiteTools =
@@ -125,6 +126,11 @@ module NativeSQLiteTools =
         member this.QueryFirst<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = queryFirst<'T> this sql parameters
         member this.QueryFirstOrDefault<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = queryFirstOrDefault<'T> this sql parameters
         member this.Query<'T1, 'T2, 'TReturn>(sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = multiQuery<'T1, 'T2, 'TReturn> this sql map parameters splitOn
+        /// Maps numerical TEXT using the explicit representation for this result enumeration.
+        member this.Query<'T>(sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = queryWithFormat<'T> this (NativeStatementSource.Text sql) numericStrings parameters
+        member this.QueryFirst<'T>(sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = queryFirstWithFormat<'T> this sql numericStrings parameters
+        member this.QueryFirstOrDefault<'T>(sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = queryFirstOrDefaultWithFormat<'T> this sql numericStrings parameters
+        member this.Query<'A,'B,'R>(sql: string, numericStrings: NumericStringFormat, map: Func<'A,'B,'R>, parameters: obj, splitOn: string) = multiQueryWithFormat<'A,'B,'R> this sql numericStrings map parameters splitOn
         member internal this.QueryRetained<'T>(handle: RetainedPreparedHandle, parameters: ParameterValues) =
             SQLiteToolsExecution.query<'T> this (NativeStatementSource.Retained handle) parameters
         /// <summary>
@@ -168,6 +174,19 @@ module NativeSQLiteTools =
         [<Extension>]
         static member QueryFirstOrDefault<'T>(this: NativeSqliteConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             queryFirstOrDefault<'T> this sql parameters
+        /// Maps numerical TEXT using the explicit representation for this result enumeration.
+        [<Extension>]
+        static member Query<'T>(this: NativeSqliteConnection, sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+            queryWithFormat<'T> this (NativeStatementSource.Text sql) numericStrings parameters
+        [<Extension>]
+        static member QueryFirst<'T>(this: NativeSqliteConnection, sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+            queryFirstWithFormat<'T> this sql numericStrings parameters
+        [<Extension>]
+        static member QueryFirstOrDefault<'T>(this: NativeSqliteConnection, sql: string, numericStrings: NumericStringFormat, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+            queryFirstOrDefaultWithFormat<'T> this sql numericStrings parameters
+        [<Extension>]
+        static member Query<'A,'B,'R>(this: NativeSqliteConnection, sql: string, numericStrings: NumericStringFormat, map: Func<'A,'B,'R>, parameters: obj, splitOn: string) =
+            multiQueryWithFormat<'A,'B,'R> this sql numericStrings map parameters splitOn
         /// Direct typed mapping avoids dynamic mapper discovery and expression compilation.
         [<Extension>]
         static member internal Query<'T>(this: NativeSqliteConnection, sql: string, map: Func<SqlRow, 'T>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =

@@ -23,6 +23,7 @@ type internal CodecNumericDriverApi<'Type,'Method> = {
     Hex: 'Method
     Quoted: 'Method option
     StoredQuoted: 'Method option
+    StoredStringOption: 'Method option
     DecimalContext: bool
     HexContext: bool
     Compatibility: 'Method
@@ -89,8 +90,22 @@ module internal CodecNumericDriverEmitter =
         | Some method,_ ->
             il.EmitBranch(OpCodes.Br,complete)
             il.Mark quoted
+            let native = il.Label()
+            match api.StoredStringOption with
+            | Some condition ->
+                il.Emit OpCodes.Ldarg_0; il.EmitMethod(OpCodes.Call,condition)
+                il.EmitBranch(OpCodes.Brfalse,native)
+            | None -> ()
             il.Emit OpCodes.Ldarg_0
             il.EmitMethod(OpCodes.Call,method); save result
+            if api.StoredStringOption.IsSome then
+                il.EmitBranch(OpCodes.Br,complete)
+                il.Mark native
+                match api.Quoted with
+                | Some method ->
+                    load source; load length; load position; il.Emit OpCodes.Ldarg_0
+                    il.EmitMethod(OpCodes.Call,method); save result
+                | None -> il.EmitBranch(OpCodes.Br,compatibility)
         | None,Some method ->
             il.EmitBranch(OpCodes.Br,complete)
             il.Mark quoted

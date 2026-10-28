@@ -97,7 +97,9 @@ module internal CodecEmitter =
         | None -> ()
         il.Emit OpCodes.Ldarg_0
         match operation.Call with
-        | Some method -> il.EmitMethod(OpCodes.Call,method)
+        | Some method ->
+            il.Emit OpCodes.Ldarg_1
+            il.EmitMethod(OpCodes.Call,method)
         | None -> ()
         match operation.After with
         | Some constructor -> il.EmitMethod(OpCodes.Newobj,constructor)
@@ -121,6 +123,7 @@ module internal CodecEmitter =
     let boxedRead (il: CodecIL<'T,'M,'F>) json result valueType method =
         il.Emit OpCodes.Ldarg_0
         il.EmitType(OpCodes.Castclass,json)
+        il.Emit OpCodes.Ldarg_1
         il.EmitMethod(OpCodes.Call,method)
         if valueType then il.EmitType(OpCodes.Box,result)
         il.Emit OpCodes.Ret
@@ -240,6 +243,7 @@ module internal CodecEmitter =
             il.Emit OpCodes.Ldarg_0
             il.EmitString "Tag"
             il.EmitMethod((if api.RawReader then OpCodes.Call else OpCodes.Callvirt),api.GetProperty)
+            if not api.RawReader then il.Emit OpCodes.Ldarg_1
             il.EmitMethod((if api.RawReader then OpCodes.Call else OpCodes.Callvirt),api.Deserialize api.Int32)
             il.EmitLocal(OpCodes.Stloc,tag)
             for ordinal = 0 to model.Cases.Length - 1 do
@@ -260,6 +264,7 @@ module internal CodecEmitter =
                     il.Emit OpCodes.Ldarg_0
                     il.EmitString name
                     il.EmitMethod((if api.RawReader then OpCodes.Call else OpCodes.Callvirt),api.GetProperty)
+                    if not api.RawReader then il.Emit OpCodes.Ldarg_1
                     il.EmitMethod((if api.RawReader then OpCodes.Call else OpCodes.Callvirt),api.Deserialize target)
                     il.EmitLocal(OpCodes.Stloc,value)
                     il.Mark missing
@@ -300,6 +305,7 @@ module internal CodecEmitter =
                 il.Emit OpCodes.Ldarg_0
                 il.Emit OpCodes.Ldarg_0
                 il.EmitMethod(OpCodes.Call,api.ActualType model.Type)
+                if not api.RawReader then il.Emit OpCodes.Ldarg_1
                 il.EmitMethod((if api.RawReader then OpCodes.Call else OpCodes.Callvirt),api.ToRuntimeObject)
                 il.EmitType(OpCodes.Castclass,model.Type)
                 il.Emit OpCodes.Ret
@@ -327,6 +333,7 @@ module internal CodecEmitter =
                         let missing = il.Label()
                         readMember memberValue missing
                         il.EmitLocal(OpCodes.Ldloc,json)
+                        if not api.RawReader then il.Emit OpCodes.Ldarg_1
                         il.EmitMethod((if api.RawReader then OpCodes.Call else OpCodes.Callvirt),api.Deserialize memberValue.Type)
                         il.EmitLocal(OpCodes.Stloc,value)
                         il.Mark missing
@@ -348,6 +355,7 @@ module internal CodecEmitter =
                             if not memberValue.Static then
                                 il.EmitLocal((if model.ValueType then OpCodes.Ldloca else OpCodes.Ldloc),result)
                             il.EmitLocal(OpCodes.Ldloc,json)
+                            if not api.RawReader then il.Emit OpCodes.Ldarg_1
                             il.EmitMethod((if api.RawReader then OpCodes.Call else OpCodes.Callvirt),api.Deserialize memberValue.Type)
                             match memberValue.Field, memberValue.Setter with
                             | Some field, _ -> il.EmitField((if memberValue.Static then OpCodes.Stsfld else OpCodes.Stfld),field)

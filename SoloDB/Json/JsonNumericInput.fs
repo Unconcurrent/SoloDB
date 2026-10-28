@@ -7,6 +7,9 @@ open System.Runtime.InteropServices
 /// Mechanical access to one borrowed numeric input; conversion is emitted by the codec generator.
 [<AbstractClass; Sealed>]
 type internal JsonNumericInput =
+    static member internal StoredStrings<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): bool =
+        context.NumericStrings = NumericStringFormat.StoredKey
+
     static member internal Begin<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): int =
         context.Consumed <- false
         JsonReadCursor.reset &context

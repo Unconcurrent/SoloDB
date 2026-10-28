@@ -201,6 +201,7 @@ module internal JsonNumericRuntime =
             { Result = target; Core = core; After = after; Predicate = predicate; Text = text; Int32 = typeof<int>; SourceReference = typeof<byte>.MakeByRefType(); PositionReference = typeof<int>.MakeByRefType()
               Begin = input "Begin"; Reference = input "Reference"; Length = input "Length"; Position = input "Position"
               Complete = input "Complete"; OffsetByte = offset; Decimal = leaf :> MethodBase; Hex = hex :> MethodBase; Quoted = quoted; StoredQuoted = storedQuoted; DecimalContext = plan.DecimalContext
+              StoredStringOption = if plan.OptionalStoredString then Some(input "StoredStrings") else None
               HexContext = plan.HexContext
               Compatibility = targetCompatibility }
         CodecNumericDriverEmitter.reader (RuntimeCodecIL(driver.GetILGenerator())) driverApi utf16

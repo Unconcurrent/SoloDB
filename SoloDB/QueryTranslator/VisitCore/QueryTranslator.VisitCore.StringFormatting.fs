@@ -76,7 +76,23 @@ module internal QueryTranslatorVisitCoreStringFormatting =
         construct builder ValueNone [|left; right|]
 
     let internal tryProduced (visit: Expression -> QueryBuilder -> QueryProducedValue) (call: MethodCallExpression) (builder: QueryBuilder) =
-        if not(typeof<string>.Equals call.Method.DeclaringType) then ValueNone else
+        let owner = call.Method.DeclaringType
+        let receiver = if isNull call.Object then null else call.Object.Type
+        let exactReceiver = typeof<decimal>.Equals receiver || typeof<System.Numerics.BigInteger>.Equals receiver
+        let originalMethod =
+            exactReceiver && (call.Method.Equals(receiver.GetMethod("ToString", Type.EmptyTypes)) ||
+                              call.Method.Equals(typeof<obj>.GetMethod("ToString", Type.EmptyTypes)))
+        if originalMethod && not call.Method.IsStatic && not call.Method.ContainsGenericParameters &&
+           call.Method.Name = "ToString" && call.Method.GetParameters().Length = 0 && call.Arguments.Count = 0 &&
+           typeof<string>.Equals call.Method.ReturnType && not(isNull call.Object) &&
+           exactReceiver then
+            let kind = (QueryTranslatorNumeric.domain receiver).Value
+            let source = visit call.Object builder
+            ValueSome(QueryProduced.construct builder.SourceContext.NextAlias (fun components ->
+                let value, _ = components[0]
+                SqlExpr.FunctionCall(Numerics.ExactNumericNames.scalar kind,[value])
+                |> QueryProduced.typed typeof<string>) [|source|])
+        elif not(typeof<string>.Equals owner) then ValueNone else
         let components, format =
             match call.Method.Name with
             | "Concat" ->

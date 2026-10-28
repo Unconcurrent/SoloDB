@@ -29,6 +29,7 @@ public static partial class GeneratedJsonAssembly
         private TypeReference Contract => ProductType(Stored ? "JsonStoredContract" : "JsonNativeContract");
         public TypeReference Type { get; }
         public TypeReference Json { get; }
+        public TypeReference ReadOptions => ProductType("JsonReadOptions");
         public TypeReference StoredMember { get; }
         public GenericInstanceType Dictionary { get; }
         public GenericInstanceType ObjectDictionary { get; }
@@ -49,7 +50,7 @@ public static partial class GeneratedJsonAssembly
         }
         public MethodReference ConstructionRegistration() => Module.ImportReference(product.MainModule.GetType("SoloDatabase.QueryValueMetadata")
             .Methods.Single(method => method.Name == "RegisterGeneratedConstruction"));
-        public MethodReference SequenceCodec(TypeReference type, TypeReference element) => ProductMethod("JsonMetadata","CreateSequence",new[] { type,element },2);
+        public MethodReference SequenceCodec(TypeReference type, TypeReference element) => ProductMethod("JsonMetadata","CreateSequenceWithOptions",new[] { type,element },2);
         public MethodReference Helper(string name, params TypeReference[] arguments) => ProductMethod("JsonImpl",name,arguments);
         public MethodReference Metadata(string name, params TypeReference[] arguments) => ProductMethod("JsonMetadata",
             Stored && name is "RegisterRaw" or "RegisterRawReaders" or "RegisterRawWriters" or "RegisterWriterBodies"
@@ -80,11 +81,13 @@ public static partial class GeneratedJsonAssembly
             var closed = new GenericInstanceMethod(method); foreach (var argument in arguments) closed.GenericArguments.Add(Module.ImportReference(argument)); return closed;
         }
         public GenericInstanceType Function(TypeReference input, TypeReference output) => Closed(new TypeReference("System", "Func`2", Module, Module.AssemblyReferences[0]), input, output);
+        public GenericInstanceType Function(TypeReference input, TypeReference options, TypeReference output) => Closed(new TypeReference("System", "Func`3", Module, Module.AssemblyReferences[0]), input, options, output);
         public GenericInstanceType Function(TypeReference output) => Closed(new TypeReference("System", "Func`1", Module, Module.AssemblyReferences[0]), output);
-        public MethodReference CodecConstructor(TypeReference type)
+        public MethodReference CodecConstructor(TypeReference type, bool options = false)
         {
             var definition = product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonCodec`1");
-            var ctor = Module.ImportReference(definition.Methods.Single(method => method.IsConstructor && method.Parameters.Count == 3));
+            var ctor = Module.ImportReference(definition.Methods.Single(method => method.IsConstructor && method.Parameters.Count == 3 &&
+                method.Parameters[1].ParameterType is GenericInstanceType reader && reader.GenericArguments.Count == (options ? 3 : 2)));
             ctor.DeclaringType = Closed(Module.ImportReference(definition), type); return ctor;
         }
         public MethodReference ObjectMethod(string name, TypeReference result) => Instance(name, Module.TypeSystem.Object, result);

@@ -557,7 +557,11 @@ type JsonValue =
     /// <param name="targetType">The type to deserialize into.</param>
     /// <returns>The deserialized object.</returns>
     member this.ToObject (targetType: Type) =
-        JsonImpl.DeserializeByType targetType this
+        JsonImpl.DeserializeByType targetType this JsonReadOptions.Default
+
+    /// Converts this tree using conversion-local numeric string interpretation.
+    member this.ToObject(targetType: Type, options: JsonReadOptions) =
+        JsonImpl.DeserializeByType targetType this (JsonReadOptions.Normalize options)
 
     /// <summary>
     /// Deserializes the JsonValue into an object of the specified generic type 'T.
@@ -565,7 +569,11 @@ type JsonValue =
     /// <typeparam name="'T">The type to deserialize into.</typeparam>
     /// <returns>The deserialized object of type 'T.</returns>
     member this.ToObject<'T>() : 'T =
-        JsonReadOperations<'T>.Deserialize this
+        JsonReadOperations<'T>.Deserialize(this,JsonReadOptions.Default)
+
+    /// Converts this tree using conversion-local numeric string interpretation.
+    member this.ToObject<'T>(options: JsonReadOptions): 'T =
+        JsonReadOperations<'T>.Deserialize(this,JsonReadOptions.Normalize options)
 
     /// <summary>
     /// Sets a property on a JsonValue.Object or an element in a JsonValue.List.
@@ -861,9 +869,13 @@ type JsonValue =
     /// and user effects are retained after later errors. Late runtime-type selection may replay conversion.
     /// Optional wrappers, unions and directional collection readers retain their own policies.</remarks>
     static member ParseInto<'T> (jsonString: string): 'T =
+        JsonValue.ParseInto<'T>(jsonString,JsonReadOptions.Default)
+
+    /// Parses typed JSON using conversion-local numeric string interpretation.
+    static member ParseInto<'T> (jsonString: string, options: JsonReadOptions): 'T =
         if isNull jsonString then Unchecked.defaultof<'T> else
 
-        JsonValue.ParseInto<'T>(jsonString.AsSpan())
+        JsonValue.ParseInto<'T>(jsonString.AsSpan(),options)
 
     /// <summary>
     /// Parses a JSON UTF-16 character span into a 'T.
@@ -874,10 +886,14 @@ type JsonValue =
     /// and user effects are retained after later errors. Late runtime-type selection may replay conversion.
     /// Optional wrappers, unions and directional collection readers retain their own policies.</remarks>
     static member ParseInto<'T> (jsonSpan: ReadOnlySpan<char>): 'T =
+        JsonValue.ParseInto<'T>(jsonSpan,JsonReadOptions.Default)
+
+    /// Parses typed JSON using conversion-local numeric string interpretation.
+    static member ParseInto<'T> (jsonSpan: ReadOnlySpan<char>, options: JsonReadOptions): 'T =
         if jsonSpan.IsEmpty then invalidArg (nameof jsonSpan) "Argument is empty" else
 
         let cursor = JsonLexer.fromUtf16Span jsonSpan
-        let mutable context = JsonReadContext(cursor,{ Start = 0; Length = jsonSpan.Length; Depth = 0 })
+        let mutable context = JsonReadContext(cursor,{ Start = 0; Length = jsonSpan.Length; Depth = 0 },(JsonReadOptions.Normalize options).NumericStrings)
         let mutable value = Unchecked.defaultof<'T>
         JsonRawRead<JsonNativeContract>.ReadInto<'T,Utf16Reader>(&context,&value)
         JsonReadCursor.finish &context
@@ -892,10 +908,14 @@ type JsonValue =
     /// and user effects are retained after later errors. Late runtime-type selection may replay conversion.
     /// Optional wrappers, unions and directional collection readers retain their own policies.</remarks>
     static member ParseInto<'T> (jsonSpan: ReadOnlySpan<byte>): 'T =
+        JsonValue.ParseInto<'T>(jsonSpan,JsonReadOptions.Default)
+
+    /// Parses typed JSON using conversion-local numeric string interpretation.
+    static member ParseInto<'T> (jsonSpan: ReadOnlySpan<byte>, options: JsonReadOptions): 'T =
         if jsonSpan.IsEmpty then invalidArg (nameof jsonSpan) "Argument is empty" else
 
         let cursor = JsonLexer.fromUtf8Span jsonSpan
-        let mutable context = JsonReadContext(cursor,{ Start = 0; Length = jsonSpan.Length; Depth = 0 })
+        let mutable context = JsonReadContext(cursor,{ Start = 0; Length = jsonSpan.Length; Depth = 0 },(JsonReadOptions.Normalize options).NumericStrings)
         let mutable value = Unchecked.defaultof<'T>
         JsonRawRead<JsonNativeContract>.ReadInto<'T,Utf8Reader>(&context,&value)
         JsonReadCursor.finish &context
@@ -1135,18 +1155,21 @@ and [<Sealed>] JsonCodecShape private (shape: JsonSerializationShape) =
     static member internal ForValueType(target: Type) = JsonCodecShape(JsonCodecDiscovery.ValueShape target)
 
 /// Immutable typed JSON conversion delegates and their stored shape.
-and [<AllowNullLiteral; Sealed>] JsonCodec<'T>
-    (serialize: Func<'T, JsonValue>, deserialize: Func<JsonValue, 'T>, shape: JsonCodecShape) =
+and [<AllowNullLiteral; Sealed>] JsonCodec<'T> internal
+    (serialize: Func<'T, JsonValue>, deserialize: Func<JsonValue,JsonReadOptions, 'T>, shape: JsonCodecShape) =
     do
         if isNull serialize then nullArg "serialize"
         if obj.ReferenceEquals(shape, null) then nullArg "shape"
         if isNull deserialize then nullArg "deserialize"
-    new(serialize, deserialize) = JsonCodec<'T>(serialize, deserialize, JsonCodecShape.Dynamic)
+    new(serialize: Func<'T,JsonValue>, deserialize: Func<JsonValue,'T>, shape: JsonCodecShape) =
+        JsonCodec<'T>(serialize,(if isNull deserialize then null else Func<JsonValue,JsonReadOptions,'T>(fun value _ -> deserialize.Invoke(value))),shape)
+    new(serialize: Func<'T,JsonValue>, deserialize: Func<JsonValue,'T>) = JsonCodec<'T>(serialize,deserialize,JsonCodecShape.Dynamic)
+    internal new(serialize: Func<'T,JsonValue>, deserialize: Func<JsonValue,JsonReadOptions,'T>) = JsonCodec<'T>(serialize,deserialize,JsonCodecShape.Dynamic)
     member internal _.Shape = shape.Shape
     member internal _.Reader = deserialize
     member internal _.Writer = serialize
     member _.Serialize(value: 'T) = serialize.Invoke(value)
-    member _.Deserialize(value: JsonValue) = deserialize.Invoke(value)
+    member _.Deserialize(value: JsonValue) = deserialize.Invoke(value,JsonReadOptions.Default)
 /// Constructs immutable serialized member descriptions.
 and [<AbstractClass; Sealed>] JsonMetadata =
     static member internal RegisterUnionStorage<'T>(hasTag: bool, tags: int[], names: string[][], types: Type[][]) =
@@ -1158,7 +1181,7 @@ and [<AbstractClass; Sealed>] JsonMetadata =
     static member internal RegisterGenerated<'T>(codec: JsonCodec<'T>): unit =
         let read = codec.Reader :> Delegate
         let write = struct(codec.Writer :> Delegate,Func<obj>(fun () -> box codec.Shape))
-        let readRuntime = Func<obj,obj>(fun json -> box(JsonReadOperations<'T>.Deserialize(unbox<JsonValue> json)))
+        let readRuntime = Func<obj,JsonReadOptions,obj>(fun json options -> box(JsonReadOperations<'T>.Deserialize(unbox<JsonValue> json,options)))
         let writeRuntime = Func<obj,obj>(fun value -> box(JsonWriteOperations<'T>.Serialize(unbox<'T> value)))
         TypeMetadataCache.Register(typeof<'T>, fun metadata ->
             { metadata with
@@ -1576,7 +1599,7 @@ and [<AbstractClass; Sealed>] JsonMetadata =
             if isNull value then JsonValue.Null
             elif typeof<obj>.Equals(value.GetType()) then JsonValue.New()
             else JsonImpl.SerializeByTypeWithType (value.GetType()) value
-        JsonMetadata.RegisterGenerated(JsonCodec<obj>(Func<obj,JsonValue>(write), Func<JsonValue,obj>(JsonImpl.DeserializeDynamic), JsonCodecShape.Dynamic))
+        JsonMetadata.RegisterGenerated(JsonCodec<obj>(Func<obj,JsonValue>(write), Func<JsonValue,JsonReadOptions,obj>(fun json _ -> JsonImpl.DeserializeDynamic json), JsonCodecShape.Dynamic))
         JsonRawRead<JsonNativeContract>.Ensure<obj,Utf8Reader>()
         JsonRawRead<JsonNativeContract>.Ensure<obj,Utf16Reader>()
         JsonRawWrite<obj,byte,JsonUtf8Writer,JsonNativeContract>.Ensure()
@@ -1598,10 +1621,10 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         let write (value: 'Enum) =
             let mutable value = value
             JsonValue.Serialize(Unsafe.As<'Enum,'Underlying>(&value))
-        let read (json: JsonValue) =
-            let mutable value = json.ToObject<'Underlying>()
+        let read (json: JsonValue) (options: JsonReadOptions) =
+            let mutable value = json.ToObject<'Underlying>(options)
             Unsafe.As<'Underlying,'Enum>(&value)
-        JsonCodec<'Enum>(Func<'Enum,JsonValue>(write),Func<JsonValue,'Enum>(read),JsonCodecShape.Scalar)
+        JsonCodec<'Enum>(Func<'Enum,JsonValue>(write),Func<JsonValue,JsonReadOptions,'Enum>(read),JsonCodecShape.Scalar)
     /// Selects an existing tuple wire element from either accepted stored form.
 
     static member internal TupleElement(json: JsonValue, ordinal: int) =
@@ -1610,29 +1633,33 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         | JsonValue.Object _ -> json["Item" + (ordinal + 1).ToString(CultureInfo.InvariantCulture)]
         | _ -> invalidOp "A tuple requires a JSON list or object."
     /// Publishes direct tuple construction and projection with the shared wire contract.
+    static member internal RegisterTupleWithOptions<'Tuple>(write: Func<'Tuple,JsonValue[]>, read: Func<JsonValue,JsonReadOptions,'Tuple>, members: JsonStoredMember[]) =
+        JsonMetadata.RegisterGenerated(JsonMetadata.CreateTupleWithOptions<'Tuple>(write,read,members))
     static member internal RegisterTuple<'Tuple>(write: Func<'Tuple,JsonValue[]>, read: Func<JsonValue,'Tuple>, members: JsonStoredMember[]) =
-        JsonMetadata.RegisterGenerated(JsonMetadata.CreateTuple<'Tuple>(write,read,members))
-    static member internal CreateTuple<'Tuple>(write: Func<'Tuple,JsonValue[]>, read: Func<JsonValue,'Tuple>, members: JsonStoredMember[]): JsonCodec<'Tuple> =
+        JsonMetadata.RegisterTupleWithOptions<'Tuple>(write,Func<JsonValue,JsonReadOptions,'Tuple>(fun value _ -> read.Invoke(value)),members)
+    static member internal CreateTupleWithOptions<'Tuple>(write: Func<'Tuple,JsonValue[]>, read: Func<JsonValue,JsonReadOptions,'Tuple>, members: JsonStoredMember[]): JsonCodec<'Tuple> =
         let serialize value =
             if isNull(box value) then JsonValue.Null
             else JsonValue.List(write.Invoke(value))
-        let deserialize (json: JsonValue) =
+        let deserialize (json: JsonValue) (options: JsonReadOptions) =
             match json with
             | JsonValue.Null -> Unchecked.defaultof<'Tuple>
-            | JsonValue.List _ | JsonValue.Object _ -> read.Invoke(json)
+            | JsonValue.List _ | JsonValue.Object _ -> read.Invoke(json,options)
             | _ -> failwithf "Cannot deserialize into %s the value: %A" typeof<'Tuple>.FullName json.JsonType
-        JsonCodec<'Tuple>(Func<'Tuple,JsonValue>(serialize),Func<JsonValue,'Tuple>(deserialize),JsonCodecShape.ArrayMembers(members))
+        JsonCodec<'Tuple>(Func<'Tuple,JsonValue>(serialize),Func<JsonValue,JsonReadOptions,'Tuple>(deserialize),JsonCodecShape.ArrayMembers(members))
+    static member internal CreateTuple<'Tuple>(write: Func<'Tuple,JsonValue[]>, read: Func<JsonValue,'Tuple>, members: JsonStoredMember[]): JsonCodec<'Tuple> =
+        JsonMetadata.CreateTupleWithOptions<'Tuple>(write,Func<JsonValue,JsonReadOptions,'Tuple>(fun value _ -> read.Invoke(value)),members)
     static member internal CreatePhysicalReferenceCodec<'Reference,'Target>
         (unloaded: Func<int64,'Reference>, loaded: Func<int64,'Target,'Reference>, hasValue: Func<'Reference,bool>, id: Func<'Reference,int64>): JsonCodec<'Reference> =
         let physicalIdWriter = lazy(EntityIdentity.tryInt64IdWriter typeof<'Target>)
         let write value = if hasValue.Invoke(value) then Number(decimal(id.Invoke(value))) else Null
-        let read json =
+        let read json (options: JsonReadOptions) =
             match json with
             | Null -> Unchecked.defaultof<'Reference>
             | Number number -> unloaded.Invoke(int64 number)
             | List items when items.Count = 2 ->
                 let identity = int64(items[0].ToObject<decimal>())
-                let value = box(items[1].ToObject<'Target>())
+                let value = box(items[1].ToObject<'Target>(options))
                 if not(isNull value) then
                     match physicalIdWriter.Value with
                     | ValueSome writer -> writer.Invoke(value,identity)
@@ -1641,7 +1668,7 @@ and [<AbstractClass; Sealed>] JsonMetadata =
             | Object values when values.ContainsKey "$dbrefTypedId" ->
                 failwithf "Cannot deserialize DBRef<%s> from $dbrefTypedId marker: only DBRef<TTarget,TId> supports typed-id wire format." typeof<'Target>.Name
             | other -> JsonValue.InvalidValue(sprintf "Cannot deserialize DBRef<%s> from %A" typeof<'Target>.Name other)
-        JsonCodec<'Reference>(Func<'Reference,JsonValue>(write),Func<JsonValue,'Reference>(read),JsonCodecShape.Scalar)
+        JsonCodec<'Reference>(Func<'Reference,JsonValue>(write),Func<JsonValue,JsonReadOptions,'Reference>(read),JsonCodecShape.Scalar)
 
     static member internal RegisterFileReference(): unit =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateFileReference())
@@ -1697,13 +1724,13 @@ and [<AbstractClass; Sealed>] JsonMetadata =
 
     static member internal CreateFileMany(): JsonCodec<FileRefMany> =
         FileSystemReferenceMetadata.Many<FileRefMany,FileRef,Types.SoloDBFileHeader>(Func<FileRefMany>(fun () -> FileRefMany()),Action<FileRefMany,FileRef>(fun references item -> references.Add(item)))
-        let read (json: JsonValue) = if json.IsNull then FileRefMany() else FileRefMany(JsonImpl.IEnumerableDeserialize<FileRef>(json))
-        JsonCodec<FileRefMany>(Func<FileRefMany,JsonValue>(fun references -> if isNull references then Null else JsonImpl.IEnumerableSerialize references),Func<JsonValue,FileRefMany>(read))
+        let read (json: JsonValue) (options: JsonReadOptions) = if json.IsNull then FileRefMany() else FileRefMany(JsonImpl.IEnumerableDeserializeWithOptions<FileRef>(json,options))
+        JsonCodec<FileRefMany>(Func<FileRefMany,JsonValue>(fun references -> if isNull references then Null else JsonImpl.IEnumerableSerialize references),Func<JsonValue,JsonReadOptions,FileRefMany>(read))
 
     static member internal CreateDirectoryMany(): JsonCodec<DirectoryRefMany> =
         FileSystemReferenceMetadata.Many<DirectoryRefMany,DirectoryRef,Types.SoloDBDirectoryHeader>(Func<DirectoryRefMany>(fun () -> DirectoryRefMany()),Action<DirectoryRefMany,DirectoryRef>(fun references item -> references.Add(item)))
-        let read (json: JsonValue) = if json.IsNull then DirectoryRefMany() else DirectoryRefMany(JsonImpl.IEnumerableDeserialize<DirectoryRef>(json))
-        JsonCodec<DirectoryRefMany>(Func<DirectoryRefMany,JsonValue>(fun references -> if isNull references then Null else JsonImpl.IEnumerableSerialize references),Func<JsonValue,DirectoryRefMany>(read))
+        let read (json: JsonValue) (options: JsonReadOptions) = if json.IsNull then DirectoryRefMany() else DirectoryRefMany(JsonImpl.IEnumerableDeserializeWithOptions<DirectoryRef>(json,options))
+        JsonCodec<DirectoryRefMany>(Func<DirectoryRefMany,JsonValue>(fun references -> if isNull references then Null else JsonImpl.IEnumerableSerialize references),Func<JsonValue,JsonReadOptions,DirectoryRefMany>(read))
 
     static member internal CreateDocumentCodec<'T>() =
         ReferenceTypeMetadata.Register<DBRef<'T>,'T>(false, null)
@@ -1734,13 +1761,13 @@ and [<AbstractClass; Sealed>] JsonMetadata =
                 JsonValue.Object values
             elif value.HasValue then JsonValue.Number(decimal value.Id)
             else JsonValue.Null
-        let read json =
+        let read json (options: JsonReadOptions) =
             match json with
             | JsonValue.Null -> DBRef<'T,'Id>.None
             | JsonValue.Number value -> DBRef<'T,'Id>.Unloaded(int64 value)
             | JsonValue.List values when values.Count = 2 ->
                 let id = int64(values.[0].ToObject<decimal>())
-                let entity = box(values.[1].ToObject<'T>())
+                let entity = box(values.[1].ToObject<'T>(options))
                 if not(isNull entity) then
                     match physicalIdWriter.Value with
                     | ValueSome writer -> writer.Invoke(entity,id)
@@ -1748,9 +1775,9 @@ and [<AbstractClass; Sealed>] JsonMetadata =
                 match SoloIdAccessor.TryGetBoxedValue(typeof<'T>,entity) with
                 | ValueSome typedId -> DBRef<'T,'Id>.Loaded(id,unbox<'Id> typedId,unbox<'T> entity)
                 | ValueNone -> DBRef<'T,'Id>.Loaded(id,unbox<'T> entity)
-            | JsonValue.Object values when values.ContainsKey "$dbrefTypedId" -> DBRef<'T,'Id>.To(values.["$dbrefTypedId"].ToObject<'Id>())
+            | JsonValue.Object values when values.ContainsKey "$dbrefTypedId" -> DBRef<'T,'Id>.To(values.["$dbrefTypedId"].ToObject<'Id>(options))
             | other -> JsonValue.InvalidValue(sprintf "Cannot deserialize DBRef<%s> from %A" typeof<'T>.Name other)
-        JsonCodec<DBRef<'T,'Id>>(Func<DBRef<'T,'Id>,JsonValue>(write),Func<JsonValue,DBRef<'T,'Id>>(read),JsonCodecShape.ReferenceIdentity typeof<'Id>)
+        JsonCodec<DBRef<'T,'Id>>(Func<DBRef<'T,'Id>,JsonValue>(write),Func<JsonValue,JsonReadOptions,DBRef<'T,'Id>>(read),JsonCodecShape.ReferenceIdentity typeof<'Id>)
     /// Registers the shared typed-ID reference policy over original generated types.
     static member internal RegisterTypedDocument<'T,'Id>() =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateTypedDocumentCodec<'T,'Id>())
@@ -1804,73 +1831,81 @@ and [<AbstractClass; Sealed>] JsonMetadata =
     static member internal CreateArray<'T>(supportsValuesWrapper: bool): JsonCodec<'T[]> =
         let write (items: 'T[]) =
             if isNull items then Null else JsonImpl.IEnumerableSerialize items
-        let read json =
-            JsonSequenceOperations.Read<'T[]>(json, supportsValuesWrapper, Func<JsonValue, 'T[]>(JsonImpl.ArrayDeserialize<'T>))
-        JsonCodec<'T[]>(Func<'T[], JsonValue>(write), Func<JsonValue, 'T[]>(read),
+        let read json (options: JsonReadOptions) =
+            JsonSequenceOperations.Read<'T[]>(json, supportsValuesWrapper, options, Func<JsonValue,JsonReadOptions, 'T[]>(fun json options -> JsonImpl.ArrayDeserializeWithOptions<'T>(json,options)))
+        JsonCodec<'T[]>(Func<'T[], JsonValue>(write), Func<JsonValue,JsonReadOptions, 'T[]>(read),
                        if typeof<'T>.Equals(typeof<byte>) then JsonCodecShape.Scalar else JsonCodecShape.SequenceValues typeof<'T>)
 
-    static member internal MissingCollectionConstructor<'T>(_: JsonValue): 'T =
+    static member internal MissingCollectionConstructorWithOptions<'T>(_: JsonValue, _: JsonReadOptions): 'T =
         failwithf "Type %s must have a parameterless constructor" typeof<'T>.Name
 
-    static member internal CreateSequence<'Sequence,'T when 'Sequence :> IEnumerable<'T>>(write: Func<'Sequence,JsonValue>, standard: Func<JsonValue,'Sequence>): JsonCodec<'Sequence> =
+    static member internal MissingCollectionConstructor<'T>(value: JsonValue): 'T =
+        JsonMetadata.MissingCollectionConstructorWithOptions<'T>(value,JsonReadOptions.Default)
+
+    static member internal CreateSequenceWithOptions<'Sequence,'T when 'Sequence :> IEnumerable<'T>>(write: Func<'Sequence,JsonValue>, standard: Func<JsonValue,JsonReadOptions,'Sequence>): JsonCodec<'Sequence> =
         let scalarReader = lazy(
             try JsonScalarOperations<'Sequence>.Reader
             with error -> raise(TypeInitializationException("SoloDatabase.JsonSerializator.JsonDeserializerImpl`1",error)))
-        let read (json: JsonValue) =
+        let read (json: JsonValue) (options: JsonReadOptions) =
             match scalarReader.Value with
             | ValueSome scalar -> scalar.Invoke(json)
-            | ValueNone -> JsonSequenceOperations.Read<'Sequence>(json,false,standard)
-        JsonCodec<'Sequence>(write,Func<JsonValue,'Sequence>(read),if typeof<'T>.Equals(typeof<byte>) then JsonCodecShape.Scalar else JsonCodecShape.SequenceValues typeof<'T>)
+            | ValueNone -> JsonSequenceOperations.Read<'Sequence>(json,false,options,standard)
+        JsonCodec<'Sequence>(write,Func<JsonValue,JsonReadOptions,'Sequence>(read),if typeof<'T>.Equals(typeof<byte>) then JsonCodecShape.Scalar else JsonCodecShape.SequenceValues typeof<'T>)
 
-    static member internal CreateSequence<'Sequence,'T when 'Sequence :> IEnumerable<'T>>(standard: Func<JsonValue,'Sequence>): JsonCodec<'Sequence> =
+    static member internal CreateSequenceWithOptions<'Sequence,'T when 'Sequence :> IEnumerable<'T>>(standard: Func<JsonValue,JsonReadOptions,'Sequence>): JsonCodec<'Sequence> =
         let scalarWriter = JsonScalarOperations<'Sequence>.Writer
         let write (items: 'Sequence) =
             match scalarWriter with
             | ValueSome scalar -> scalar.Invoke(items)
             | ValueNone -> if isNull(box items) then Null else JsonImpl.IEnumerableSerialize items
-        JsonMetadata.CreateSequence<'Sequence,'T>(Func<'Sequence,JsonValue>(write),standard)
+        JsonMetadata.CreateSequenceWithOptions<'Sequence,'T>(Func<'Sequence,JsonValue>(write),standard)
+
+    static member internal CreateSequence<'Sequence,'T when 'Sequence :> IEnumerable<'T>>(write: Func<'Sequence,JsonValue>, standard: Func<JsonValue,'Sequence>): JsonCodec<'Sequence> =
+        JsonMetadata.CreateSequenceWithOptions<'Sequence,'T>(write,Func<JsonValue,JsonReadOptions,'Sequence>(fun value _ -> standard.Invoke(value)))
+    static member internal CreateSequence<'Sequence,'T when 'Sequence :> IEnumerable<'T>>(standard: Func<JsonValue,'Sequence>): JsonCodec<'Sequence> =
+        JsonMetadata.CreateSequenceWithOptions<'Sequence,'T>(Func<JsonValue,JsonReadOptions,'Sequence>(fun value _ -> standard.Invoke(value)))
 
     /// Registers the existing list reconstruction and element policy.
     static member internal RegisterList<'T>() =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateList<'T>())
         JsonMetadata.RegisterRawSequence<ResizeArray<'T>,'T>("List",false)
     static member internal CreateList<'T>(): JsonCodec<ResizeArray<'T>> =
-        JsonMetadata.CreateSequence<System.Collections.Generic.List<'T>,'T>(Func<JsonValue,System.Collections.Generic.List<'T>>(fun json -> JsonImpl.IListDeserialize<'T,System.Collections.Generic.List<'T>> (System.Collections.Generic.List<'T>()) json))
+        JsonMetadata.CreateSequenceWithOptions<System.Collections.Generic.List<'T>,'T>(Func<JsonValue,JsonReadOptions,System.Collections.Generic.List<'T>>(fun json options -> JsonImpl.IListDeserializeWithOptions<'T,System.Collections.Generic.List<'T>> (System.Collections.Generic.List<'T>()) (json,options)))
     /// Registers the existing FSharp list policy without runtime union discovery.
 
     static member internal RegisterFSharpList<'T>() =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateFSharpList<'T>())
         JsonMetadata.RegisterRawSequence<'T list,'T>("FSharpList",false)
     static member internal CreateFSharpList<'T>(): JsonCodec<'T list> =
-        JsonMetadata.CreateSequence<'T list,'T>(Func<JsonValue,'T list>(JsonImpl.FSharpListDeserialize<'T>))
+        JsonMetadata.CreateSequenceWithOptions<'T list,'T>(Func<JsonValue,JsonReadOptions,'T list>(fun json options -> JsonImpl.FSharpListDeserializeWithOptions<'T>(json,options)))
     /// Registers the existing HashSet reconstruction and element policy.
 
     static member internal RegisterHashSet<'T>() =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateHashSet<'T>())
         JsonMetadata.RegisterRawSequence<HashSet<'T>,'T>("HashSet",false)
     static member internal CreateHashSet<'T>(): JsonCodec<HashSet<'T>> =
-        JsonMetadata.CreateSequence<HashSet<'T>,'T>(Func<JsonValue,HashSet<'T>>(JsonImpl.HashSetDeserialize<'T>))
+        JsonMetadata.CreateSequenceWithOptions<HashSet<'T>,'T>(Func<JsonValue,JsonReadOptions,HashSet<'T>>(fun json options -> JsonImpl.HashSetDeserializeWithOptions<'T>(json,options)))
     /// Registers the existing queue reconstruction and element policy.
 
     static member internal RegisterQueue<'T>() =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateQueue<'T>())
         JsonMetadata.RegisterRawSequence<Queue<'T>,'T>("Queue",false)
     static member internal CreateQueue<'T>(): JsonCodec<Queue<'T>> =
-        JsonMetadata.CreateSequence<Queue<'T>,'T>(Func<JsonValue,Queue<'T>>(JsonImpl.QueueDeserialize<'T>))
+        JsonMetadata.CreateSequenceWithOptions<Queue<'T>,'T>(Func<JsonValue,JsonReadOptions,Queue<'T>>(fun json options -> JsonImpl.QueueDeserializeWithOptions<'T>(json,options)))
     /// Registers the existing stack reconstruction order and element policy.
 
     static member internal RegisterStack<'T>() =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateStack<'T>())
         JsonMetadata.RegisterRawSequence<Stack<'T>,'T>("Stack",false)
     static member internal CreateStack<'T>(): JsonCodec<Stack<'T>> =
-        JsonMetadata.CreateSequence<Stack<'T>,'T>(Func<JsonValue,Stack<'T>>(JsonImpl.StackDeserialize<'T>))
+        JsonMetadata.CreateSequenceWithOptions<Stack<'T>,'T>(Func<JsonValue,JsonReadOptions,Stack<'T>>(fun json options -> JsonImpl.StackDeserializeWithOptions<'T>(json,options)))
     /// Registers the existing linked-list reconstruction and element policy.
 
     static member internal RegisterLinkedList<'T>() =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateLinkedList<'T>())
         JsonMetadata.RegisterRawSequence<LinkedList<'T>,'T>("LinkedList",false)
     static member internal CreateLinkedList<'T>(): JsonCodec<LinkedList<'T>> =
-        JsonMetadata.CreateSequence<LinkedList<'T>,'T>(Func<JsonValue,LinkedList<'T>>(JsonImpl.LinkedListDeserialize<'T>))
+        JsonMetadata.CreateSequenceWithOptions<LinkedList<'T>,'T>(Func<JsonValue,JsonReadOptions,LinkedList<'T>>(fun json options -> JsonImpl.LinkedListDeserializeWithOptions<'T>(json,options)))
     static member internal RegisterEnumerableReaders<'Element>(): unit =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateEnumerable<'Element>())
         JsonMetadata.RegisterRawReaders<IEnumerable<'Element>>(
@@ -1901,17 +1936,17 @@ and [<AbstractClass; Sealed>] JsonMetadata =
             JsonRawCollections<JsonNativeContract>.AbstractWriter<IGrouping<'Key,'Element>,byte,JsonUtf8Writer>(),JsonRawCollections<JsonNativeContract>.AbstractWriter<IGrouping<'Key,'Element>,char,JsonUtf16Writer>())
 
     static member internal CreateEnumerable<'Element>(): JsonCodec<IEnumerable<'Element>> =
-        let codec = JsonMetadata.CreateSequence<IEnumerable<'Element>,'Element>(Func<IEnumerable<'Element>,JsonValue>(fun value -> JsonImpl.SerializeAbstract(box value)),Func<JsonValue,IEnumerable<'Element>>(JsonImpl.IEnumerableDeserialize<'Element>))
+        let codec = JsonMetadata.CreateSequenceWithOptions<IEnumerable<'Element>,'Element>(Func<IEnumerable<'Element>,JsonValue>(fun value -> JsonImpl.SerializeAbstract(box value)),Func<JsonValue,JsonReadOptions,IEnumerable<'Element>>(fun json options -> JsonImpl.IEnumerableDeserializeWithOptions<'Element>(json,options)))
         JsonCodec<IEnumerable<'Element>>(codec.Writer,codec.Reader,if typeof<'Element>.Equals(typeof<byte>) then JsonCodecShape.Dynamic else JsonCodecShape.SequenceValues typeof<'Element>)
 
     static member internal CreateOrderedEnumerable<'Element>(): JsonCodec<IOrderedEnumerable<'Element>> =
-        let codec = JsonMetadata.CreateSequence<IOrderedEnumerable<'Element>,'Element>(Func<IOrderedEnumerable<'Element>,JsonValue>(fun value -> JsonImpl.SerializeAbstract(box value)),Func<JsonValue,IOrderedEnumerable<'Element>>(JsonImpl.OrderedEnumerableDeserialize<'Element>))
+        let codec = JsonMetadata.CreateSequenceWithOptions<IOrderedEnumerable<'Element>,'Element>(Func<IOrderedEnumerable<'Element>,JsonValue>(fun value -> JsonImpl.SerializeAbstract(box value)),Func<JsonValue,JsonReadOptions,IOrderedEnumerable<'Element>>(fun json options -> JsonImpl.OrderedEnumerableDeserializeWithOptions<'Element>(json,options)))
         JsonCodec<IOrderedEnumerable<'Element>>(codec.Writer,codec.Reader,if typeof<'Element>.Equals(typeof<byte>) then JsonCodecShape.Dynamic else JsonCodecShape.SequenceValues typeof<'Element>)
 
     static member internal CreateGrouping<'Key,'Element>(): JsonCodec<IGrouping<'Key,'Element>> =
         let write (value: IGrouping<'Key,'Element>) = JsonImpl.SerializeAbstract(box value)
-        let read (json: JsonValue) = if json.IsNull then null else JsonImpl.GroupingDeserialize<'Key,'Element>(json) :> IGrouping<'Key,'Element>
-        JsonCodec<IGrouping<'Key,'Element>>(Func<IGrouping<'Key,'Element>,JsonValue>(write),Func<JsonValue,IGrouping<'Key,'Element>>(read),JsonCodecShape.GroupingValues(typeof<'Key>,typeof<'Element>))
+        let read (json: JsonValue) (options: JsonReadOptions) = if json.IsNull then null else JsonImpl.GroupingDeserializeWithOptions<'Key,'Element>(json,options) :> IGrouping<'Key,'Element>
+        JsonCodec<IGrouping<'Key,'Element>>(Func<IGrouping<'Key,'Element>,JsonValue>(write),Func<JsonValue,JsonReadOptions,IGrouping<'Key,'Element>>(read),JsonCodecShape.GroupingValues(typeof<'Key>,typeof<'Element>))
 
     /// Registers concrete dictionary operations with the original key conversion owner.
 
@@ -1920,8 +1955,8 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         JsonMetadata.RegisterRawDictionary<Dictionary<'Key,'Value>,'Key,'Value>("Dictionary")
     static member internal CreateDictionary<'Key,'Value when 'Key : equality>(): JsonCodec<Dictionary<'Key,'Value>> =
         let write (value: Dictionary<'Key,'Value>) = if isNull value then Null else JsonImpl.SerializeDictionary<'Key,'Value>(value)
-        let read (json: JsonValue) = if json.IsNull then null else JsonImpl.CustomDictionaryDeserialize<'Key,'Value,Dictionary<'Key,'Value>> (Dictionary<'Key,'Value>()) json
-        JsonCodec<Dictionary<'Key,'Value>>(Func<Dictionary<'Key,'Value>,JsonValue>(write),Func<JsonValue,Dictionary<'Key,'Value>>(read),JsonCodecShape.DictionaryValues typeof<'Value>)
+        let read (json: JsonValue) (options: JsonReadOptions) = if json.IsNull then null else JsonImpl.CustomDictionaryDeserializeWithOptions<'Key,'Value,Dictionary<'Key,'Value>> (Dictionary<'Key,'Value>()) (json,options)
+        JsonCodec<Dictionary<'Key,'Value>>(Func<Dictionary<'Key,'Value>,JsonValue>(write),Func<JsonValue,JsonReadOptions,Dictionary<'Key,'Value>>(read),JsonCodecShape.DictionaryValues typeof<'Value>)
     /// Registers sorted dictionary operations with the original constructor and key conversion.
 
     static member internal RegisterSortedDictionary<'Key,'Value when 'Key : comparison>() =
@@ -1929,8 +1964,8 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         JsonMetadata.RegisterRawDictionary<SortedDictionary<'Key,'Value>,'Key,'Value>("SortedDictionary")
     static member internal CreateSortedDictionary<'Key,'Value when 'Key : comparison>(): JsonCodec<SortedDictionary<'Key,'Value>> =
         let write (value: SortedDictionary<'Key,'Value>) = if isNull value then Null else JsonImpl.SerializeDictionary<'Key,'Value>(value)
-        let read (json: JsonValue) = if json.IsNull then null else JsonImpl.CustomDictionaryDeserialize<'Key,'Value,SortedDictionary<'Key,'Value>> (SortedDictionary<'Key,'Value>()) json
-        JsonCodec<SortedDictionary<'Key,'Value>>(Func<SortedDictionary<'Key,'Value>,JsonValue>(write),Func<JsonValue,SortedDictionary<'Key,'Value>>(read),JsonCodecShape.DictionaryValues typeof<'Value>)
+        let read (json: JsonValue) (options: JsonReadOptions) = if json.IsNull then null else JsonImpl.CustomDictionaryDeserializeWithOptions<'Key,'Value,SortedDictionary<'Key,'Value>> (SortedDictionary<'Key,'Value>()) (json,options)
+        JsonCodec<SortedDictionary<'Key,'Value>>(Func<SortedDictionary<'Key,'Value>,JsonValue>(write),Func<JsonValue,JsonReadOptions,SortedDictionary<'Key,'Value>>(read),JsonCodecShape.DictionaryValues typeof<'Value>)
     /// Registers dictionary-interface reads through the existing concrete implementation.
 
     static member internal RegisterDictionaryInterfaceReaders<'Key,'Value when 'Key : equality>() =
@@ -1946,8 +1981,8 @@ and [<AbstractClass; Sealed>] JsonMetadata =
             JsonRawCollections<JsonNativeContract>.AbstractWriter<IDictionary<'Key,'Value>,char,JsonUtf16Writer>())
     static member internal CreateDictionaryInterface<'Key,'Value when 'Key : equality>(): JsonCodec<IDictionary<'Key,'Value>> =
         let write (value: IDictionary<'Key,'Value>) = JsonImpl.SerializeAbstract(box value)
-        let read (json: JsonValue) = if json.IsNull then null else JsonImpl.DictionaryDeserialize<'Key,'Value>(json)
-        JsonCodec<IDictionary<'Key,'Value>>(Func<IDictionary<'Key,'Value>,JsonValue>(write),Func<JsonValue,IDictionary<'Key,'Value>>(read),JsonCodecShape.DictionaryValues typeof<'Value>)
+        let read (json: JsonValue) (options: JsonReadOptions) = if json.IsNull then null else JsonImpl.DictionaryDeserializeWithOptions<'Key,'Value>(json,options)
+        JsonCodec<IDictionary<'Key,'Value>>(Func<IDictionary<'Key,'Value>,JsonValue>(write),Func<JsonValue,JsonReadOptions,IDictionary<'Key,'Value>>(read),JsonCodecShape.DictionaryValues typeof<'Value>)
     /// Registers read-only dictionary-interface reads through the existing concrete implementation.
 
     static member internal RegisterReadOnlyDictionaryInterfaceReaders<'Key,'Value when 'Key : equality>() =
@@ -1963,8 +1998,8 @@ and [<AbstractClass; Sealed>] JsonMetadata =
             JsonRawCollections<JsonNativeContract>.AbstractWriter<IReadOnlyDictionary<'Key,'Value>,char,JsonUtf16Writer>())
     static member internal CreateReadOnlyDictionaryInterface<'Key,'Value when 'Key : equality>(): JsonCodec<IReadOnlyDictionary<'Key,'Value>> =
         let write (value: IReadOnlyDictionary<'Key,'Value>) = JsonImpl.SerializeAbstract(box value)
-        let read (json: JsonValue) = if json.IsNull then null else JsonImpl.IReadOnlyDictionaryDeserialize<'Key,'Value>(json)
-        JsonCodec<IReadOnlyDictionary<'Key,'Value>>(Func<IReadOnlyDictionary<'Key,'Value>,JsonValue>(write),Func<JsonValue,IReadOnlyDictionary<'Key,'Value>>(read),JsonCodecShape.DictionaryValues typeof<'Value>)
+        let read (json: JsonValue) (options: JsonReadOptions) = if json.IsNull then null else JsonImpl.IReadOnlyDictionaryDeserializeWithOptions<'Key,'Value>(json,options)
+        JsonCodec<IReadOnlyDictionary<'Key,'Value>>(Func<IReadOnlyDictionary<'Key,'Value>,JsonValue>(write),Func<JsonValue,JsonReadOptions,IReadOnlyDictionary<'Key,'Value>>(read),JsonCodecShape.DictionaryValues typeof<'Value>)
     /// Registers the existing list policy and typed tracker operations.
 
     static member internal RegisterGroupingImplementation<'Sequence,'Key,'Element>() =
@@ -1974,8 +2009,8 @@ and [<AbstractClass; Sealed>] JsonMetadata =
 
     static member internal CreateGroupingImplementation<'Sequence,'Key,'Element>(): JsonCodec<'Sequence> =
         let write (value: 'Sequence) = if isNull(box value) then Null else JsonImpl.IEnumerableSerialize(box value :?> IEnumerable<'Element>)
-        let read (json: JsonValue) = if json.IsNull then Unchecked.defaultof<'Sequence> else unbox<'Sequence>(box(JsonImpl.GroupingDeserialize<'Key,'Element> json))
-        JsonCodec<'Sequence>(Func<'Sequence,JsonValue>(write),Func<JsonValue,'Sequence>(read),JsonCodecShape.SequenceValues typeof<'Element>)
+        let read (json: JsonValue) (options: JsonReadOptions) = if json.IsNull then Unchecked.defaultof<'Sequence> else unbox<'Sequence>(box(JsonImpl.GroupingDeserializeWithOptions<'Key,'Element>(json,options)))
+        JsonCodec<'Sequence>(Func<'Sequence,JsonValue>(write),Func<JsonValue,JsonReadOptions,'Sequence>(read),JsonCodecShape.SequenceValues typeof<'Element>)
 
     static member internal RegisterMany<'T>() =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateMany<'T>())
@@ -1984,9 +2019,9 @@ and [<AbstractClass; Sealed>] JsonMetadata =
     static member internal CreateMany<'T>(): JsonCodec<DBRefMany<'T>> =
         ReferenceCollectionMetadata.RegisterMany<'T>()
         let write (items: DBRefMany<'T>) = if isNull items then Null else JsonImpl.IEnumerableSerialize items
-        let standard json = JsonImpl.IListDeserialize<'T,DBRefMany<'T>>(DBRefMany<'T>()) json
-        let read json = JsonSequenceOperations.Read<DBRefMany<'T>>(json,false,Func<JsonValue,DBRefMany<'T>>(standard))
-        JsonCodec<DBRefMany<'T>>(Func<DBRefMany<'T>,JsonValue>(write),Func<JsonValue,DBRefMany<'T>>(read),JsonCodecShape.SequenceValues typeof<'T>)
+        let standard json options = JsonImpl.IListDeserializeWithOptions<'T,DBRefMany<'T>>(DBRefMany<'T>()) (json,options)
+        let read json (options: JsonReadOptions) = JsonSequenceOperations.Read<DBRefMany<'T>>(json,false,options,Func<JsonValue,JsonReadOptions,DBRefMany<'T>>(standard))
+        JsonCodec<DBRefMany<'T>>(Func<DBRefMany<'T>,JsonValue>(write),Func<JsonValue,JsonReadOptions,DBRefMany<'T>>(read),JsonCodecShape.SequenceValues typeof<'T>)
 
     static member internal RegisterTypedMany<'T,'Id>() =
         JsonMetadata.RegisterGenerated(JsonMetadata.CreateTypedMany<'T,'Id>())
@@ -1995,9 +2030,9 @@ and [<AbstractClass; Sealed>] JsonMetadata =
     static member internal CreateTypedMany<'T,'Id>(): JsonCodec<DBRefMany<'T,'Id>> =
         ReferenceCollectionMetadata.RegisterTypedMany<'T,'Id>()
         let write (items: DBRefMany<'T,'Id>) = if isNull items then Null else JsonImpl.IEnumerableSerialize items
-        let standard json = JsonImpl.IListDeserialize<'T,DBRefMany<'T,'Id>>(DBRefMany<'T,'Id>()) json
-        let read json = JsonSequenceOperations.Read<DBRefMany<'T,'Id>>(json,false,Func<JsonValue,DBRefMany<'T,'Id>>(standard))
-        JsonCodec<DBRefMany<'T,'Id>>(Func<DBRefMany<'T,'Id>,JsonValue>(write),Func<JsonValue,DBRefMany<'T,'Id>>(read),JsonCodecShape.SequenceValues typeof<'T>)
+        let standard json options = JsonImpl.IListDeserializeWithOptions<'T,DBRefMany<'T,'Id>>(DBRefMany<'T,'Id>()) (json,options)
+        let read json (options: JsonReadOptions) = JsonSequenceOperations.Read<DBRefMany<'T,'Id>>(json,false,options,Func<JsonValue,JsonReadOptions,DBRefMany<'T,'Id>>(standard))
+        JsonCodec<DBRefMany<'T,'Id>>(Func<DBRefMany<'T,'Id>,JsonValue>(write),Func<JsonValue,JsonReadOptions,DBRefMany<'T,'Id>>(read),JsonCodecShape.SequenceValues typeof<'T>)
     /// Registers FSharp optional values using the same null/value format as Nullable.
     static member internal RegisterOptionTree<'T>() =
         JsonMetadata.EnsureScalarTree<bool>()
@@ -2013,14 +2048,14 @@ and [<AbstractClass; Sealed>] JsonMetadata =
             match value with
             | None -> Null
             | Some value -> JsonWriteOperations<'T>.Serialize value
-        let read json =
+        let read json (options: JsonReadOptions) =
             match json with
             | Null -> None
             | Object _ when json.Contains "HasValue" ->
-                if JsonReadOperations<bool>.Deserialize json["HasValue"] then Some(JsonReadOperations<'T>.Deserialize json["Value"])
+                if JsonReadOperations<bool>.Deserialize(json["HasValue"],options) then Some(JsonReadOperations<'T>.Deserialize(json["Value"],options))
                 else None
-            | other -> Some(JsonReadOperations<'T>.Deserialize other)
-        JsonCodec<option<'T>>(Func<option<'T>,JsonValue>(write),Func<JsonValue,option<'T>>(read),JsonCodecShape.NullableValue typeof<'T>)
+            | other -> Some(JsonReadOperations<'T>.Deserialize(other,options))
+        JsonCodec<option<'T>>(Func<option<'T>,JsonValue>(write),Func<JsonValue,JsonReadOptions,option<'T>>(read),JsonCodecShape.NullableValue typeof<'T>)
 
     /// Registers nullable value operations without constructing generic methods at runtime.
     static member internal RegisterNullableTree<'T when 'T: struct and 'T :> ValueType and 'T: (new: unit -> 'T)>() =
@@ -2034,22 +2069,22 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         TypeMetadata.registerNullableUnderlying typeof<Nullable<'T>> typeof<'T>
         let write (value: Nullable<'T>) =
             if value.HasValue then JsonWriteOperations<'T>.Serialize value.Value else Null
-        let read json =
+        let read json (options: JsonReadOptions) =
             match json with
             | Null -> Nullable<'T>()
             | Object _ when json.Contains "HasValue" ->
-                if JsonReadOperations<bool>.Deserialize json["HasValue"] then Nullable<'T>(JsonReadOperations<'T>.Deserialize json["Value"])
+                if JsonReadOperations<bool>.Deserialize(json["HasValue"],options) then Nullable<'T>(JsonReadOperations<'T>.Deserialize(json["Value"],options))
                 else Nullable<'T>()
-            | other -> Nullable<'T>(JsonReadOperations<'T>.Deserialize other)
-        JsonCodec<Nullable<'T>>(Func<Nullable<'T>, JsonValue>(write), Func<JsonValue, Nullable<'T>>(read), JsonCodecShape.NullableValue typeof<'T>)
+            | other -> Nullable<'T>(JsonReadOperations<'T>.Deserialize(other,options))
+        JsonCodec<Nullable<'T>>(Func<Nullable<'T>, JsonValue>(write), Func<JsonValue,JsonReadOptions, Nullable<'T>>(read), JsonCodecShape.NullableValue typeof<'T>)
 
 and private JsonSequenceOperations =
-    static member Read<'T>(json: JsonValue, supportsValuesWrapper: bool, standard: Func<JsonValue, 'T>): 'T =
+    static member Read<'T>(json: JsonValue, supportsValuesWrapper: bool, options: JsonReadOptions, standard: Func<JsonValue,JsonReadOptions, 'T>): 'T =
         match json with
         | Null -> Unchecked.defaultof<'T>
-        | List _ -> standard.Invoke(json)
+        | List _ -> standard.Invoke(json,options)
         | Object _ when json.Contains "$type" && json.Contains "$values" ->
-            if supportsValuesWrapper then JsonReadOperations<'T>.Deserialize json["$values"]
+            if supportsValuesWrapper then JsonReadOperations<'T>.Deserialize(json["$values"],options)
             else failwithf "Type not supported for Newtownsoft deserialization: %s" typeof<'T>.FullName
         | other -> JsonValue.InvalidValue(sprintf "Expected JsonValue.List or Object{$type, $values} for array deserialization but got %A" other)
 
@@ -2059,14 +2094,23 @@ and private JsonReadOperations<'A> =
         TypeMetadataCache.Discover(typeof<'A>,select,
             (fun operation metadata -> { metadata with JsonReader = ValueSome operation }), Func<Delegate>(fun () ->
                 if not(MetadataRuntime.supportsDynamicCode()) then
-                    Func<JsonValue,'A>(fun _ -> MetadataRuntime.missing "JSON read" typeof<'A>) :> Delegate
+                    Func<JsonValue,JsonReadOptions,'A>(fun _ _ -> MetadataRuntime.missing "JSON read" typeof<'A>) :> Delegate
                 else
                     try JsonDeserializerImpl<'A>.Build() :> Delegate
                     with error ->
                         let failure = TypeInitializationException("SoloDatabase.JsonSerializator.JsonDeserializerImpl`1",error)
-                        Func<JsonValue,'A>(fun _ -> raise failure) :> Delegate)) :?> Func<JsonValue,'A>
-    static member internal DeserializeFunc(value: JsonValue) = read.Invoke(value)
-    static member internal Deserialize(value: JsonValue): 'A = read.Invoke(value)
+                        Func<JsonValue,JsonReadOptions,'A>(fun _ _ -> raise failure) :> Delegate)) :?> Func<JsonValue,JsonReadOptions,'A>
+    static member internal DeserializeFunc(value: JsonValue, options: JsonReadOptions): 'A =
+        JsonReadOperations<'A>.Deserialize(value,options)
+    static member internal Deserialize(value: JsonValue): 'A =
+        JsonReadOperations<'A>.Deserialize(value,JsonReadOptions.Default)
+    static member internal Deserialize(value: JsonValue, options: JsonReadOptions): 'A =
+        match value with
+        | String key when options.NumericStrings = NumericStringFormat.StoredKey && typeof<'A>.Equals(typeof<decimal>) ->
+            unbox<'A>(box(StoredNumeric.DecodeDecimal key))
+        | String key when options.NumericStrings = NumericStringFormat.StoredKey && typeof<'A>.Equals(typeof<BigInteger>) ->
+            unbox<'A>(box(StoredNumeric.DecodeBigInteger key))
+        | _ -> read.Invoke(value,options)
 
 and private JsonWriteOperations<'A> =
     static let operation =
@@ -2207,27 +2251,27 @@ and private JsonImpl =
     /// <typeparam name="'T">The element type of the resulting sequence.</typeparam>
     /// <param name="jsonArray">The JsonValue.List to deserialize.</param>
     /// <returns>An IEnumerable&lt;'T&gt;.</returns>
-    static member internal IEnumerableDeserialize<'T>(jsonArray: JsonValue): IEnumerable<'T> =
+    static member internal IEnumerableDeserializeWithOptions<'T>(jsonArray: JsonValue, options: JsonReadOptions): IEnumerable<'T> =
         match jsonArray with
         | List items ->
             let result = new System.Collections.Generic.List<'T>(items.Count)
             for item in items do
-                result.Add(JsonReadOperations<'T>.Deserialize item)
+                result.Add(JsonReadOperations<'T>.Deserialize(item,options))
             JsonImpl.SequenceResult<'T,_>(result) :> IEnumerable<'T>
         | other ->
             JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
 
-    static member internal KeyValuePairDeserialize<'Key,'Value>(json: JsonValue): KeyValuePair<'Key,'Value> =
-        KeyValuePair<'Key,'Value>(JsonReadOperations<'Key>.Deserialize json["Key"], JsonReadOperations<'Value>.Deserialize json["Value"])
+    static member internal KeyValuePairDeserializeWithOptions<'Key,'Value>(json: JsonValue, options: JsonReadOptions): KeyValuePair<'Key,'Value> =
+        KeyValuePair<'Key,'Value>(JsonReadOperations<'Key>.Deserialize(json["Key"],options), JsonReadOperations<'Value>.Deserialize(json["Value"],options))
 
-    static member internal GroupingDeserialize<'Key,'Element>(json: JsonValue): Grouping<'Key,'Element> =
+    static member internal GroupingDeserializeWithOptions<'Key,'Element>(json: JsonValue, options: JsonReadOptions): Grouping<'Key,'Element> =
         let source = JsonImpl.AsListOrFail json["Items"]
         let items = ResizeArray<'Element>(source.Count)
-        for index in 0 .. source.Count - 1 do items.Add(JsonReadOperations<'Element>.Deserialize source[index])
-        JsonImpl.SequenceResult<'Element,_>(Grouping<'Key,'Element>(JsonReadOperations<'Key>.Deserialize json["Key"],items.ToArray()))
+        for index in 0 .. source.Count - 1 do items.Add(JsonReadOperations<'Element>.Deserialize(source[index],options))
+        JsonImpl.SequenceResult<'Element,_>(Grouping<'Key,'Element>(JsonReadOperations<'Key>.Deserialize(json["Key"],options),items.ToArray()))
 
-    static member internal OrderedEnumerableDeserialize<'Element>(json: JsonValue): IOrderedEnumerable<'Element> =
-        JsonImpl.SequenceResult<'Element,_>(Enumerable.OrderBy(JsonImpl.IEnumerableDeserialize<'Element>(json),Func<'Element,int>(fun _ -> 0)))
+    static member internal OrderedEnumerableDeserializeWithOptions<'Element>(json: JsonValue, options: JsonReadOptions): IOrderedEnumerable<'Element> =
+        JsonImpl.SequenceResult<'Element,_>(Enumerable.OrderBy(JsonImpl.IEnumerableDeserializeWithOptions<'Element>(json,options),Func<'Element,int>(fun _ -> 0)))
 
     // These concrete results are created here, so their writer policy is known without
     // discovering the private framework iterator type. Never infer it for caller objects.
@@ -2267,11 +2311,11 @@ and private JsonImpl =
     /// <param name="result">An empty instance of the list to populate.</param>
     /// <param name="jsonArray">The JsonValue.List to deserialize.</param>
     /// <returns>The populated list.</returns>
-    static member internal IListDeserialize<'T, 'L when 'L :> IList<'T>>(result: 'L) (jsonArray: JsonValue): 'L =
+    static member internal IListDeserializeWithOptions<'T, 'L when 'L :> IList<'T>>(result: 'L) (jsonArray: JsonValue, options: JsonReadOptions): 'L =
         match jsonArray with
         | List items ->
             for item in items do
-                result.Add(JsonReadOperations<'T>.Deserialize item)
+                result.Add(JsonReadOperations<'T>.Deserialize(item,options))
             result
         | other ->
             JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
@@ -2282,12 +2326,12 @@ and private JsonImpl =
     /// <typeparam name="'T">The element type.</typeparam>
     /// <param name="jsonArray">The JsonValue.List to deserialize.</param>
     /// <returns>An F# list.</returns>
-    static member internal FSharpListDeserialize<'T>(jsonArray: JsonValue): 'T list =
+    static member internal FSharpListDeserializeWithOptions<'T>(jsonArray: JsonValue, options: JsonReadOptions): 'T list =
         match jsonArray with
         | List items ->
             [
                 for item in items do
-                    JsonReadOperations<'T>.Deserialize item
+                    JsonReadOperations<'T>.Deserialize(item,options)
             ]
         | other ->
             JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
@@ -2298,10 +2342,10 @@ and private JsonImpl =
     /// <typeparam name="'T">The element type.</typeparam>
     /// <param name="jsonArray">The JsonValue.List to deserialize.</param>
     /// <returns>An array of type 'T.</returns>
-    static member internal ArrayDeserialize<'T>(jsonArray: JsonValue): 'T[] =
+    static member internal ArrayDeserializeWithOptions<'T>(jsonArray: JsonValue, options: JsonReadOptions): 'T[] =
         match jsonArray with
         | List items ->
-            let arr = Array.init items.Count (fun i -> JsonReadOperations<'T>.Deserialize items.[i])
+            let arr = Array.init items.Count (fun i -> JsonReadOperations<'T>.Deserialize(items.[i],options))
             arr
         | other ->
             JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
@@ -2341,12 +2385,12 @@ and private JsonImpl =
     /// <typeparam name="'T">The element type.</typeparam>
     /// <param name="jsonArray">The JsonValue.List to deserialize.</param>
     /// <returns>A HashSet&lt;'T&gt;.</returns>
-    static member internal HashSetDeserialize<'T>(jsonArray: JsonValue): HashSet<'T> =
+    static member internal HashSetDeserializeWithOptions<'T>(jsonArray: JsonValue, options: JsonReadOptions): HashSet<'T> =
         match jsonArray with
         | List items ->
             let result = new HashSet<'T>()
             for item in items do
-                result.Add(JsonReadOperations<'T>.Deserialize item) |> ignore
+                result.Add(JsonReadOperations<'T>.Deserialize(item,options)) |> ignore
             result
         | other ->
             JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
@@ -2357,12 +2401,12 @@ and private JsonImpl =
     /// <typeparam name="'T">The element type.</typeparam>
     /// <param name="jsonArray">The JsonValue.List to deserialize.</param>
     /// <returns>A Queue&lt;'T&gt;.</returns>
-    static member internal QueueDeserialize<'T>(jsonArray: JsonValue): Queue<'T> =
+    static member internal QueueDeserializeWithOptions<'T>(jsonArray: JsonValue, options: JsonReadOptions): Queue<'T> =
         match jsonArray with
         | List items ->
             let result = new Queue<'T>()
             for item in items do
-                result.Enqueue(JsonReadOperations<'T>.Deserialize item)
+                result.Enqueue(JsonReadOperations<'T>.Deserialize(item,options))
             result
         | other ->
             JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
@@ -2373,13 +2417,13 @@ and private JsonImpl =
     /// <typeparam name="'T">The element type.</typeparam>
     /// <param name="jsonArray">The JsonValue.List to deserialize.</param>
     /// <returns>A Stack&lt;'T&gt;.</returns>
-    static member internal StackDeserialize<'T>(jsonArray: JsonValue): Stack<'T> =
+    static member internal StackDeserializeWithOptions<'T>(jsonArray: JsonValue, options: JsonReadOptions): Stack<'T> =
         match jsonArray with
         | List items ->
             // For stack, we need to process items in reverse order to maintain order
             let result = new Stack<'T>()
             for i = items.Count - 1 downto 0 do
-                result.Push(JsonReadOperations<'T>.Deserialize items.[i])
+                result.Push(JsonReadOperations<'T>.Deserialize(items.[i],options))
             result
         | other ->
             JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
@@ -2390,12 +2434,12 @@ and private JsonImpl =
     /// <typeparam name="'T">The element type.</typeparam>
     /// <param name="jsonArray">The JsonValue.List to deserialize.</param>
     /// <returns>A LinkedList&lt;'T&gt;.</returns>
-    static member internal LinkedListDeserialize<'T>(jsonArray: JsonValue): LinkedList<'T> =
+    static member internal LinkedListDeserializeWithOptions<'T>(jsonArray: JsonValue, options: JsonReadOptions): LinkedList<'T> =
         match jsonArray with
         | List items ->
             let result = new LinkedList<'T>()
             for item in items do
-                result.AddLast(JsonReadOperations<'T>.Deserialize item) |> ignore
+                result.AddLast(JsonReadOperations<'T>.Deserialize(item,options)) |> ignore
             result
         | other ->
             JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
@@ -2407,14 +2451,14 @@ and private JsonImpl =
     /// <typeparam name="'TValue">The value type.</typeparam>
     /// <param name="jsonObj">The JsonValue.Object to deserialize.</param>
     /// <returns>An IDictionary&lt;'TKey, 'TValue&gt;.</returns>
-    static member internal DictionaryDeserialize<'TKey, 'TValue when 'TKey : equality>(jsonObj: JsonValue): IDictionary<'TKey,'TValue> =
+    static member internal DictionaryDeserializeWithOptions<'TKey, 'TValue when 'TKey : equality>(jsonObj: JsonValue, options: JsonReadOptions): IDictionary<'TKey,'TValue> =
         match jsonObj with
         | Object properties ->
             let result = new Dictionary<'TKey, 'TValue>(properties.Count)
             for KeyValue(key, value) in properties do
                 if key <> "$type" then
                     let typedKey = ConvertStringTo<'TKey>.Convert key
-                    let typedValue = JsonReadOperations<'TValue>.Deserialize value
+                    let typedValue = JsonReadOperations<'TValue>.Deserialize(value,options)
                     result.Add(typedKey, typedValue)
             result :> IDictionary<'TKey, 'TValue>
         | other ->
@@ -2427,7 +2471,7 @@ and private JsonImpl =
     /// <typeparam name="'TValue">The value type.</typeparam>
     /// <param name="jsonObj">The JsonValue.Object to deserialize.</param>
     /// <returns>An IReadOnlyDictionary&lt;'TKey, 'TValue&gt;.</returns>
-    static member internal IReadOnlyDictionaryDeserialize<'TKey, 'TValue when 'TKey : equality>(jsonObj: JsonValue): IReadOnlyDictionary<'TKey,'TValue> =
+    static member internal IReadOnlyDictionaryDeserializeWithOptions<'TKey, 'TValue when 'TKey : equality>(jsonObj: JsonValue, options: JsonReadOptions): IReadOnlyDictionary<'TKey,'TValue> =
         match jsonObj with
         | Object properties ->
             let dict = new Dictionary<'TKey, 'TValue>(properties.Count)
@@ -2435,7 +2479,7 @@ and private JsonImpl =
                 if key <> "$type" then
                     let typedKey = ConvertStringTo<'TKey>.Convert key
 
-                    let typedValue = JsonReadOperations<'TValue>.Deserialize value
+                    let typedValue = JsonReadOperations<'TValue>.Deserialize(value,options)
                     dict.Add(typedKey, typedValue)
             dict :> IReadOnlyDictionary<'TKey, 'TValue>
         | other ->
@@ -2446,13 +2490,13 @@ and private JsonImpl =
     /// </summary>
     /// <param name="jsonObj">The JsonValue.Object to deserialize.</param>
     /// <returns>An IDictionary.</returns>
-    static member internal NonGenericDictionaryDeserialize(jsonObj: JsonValue) =
+    static member internal NonGenericDictionaryDeserializeWithOptions(jsonObj: JsonValue, options: JsonReadOptions) =
         match jsonObj with
         | Object properties ->
             let result = new Hashtable(properties.Count)
             for KeyValue(key, value) in properties do
                 if key <> "$type" then
-                    let typedValue = JsonReadOperations<obj>.Deserialize value
+                    let typedValue = JsonReadOperations<obj>.Deserialize(value,options)
                     result.Add(key, typedValue)
             result :> IDictionary
         | other ->
@@ -2467,13 +2511,13 @@ and private JsonImpl =
     /// <param name="result">An empty instance of the dictionary to populate.</param>
     /// <param name="jsonObj">The JsonValue.Object to deserialize.</param>
     /// <returns>The populated dictionary.</returns>
-    static member internal CustomDictionaryDeserialize<'TKey, 'TValue, 'TDict when 'TDict :> IDictionary<'TKey, 'TValue>> (result: 'TDict) (jsonObj: JsonValue): 'TDict =
+    static member internal CustomDictionaryDeserializeWithOptions<'TKey, 'TValue, 'TDict when 'TDict :> IDictionary<'TKey, 'TValue>> (result: 'TDict) (jsonObj: JsonValue, options: JsonReadOptions): 'TDict =
         match jsonObj with
         | Object properties ->
             for KeyValue(key, value) in properties do
                 if key <> "$type" then
                     let typedKey = ConvertStringTo<'TKey>.Convert key
-                    let typedValue = JsonReadOperations<'TValue>.Deserialize value
+                    let typedValue = JsonReadOperations<'TValue>.Deserialize(value,options)
                     result.Add(KeyValuePair<'TKey, 'TValue>(typedKey, typedValue))
             result
         | other ->
@@ -2486,34 +2530,68 @@ and private JsonImpl =
     /// <param name="result">An empty instance of the dictionary to populate.</param>
     /// <param name="jsonObj">The JsonValue.Object to deserialize.</param>
     /// <returns>The populated dictionary.</returns>
-    static member internal CustomNonGenericDictionaryDeserialize<'TDict when 'TDict :> IDictionary> (result: 'TDict) (jsonObj: JsonValue): 'TDict =
+    static member internal CustomNonGenericDictionaryDeserializeWithOptions<'TDict when 'TDict :> IDictionary> (result: 'TDict) (jsonObj: JsonValue, options: JsonReadOptions): 'TDict =
         match jsonObj with
         | Object properties ->
             for KeyValue(key, value) in properties do
                 if key <> "$type" then
-                    let typedValue = JsonReadOperations<obj>.Deserialize value
+                    let typedValue = JsonReadOperations<obj>.Deserialize(value,options)
                     result.Add(key, typedValue)
             result
         | other ->
             JsonValue.InvalidValue(sprintf "Expected JsonValue.Object but got %A" other)
 
+    // Existing generated assemblies retain their original default-reader signatures.
+    static member internal IEnumerableDeserialize<'T>(jsonArray: JsonValue): IEnumerable<'T> =
+        JsonImpl.IEnumerableDeserializeWithOptions<'T>(jsonArray,JsonReadOptions.Default)
+    static member internal KeyValuePairDeserialize<'Key,'Value>(json: JsonValue): KeyValuePair<'Key,'Value> =
+        JsonImpl.KeyValuePairDeserializeWithOptions<'Key,'Value>(json,JsonReadOptions.Default)
+    static member internal GroupingDeserialize<'Key,'Element>(json: JsonValue): Grouping<'Key,'Element> =
+        JsonImpl.GroupingDeserializeWithOptions<'Key,'Element>(json,JsonReadOptions.Default)
+    static member internal OrderedEnumerableDeserialize<'Element>(json: JsonValue): IOrderedEnumerable<'Element> =
+        JsonImpl.OrderedEnumerableDeserializeWithOptions<'Element>(json,JsonReadOptions.Default)
+    static member internal IListDeserialize<'T, 'L when 'L :> IList<'T>>(result: 'L) (jsonArray: JsonValue): 'L =
+        JsonImpl.IListDeserializeWithOptions<'T, 'L>(result) (jsonArray,JsonReadOptions.Default)
+    static member internal FSharpListDeserialize<'T>(jsonArray: JsonValue): 'T list =
+        JsonImpl.FSharpListDeserializeWithOptions<'T>(jsonArray,JsonReadOptions.Default)
+    static member internal ArrayDeserialize<'T>(jsonArray: JsonValue): 'T[] =
+        JsonImpl.ArrayDeserializeWithOptions<'T>(jsonArray,JsonReadOptions.Default)
+    static member internal HashSetDeserialize<'T>(jsonArray: JsonValue): HashSet<'T> =
+        JsonImpl.HashSetDeserializeWithOptions<'T>(jsonArray,JsonReadOptions.Default)
+    static member internal QueueDeserialize<'T>(jsonArray: JsonValue): Queue<'T> =
+        JsonImpl.QueueDeserializeWithOptions<'T>(jsonArray,JsonReadOptions.Default)
+    static member internal StackDeserialize<'T>(jsonArray: JsonValue): Stack<'T> =
+        JsonImpl.StackDeserializeWithOptions<'T>(jsonArray,JsonReadOptions.Default)
+    static member internal LinkedListDeserialize<'T>(jsonArray: JsonValue): LinkedList<'T> =
+        JsonImpl.LinkedListDeserializeWithOptions<'T>(jsonArray,JsonReadOptions.Default)
+    static member internal DictionaryDeserialize<'TKey, 'TValue when 'TKey : equality>(jsonObj: JsonValue): IDictionary<'TKey,'TValue> =
+        JsonImpl.DictionaryDeserializeWithOptions<'TKey, 'TValue>(jsonObj,JsonReadOptions.Default)
+    static member internal IReadOnlyDictionaryDeserialize<'TKey, 'TValue when 'TKey : equality>(jsonObj: JsonValue): IReadOnlyDictionary<'TKey,'TValue> =
+        JsonImpl.IReadOnlyDictionaryDeserializeWithOptions<'TKey, 'TValue>(jsonObj,JsonReadOptions.Default)
+    static member internal NonGenericDictionaryDeserialize(jsonObj: JsonValue) =
+        JsonImpl.NonGenericDictionaryDeserializeWithOptions(jsonObj,JsonReadOptions.Default)
+    static member internal CustomDictionaryDeserialize<'TKey, 'TValue, 'TDict when 'TDict :> IDictionary<'TKey, 'TValue>> (result: 'TDict) (jsonObj: JsonValue): 'TDict =
+        JsonImpl.CustomDictionaryDeserializeWithOptions<'TKey, 'TValue, 'TDict>(result) (jsonObj,JsonReadOptions.Default)
+    static member internal CustomNonGenericDictionaryDeserialize<'TDict when 'TDict :> IDictionary> (result: 'TDict) (jsonObj: JsonValue): 'TDict =
+        JsonImpl.CustomNonGenericDictionaryDeserializeWithOptions<'TDict>(result) (jsonObj,JsonReadOptions.Default)
+
     /// <summary>
     /// A cached function to deserialize a JsonValue to a specific runtime type.
     /// </summary>
-    static member internal DeserializeByType (t: Type) (v: JsonValue) =
+    static member internal DeserializeByType (t: Type) (v: JsonValue) (options: JsonReadOptions) =
         let read =
             match TypeMetadataCache.Read(t,(fun metadata -> metadata.RuntimeJsonRead)) with
             | ValueSome operation -> operation.Value
             | ValueNone ->
                 TypeMetadataCache.Discover(t, (fun metadata -> metadata.RuntimeJsonRead),
-                    (fun operation metadata -> { metadata with RuntimeJsonRead = ValueSome operation }), Func<Func<obj,obj>>(fun () ->
+                    (fun operation metadata -> { metadata with RuntimeJsonRead = ValueSome operation }), Func<Func<obj,JsonReadOptions,obj>>(fun () ->
                         if not (MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "JSON read" t
                         let method = typedefof<JsonReadOperations<_>>.MakeGenericType(t)
                                          .GetMethod(nameof JsonReadOperations<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
-                        let generated = DynamicMethod("ReadRuntimeJson",typeof<obj>,[|typeof<obj>|],typeof<JsonValue>.Module,true)
+                        let generated = DynamicMethod("ReadRuntimeJson",typeof<obj>,[|typeof<obj>;typeof<JsonReadOptions>|],typeof<JsonValue>.Module,true)
                         CodecEmitter.boxedRead (RuntimeCodecIL(generated.GetILGenerator())) typeof<JsonValue> t t.IsValueType (method :> MethodBase)
-                        generated.CreateDelegate(typeof<Func<obj,obj>>) :?> Func<obj,obj>))
-        read.Invoke(box v)
+                        generated.CreateDelegate(typeof<Func<obj,JsonReadOptions,obj>>) :?> Func<obj,JsonReadOptions,obj>))
+        read.Invoke(box v,options)
 
     static member internal SerializeByType (runtimeType: Type) (value: obj) =
         let write =
@@ -2999,7 +3077,7 @@ and private JsonTupleGeneration =
         let api = JsonObjectGeneration.Api()
         let writer = DynamicMethod("WriteTuple",typeof<JsonValue[]>,[|typeof<'T>|],typeof<JsonValue>.Module,true)
         CodecTupleEmitter.writer (RuntimeCodecIL(writer.GetILGenerator())) typeof<JsonValue> api.Serialize model
-        let reader = DynamicMethod("ReadTuple",typeof<'T>,[|typeof<JsonValue>|],typeof<JsonValue>.Module,true)
+        let reader = DynamicMethod("ReadTuple",typeof<'T>,[|typeof<JsonValue>;typeof<JsonReadOptions>|],typeof<JsonValue>.Module,true)
         let tupleElement = typeof<JsonMetadata>.GetMethod("TupleElement",BindingFlags.NonPublic ||| BindingFlags.Static) :> MethodBase
         CodecTupleEmitter.reader (RuntimeCodecIL(reader.GetILGenerator())) tupleElement api.Deserialize model
         let members = CodecTupleEmitter.leaves model |> Array.mapi (fun index path ->
@@ -3009,8 +3087,8 @@ and private JsonTupleGeneration =
             let read = getter.CreateDelegate(typeof<Func<obj,obj>>) :?> Func<obj,obj>
             let name = "Item" + string(index + 1)
             JsonStoredMember(typeof<'T>,memberValue.Type,name,name,typeof<'T>.IsValueType,read))
-        JsonMetadata.CreateTuple<'T>(writer.CreateDelegate(typeof<Func<'T,JsonValue[]>>) :?> Func<'T,JsonValue[]>,
-                                    reader.CreateDelegate(typeof<Func<JsonValue,'T>>) :?> Func<JsonValue,'T>,members)
+        JsonMetadata.CreateTupleWithOptions<'T>(writer.CreateDelegate(typeof<Func<'T,JsonValue[]>>) :?> Func<'T,JsonValue[]>,
+                                    reader.CreateDelegate(typeof<Func<JsonValue,JsonReadOptions,'T>>) :?> Func<JsonValue,JsonReadOptions,'T>,members)
 
 and private JsonObjectGeneration =
     static member internal Api(): CodecApi<Type,MethodBase> =
@@ -3030,14 +3108,14 @@ and private JsonObjectGeneration =
           TypeFromHandle = typeof<Type>.GetMethod("GetTypeFromHandle") :> MethodBase
           SerializeActual = metadata "SerializeActual" [||]
           ActualType = fun target -> metadata "ActualType" [|target|]
-          ToRuntimeObject = method typeof<JsonValue> "ToObject" [||] (Some 1)
+          ToRuntimeObject = method typeof<JsonValue> "ToObject" [||] (Some 2)
           DictionaryConstructor = typeof<Dictionary<string,JsonValue>>.GetConstructor([|typeof<int>|]) :> MethodBase
           DictionaryAdd = typeof<Dictionary<string,JsonValue>>.GetMethod("Add") :> MethodBase
           NewObject = json "NewObject" [||]; ObjectProperties = metadata "ObjectProperties" [||]
           TryGetValue = typeof<IDictionary<string,JsonValue>>.GetMethod("TryGetValue") :> MethodBase
           Uninitialized = fun target -> metadata "Uninitialized" [|target|]
           Serialize = fun target -> json "Serialize" [|target|]
-          Deserialize = fun target -> json "ToObject" [|target|]
+          Deserialize = fun target -> method typeof<JsonValue> "ToObject" [|target|] (Some 1)
           ExceptionConstructor = typeof<Exception>.GetConstructor([|typeof<string>|]) :> MethodBase
           ArgumentExceptionConstructor = typeof<ArgumentException>.GetConstructor([|typeof<string>;typeof<string>|]) :> MethodBase
           InitializationExceptionConstructor = typeof<TypeInitializationException>.GetConstructor([|typeof<string>;typeof<Exception>|]) :> MethodBase
@@ -3048,11 +3126,11 @@ and private JsonObjectGeneration =
           RawReader = false }
 
     static member Reader<'T>() =
-        let method = DynamicMethod("ReadJson",typeof<'T>,[|typeof<JsonValue>|],typeof<JsonValue>.Module,true)
+        let method = DynamicMethod("ReadJson",typeof<'T>,[|typeof<JsonValue>;typeof<JsonReadOptions>|],typeof<JsonValue>.Module,true)
         let model = JsonModelDiscovery.Model typeof<'T>
         JsonModelDiscovery.PublishConstruction model
         CodecEmitter.reader (RuntimeCodecIL(method.GetILGenerator())) (JsonObjectGeneration.Api()) model
-        method.CreateDelegate(typeof<Func<JsonValue,'T>>) :?> Func<JsonValue,'T>
+        method.CreateDelegate(typeof<Func<JsonValue,JsonReadOptions,'T>>) :?> Func<JsonValue,JsonReadOptions,'T>
 
     static member Writer<'T>() =
         let model = JsonModelDiscovery.Model typeof<'T>
@@ -3498,11 +3576,11 @@ and private JsonRawRead<'Contract> =
     [<MethodImpl(MethodImplOptions.NoInlining)>]
     static member internal PrimitiveRetry<'T,'R when 'R : struct and 'R :> IJsonReader>(error: exn, context: byref<JsonReadContext<'R>>): 'T =
         match error with
-        | JsonPrimitiveShapeMismatch target -> JsonImpl.DeserializeByType target (JsonRawInput<'Contract>.Tree<'R> &context) |> unbox<'T>
+        | JsonPrimitiveShapeMismatch target -> JsonImpl.DeserializeByType target (JsonRawInput<'Contract>.Tree<'R> &context) (JsonReadOptions.FromFormat context.NumericStrings) |> unbox<'T>
         | _ -> raise error
     [<MethodImpl(MethodImplOptions.NoInlining)>]
     static member internal ScalarRetry<'T,'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): 'T =
-        JsonReadOperations<'T>.Deserialize(JsonRawInput<'Contract>.Tree<'R> &context)
+        JsonReadOperations<'T>.Deserialize(JsonRawInput<'Contract>.Tree<'R> &context,JsonReadOptions.FromFormat context.NumericStrings)
     static member internal Ensure<'T,'R when 'R : struct and 'R :> IJsonReader>(): unit =
         JsonRawReadBinding<'T,'R,'Contract>.Value |> ignore
     static member internal Read<'T,'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): 'T =
@@ -3660,17 +3738,17 @@ and private JsonRawInput<'Contract> =
     static member internal TryGetValue<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>, name: string, child: byref<JsonReadContext<'R>>): bool =
         JsonReadCursor.tryProperty &context name &child
     static member internal Contains<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>, name: string): bool =
-        let mutable child = JsonReadContext(context.Cursor,context.Range)
+        let mutable child = JsonReadCursor.child &context context.Range
         if isNull context.Properties then JsonReadCursor.scan &context
         not(isNull context.Properties) && JsonReadCursor.tryProperty &context name &child
     static member internal GetProperty<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>, name: string): JsonReadContext<'R> =
-        let mutable child = JsonReadContext(context.Cursor,context.Range)
+        let mutable child = JsonReadCursor.child &context context.Range
         if isNull context.Properties then JsonReadCursor.scan &context
         if isNull context.Properties || not(JsonReadCursor.tryProperty &context name &child) then failwith "Property not found"
         child
     static member internal ActualType<'T,'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): Type =
         let target = typeof<'T>
-        let mutable child = JsonReadContext(context.Cursor,context.Range)
+        let mutable child = JsonReadCursor.child &context context.Range
         let actual =
             if JsonRawInput<'Contract>.Contains<'R>(&context,"$type") then
                 child <- JsonRawInput<'Contract>.GetProperty<'R>(&context,"$type")
@@ -4432,16 +4510,16 @@ and private JsonRuntimeCalls =
         (if arguments.Length = 0 then method else method.MakeGenericMethod(arguments)) :> MethodBase
 
     static member Reader<'T>(before: ConstructorInfo option, call: MethodBase option, after: ConstructorInfo option, cast: bool, nullDefault: bool) =
-        let method = DynamicMethod("ReadJson",typeof<'T>,[|typeof<JsonValue>|],typeof<JsonValue>.Module,true)
+        let method = DynamicMethod("ReadJson",typeof<'T>,[|typeof<JsonValue>;typeof<JsonReadOptions>|],typeof<JsonValue>.Module,true)
         let operation = { Result = typeof<'T>; Before = before |> Option.map (fun item -> item :> MethodBase)
                           Call = call; After = after |> Option.map (fun item -> item :> MethodBase); Cast = cast; NullDefault = nullDefault }
         CodecEmitter.readerCall (RuntimeCodecIL(method.GetILGenerator())) (typeof<JsonValue>.GetMethod("get_IsNull") :> MethodBase) operation
-        method.CreateDelegate(typeof<Func<JsonValue,'T>>) :?> Func<JsonValue,'T>
+        method.CreateDelegate(typeof<Func<JsonValue,JsonReadOptions,'T>>) :?> Func<JsonValue,JsonReadOptions,'T>
 
     static member ReaderOperation<'T>(operation: CodecReaderCall<Type,MethodBase>) =
-        let method = DynamicMethod("ReadJson",typeof<'T>,[|typeof<JsonValue>|],typeof<JsonValue>.Module,true)
+        let method = DynamicMethod("ReadJson",typeof<'T>,[|typeof<JsonValue>;typeof<JsonReadOptions>|],typeof<JsonValue>.Module,true)
         CodecEmitter.readerCall (RuntimeCodecIL(method.GetILGenerator())) (typeof<JsonValue>.GetMethod("get_IsNull") :> MethodBase) operation
-        method.CreateDelegate(typeof<Func<JsonValue,'T>>) :?> Func<JsonValue,'T>
+        method.CreateDelegate(typeof<Func<JsonValue,JsonReadOptions,'T>>) :?> Func<JsonValue,JsonReadOptions,'T>
 
     static member WriterOperation<'T>(operation: CodecWriterCall<Type,MethodBase>) =
         let method = DynamicMethod("WriteJson",typeof<JsonValue>,[|typeof<'T>|],typeof<JsonValue>.Module,true)
@@ -4460,15 +4538,15 @@ and private JsonRuntimeCalls =
         method.CreateDelegate(typeof<Func<'T>>) :?> Func<'T>
 
 and private JsonDeserializerImpl<'A> =
-    static member internal Build(): Func<JsonValue,'A> =
+    static member internal Build(): Func<JsonValue,JsonReadOptions,'A> =
         match JsonScalarOperations<'A>.Reader with
-        | ValueSome read -> read
+        | ValueSome read -> Func<JsonValue,JsonReadOptions,'A>(fun json _ -> read.Invoke(json))
         | ValueNone ->
             match JsonCodecDiscovery.TryBuild<'A>() with
             | ValueSome codec -> codec.Reader
             | ValueNone -> JsonDeserializerImpl<'A>.BuildStructuredDeserializer()
 
-    static member private BuildStructuredDeserializer() : Func<JsonValue,'A> =
+    static member private BuildStructuredDeserializer() : Func<JsonValue,JsonReadOptions,'A> =
         let target = typeof<'A>
         let decision = JsonCodecDiscovery.Decision target
         let preparation = CodecPreparation.treeReader decision.Shape
@@ -4478,7 +4556,7 @@ and private JsonDeserializerImpl<'A> =
             TypeMetadata.GenericTypeArgCache.Get definition
         let definition = if target.IsGenericType then target.GetGenericTypeDefinition() else target
         let selected = TypeSupport.TreeValueReader(definition.FullName,target,TypeMetadata.GenericTypeArgCache.Get target,
-                            Func<string,Type[],MethodBase>(fun name types -> JsonRuntimeCalls.Helper(name,types)))
+                            Func<string,Type[],MethodBase>(fun name types -> JsonRuntimeCalls.Helper(name + "WithOptions",types)))
         match selected with
         | Some operation -> JsonRuntimeCalls.ReaderOperation<'A> operation
         | None ->
@@ -4490,11 +4568,11 @@ and private JsonDeserializerImpl<'A> =
                 else target.GetConstructor(Type.EmptyTypes)
             let helper = Func<string,Type[],MethodBase>(fun name types ->
                 if name = "MissingCollectionConstructor" then failwithf "Type %s must have a parameterless constructor" target.Name
-                JsonRuntimeCalls.Helper(name,types))
+                JsonRuntimeCalls.Helper(name + "WithOptions",types))
             let operation = TypeSupport.CollectionTreeReader(decision.Shape,target,constructor |> Option.ofObj |> Option.map(fun value -> value :> MethodBase),target.IsAbstract,populate,arguments,helper)
             let standard = JsonRuntimeCalls.ReaderOperation<'A> operation
             if decision.Shape = TypeShape.CustomSequence then
-                Func<JsonValue,'A>(fun json -> JsonSequenceOperations.Read<'A>(json,TypeSupport.ArrayValuesWrapper(target.IsArray,(if target.IsArray then target.GetElementType().FullName else "")),standard))
+                Func<JsonValue,JsonReadOptions,'A>(fun json options -> JsonSequenceOperations.Read<'A>(json,TypeSupport.ArrayValuesWrapper(target.IsArray,(if target.IsArray then target.GetElementType().FullName else "")),options,standard))
             else standard
         else
           match target with

@@ -6,6 +6,7 @@ open System.Data
 open System.Data.Common
 open System.IO
 open SoloDatabase
+open SoloDatabase.JsonSerializator
 
 module internal AdoReaderAccess =
     let inline guard (session: AdoSession) version closed action =
@@ -144,6 +145,13 @@ type SqliteDataReader internal (session: AdoSession, rows: SqlRows, admission: N
         elif typeof<'T>.Equals(typeof<Stream>) then unbox<'T>(box (this.GetStream(ordinal)))
         elif typeof<'T>.Equals(typeof<TextReader>) then unbox<'T>(box (this.GetTextReader(ordinal)))
         else AdoReaderAccess.current session rows version closed positioned (fun row -> SqlRowValue.ReadRaw<'T>(row, ordinal))
+    /// Reads a typed field with explicit numerical TEXT interpretation; BCL getter defaults remain unchanged.
+    member this.GetFieldValue<'T>(ordinal: int, numericStrings: NumericStringFormat): 'T =
+        AdoReaderAccess.current session rows version closed positioned (fun row ->
+            NumericStringPolicy.validate numericStrings
+            if typeof<'T>.Equals(typeof<obj>) || typeof<'T>.Equals(typeof<Stream>) || typeof<'T>.Equals(typeof<TextReader>) then
+                this.GetFieldValue<'T>(ordinal)
+            else SqlRowValue.ReadRaw<'T>(row.WithNumericStrings numericStrings,ordinal))
     override _.GetBytes(ordinal, dataOffset, buffer, bufferOffset, length) =
         AdoReaderAccess.current session rows version closed positioned (fun row ->
             if dataOffset < 0L then raise (ArgumentOutOfRangeException("dataOffset"))

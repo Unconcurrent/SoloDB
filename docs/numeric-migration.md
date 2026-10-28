@@ -56,3 +56,5 @@ Before the first 1.4 opening, normalize known legacy quoted numerical fields thr
 For conflicting subtype meanings or data outside the explicit-field recipe, use an application-specific typed export and rewrite based on the original schema and producer. Preserve original integer tokens and Decimal values; verify the complete records and identities in the destination. If the file has already been upgraded, use the original source or a pre-upgrade backup to build a separate current database, or perform a targeted current typed rewrite from independently known values. Reopening it with 1.3 by lowering `user_version` is not a migration method. Current bytes alone cannot recover an intended value that has already been overwritten.
 
 See [numerical storage and migration](generated-metadata.md#numerical-storage-and-migration) for the storage and initialization contracts, and [raw SQL](native-sql.md) for physical access.
+
+For extracted current encoded leaves and explicit JSON string conversion, see [reading stored numerical strings](stored-numeric.md).

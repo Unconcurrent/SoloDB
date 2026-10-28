@@ -79,10 +79,14 @@ module internal QueryDiscovery =
         let roots = ResizeArray<FSharpType>()
         let rec closed (typ: FSharpType) =
             not typ.IsGenericParameter && (typ.GenericArguments |> Seq.forall closed)
+        let rec soloNamespace (entity: FSharpEntity) =
+            match entity.Namespace with
+            | Some name -> name = "SoloDatabase" || name.StartsWith("SoloDatabase.",StringComparison.Ordinal)
+            | None -> entity.DeclaringEntity |> Option.exists soloNamespace
         let soloDBUse (method: FSharpMemberOrFunctionOrValue) =
             method.DeclaringEntity |> Option.exists(fun entity ->
                 entity.Assembly.SimpleName = "SoloDB" &&
-                (entity.Namespace |> Option.exists(fun name -> name.StartsWith("SoloDatabase",StringComparison.Ordinal))) &&
+                soloNamespace entity &&
                 not(entity.CompiledName.Contains("Metadata")))
         for useSite in uses do
             match useSite.Symbol with

@@ -38,7 +38,7 @@ internal sealed class CecilCodecIL : CodecIL<TypeReference, MethodReference, Fie
     public override bool ResultParameter(MethodReference method) => method.ReturnType.MetadataType==MetadataType.Void && method.Parameters.Count==2 && method.Parameters[1].ParameterType is ByReferenceType;
     public override FSharpOption<FieldReference> PropertyStorage(MethodReference method)
     {
-        var getter = Module.MetadataResolver.Resolve(method);
+        var getter = Module.MetadataResolver.Resolve(Module.ImportReference(method));
         if (!getter.HasThis || !getter.HasBody) return null!;
         var instructions = getter.Body.Instructions;
         var direct = instructions.Count == 3 && instructions[0].OpCode == OpCodes.Ldarg_0 &&

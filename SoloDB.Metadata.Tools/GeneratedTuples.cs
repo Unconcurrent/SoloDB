@@ -38,10 +38,10 @@ internal static class GeneratedTuples
         var write = api.Method(owner, "WriteTuple" + index, array, true, type);
         var codecApi = new GeneratedJsonAssembly.Api(module,product);
         GeneratedCodec.TupleWriter(write,tuple,codecApi);
-        var read = api.Method(owner, "ReadTuple" + index, type, true, api.Json);
+        var read = api.Method(owner, "ReadTuple" + index, type, true, api.Json, codecApi.ReadOptions);
         GeneratedCodec.TupleReader(read,tuple,codecApi);
         api.Delegate(entry, api.Function(type, array), write);
-        api.Delegate(entry, api.Function(api.Json, type), read);
+        api.Delegate(entry, codecApi.Function(api.Json, codecApi.ReadOptions, type), read);
         var stored = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonStoredMember"));
         entry.Emit(OpCodes.Ldc_I4, leaves.Length); entry.Emit(OpCodes.Newarr, stored);
         for (var i = 0; i < leaves.Length; i++)
@@ -55,7 +55,7 @@ internal static class GeneratedTuples
             api.Delegate(entry, api.Function(type, leaf.Type), getter);
             entry.Emit(OpCodes.Call, api.Product("JsonSerializator.JsonMetadata", "Member", type, leaf.Type)); entry.Emit(OpCodes.Stelem_Ref);
         }
-        entry.Emit(OpCodes.Call, api.Product("JsonSerializator.JsonMetadata", "RegisterTuple", type));
+        entry.Emit(OpCodes.Call, api.Product("JsonSerializator.JsonMetadata", "RegisterTupleWithOptions", type));
         GeneratedRawCodec.Register(definitions,module,owner,entry,product,model,index,models);
         GeneratedJsonAssembly.RegisterConstruction(module,owner,entry,product,model,model.Members.Select(member => module.ImportReference(member.Type)).ToArray(),index);
         if (includeRows)

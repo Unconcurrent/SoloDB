@@ -167,7 +167,7 @@ type SqlRowValue private () =
                     TypeSupport.IsScalar((Utils.optionalPayloadType typeof<'T>).FullName) ||
                     JsonValue.HasScalarCarrier typeof<'T>
                 let text = if scalarPayload then SqlRowValue.StoredScalar(row,ordinal) else row.GetString ordinal
-                Some(JsonValue.ParseInto<'T>(text))
+                Some(JsonValue.ParseInto<'T>(text,JsonReadOptions.FromFormat row.NumericStrings))
 
     static member internal ReadRawOption<'T>(row: SqlRow, ordinal: int) : option<'T> =
         SqlRowValue.ReadOption<'T>(row,ordinal)
