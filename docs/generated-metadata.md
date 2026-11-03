@@ -116,6 +116,14 @@ With the standard Debug and Release configurations, this selects generated opera
 
 When generation is inactive, ordinary JIT execution discovers supported type operations lazily at runtime. Registered generated operations take precedence when present. NativeAOT needs generated coverage; runtime discovery is not a substitute for missing operations. PublishAot belongs on the consuming executable project, including when its models live in a .NET Standard library.
 
+Register the [C#](#c) or [F#](#f) operations shown above, then publish your executable with the standard .NET SDK command. For example, on Linux x64:
+
+```bash
+dotnet publish -c Release -r linux-x64 -p:PublishAot=true
+```
+
+Choose the runtime identifier for your target and install the SDK's [NativeAOT platform prerequisites](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/#prerequisites). Keep registration enabled in the configuration you publish. F# query construction uses the [whole-query `CompileQuotation` route](#f-query-quotations) below.
+
 Both C# and F# builds emit application operations into a project-specific runtime helper assembly. Package build integration generates and delivers the helper during normal builds and publishing. Keep it with managed application output; NativeAOT consumes it during native compilation. The generator and provider tooling are build-time dependencies and are not deployed with the application.
 
 Generating operations requires .NET SDK 8 or later; installing SDK 10 separately is unnecessary. This compiler requirement is separate from the runtime requirements of ordinary SoloDB applications. F# analysis uses the installed SDK's .NET host. The runtime library requires FSharp.Core 6.0.7 or later and preserves newer consumer versions. The CSharp generator and FSharp provider use FSharp.Core 8 independently of the runtime library.

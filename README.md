@@ -2,6 +2,8 @@
 
 Store your C# and F# objects, query them with LINQ, and keep related documents and files together in one SQLite database. SoloDB runs inside your application, with transactions and SQL available when you need them.
 
+Upgrading to 1.4.0 requires manual migration of existing Decimal and BigInteger data. Follow the [upgrade instructions](https://github.com/Unconcurrent/SoloDB/blob/master/docs/numeric-migration.md).
+
 ## Core Features
 
 SoloDB is packed with features that provide a seamless and powerful developer experience.
@@ -10,6 +12,7 @@ SoloDB is packed with features that provide a seamless and powerful developer ex
 - **Serverless Architecture**: As a .NET library, it runs in-process with your application. No separate server or configuration is required.
 - **Hybrid NoSQL & SQL**: Store and query schemaless JSON documents with a familiar object-oriented API, or drop down to raw SQL for complex queries.
 - **Full LINQ Support**: Use the full power of LINQ and IQueryable<T> to build expressive, strongly-typed queries against your data.
+- **Full NativeAOT Support**: Build C# and F# applications with generated operations for your models and queries. See the [NativeAOT setup guide](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md#jit-and-nativeaot-deployment).
 - **ACID Transactions**: Guarantees atomicity, consistency, isolation, and durability for all operations, thanks to SQLite's transactional nature.
 - **Expressive Indexing**: Create unique or non-unique indexes on document properties for lightning-fast queries, using simple attributes.
 - **Integrated File Storage**: A robust, hierarchical file system API (similar to System.IO) for storing and managing large files and binary data directly within the database.
@@ -60,11 +63,11 @@ Install SoloDB from NuGet:
 dotnet add package SoloDB
 ```
 
-Before upgrading a database to 1.4, stop every older SoloDB process using it. Opening the file advances its database version to 6; SoloDB 1.3 then refuses to reopen it. Do not lower `PRAGMA user_version` to bypass that protection. See [numerical storage and migration](docs/generated-metadata.md#numerical-storage-and-migration).
+Before upgrading a database to 1.4, stop every older SoloDB process using it. Opening the file advances its database version to 6; SoloDB 1.3 then refuses to reopen it. Do not lower `PRAGMA user_version` to bypass that protection. See [numerical storage and migration](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md#numerical-storage-and-migration).
 
 ## Generated Metadata Registration
 
-C# and F# projects can register build-generated operations for their original model types. See the [registration guide](docs/generated-metadata.md) for inferred roots, explicit registration, conditional activation and NativeAOT requirements.
+C# and F# projects can register build-generated operations for their original model types. See the [registration guide](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md) for inferred roots, explicit registration, conditional activation and NativeAOT requirements.
 
 ## Direct Typed JSON
 
@@ -81,9 +84,9 @@ ReadOnlySpan<byte> json = destination.Slice(0, written);
 int[] values = JsonValue.ParseInto<int[]>(json);
 ```
 
-An empty span grows automatically; `written` counts bytes for UTF-8 and characters for UTF-16. Writable-list overloads append and return the added count. See the [direct JSON guide](docs/generated-metadata.md#direct-typed-json) for custom growth/release callbacks, final-buffer ownership and failure behavior. NativeAOT uses the generated registration described above. `Serialize<T>` and `Parse` remain available when you need a `JsonValue` tree.
+An empty span grows automatically; `written` counts bytes for UTF-8 and characters for UTF-16. Writable-list overloads append and return the added count. See the [direct JSON guide](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md#direct-typed-json) for custom growth/release callbacks, final-buffer ownership and failure behavior. NativeAOT uses the generated registration described above. `Serialize<T>` and `Parse` remain available when you need a `JsonValue` tree.
 
-Direct floating-point conversion avoids the decimal-backed tree's rounding and range limits. Direct and tree output can differ for values outside Decimal precision or range. Forward object readers run setters and conversions in input order: an invalid earlier duplicate fails, and user effects can remain after later malformed or trailing input. Exceptional late runtime-type selection can replay conversion and add effects. See the [direct JSON behavior and ownership guide](docs/generated-metadata.md#direct-typed-json).
+Direct floating-point conversion avoids the decimal-backed tree's rounding and range limits. Direct and tree output can differ for values outside Decimal precision or range. Forward object readers run setters and conversions in input order: an invalid earlier duplicate fails, and user effects can remain after later malformed or trailing input. Exceptional late runtime-type selection can replay conversion and add effects. See the [direct JSON behavior and ownership guide](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md#direct-typed-json).
 
 ## Getting Started: A 60-Second Guide
 
@@ -170,7 +173,7 @@ var untypedProducts = db.GetUntypedCollection("Product");
 public class Product { /* ... */ }
 ```
 
-Untyped JSON exposes the physical document representation. For Decimal and BigInteger fields, use typed collection operations or preserve the [stored numerical representation](docs/generated-metadata.md#numerical-storage-and-migration) when writing through untyped JSON or SQL.
+Untyped JSON exposes the physical document representation. For Decimal and BigInteger fields, use typed collection operations or preserve the [stored numerical representation](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md#numerical-storage-and-migration) when writing through untyped JSON or SQL.
 
 ### Relations (DBRef, DBRefMany, SoloRef)
 
@@ -705,11 +708,11 @@ Outside an explicit transaction, `Download` and `DownloadAsync` are nonblocking 
 
 ### Filesystem references
 
-Documents can protect existing files and directories with Single and Many references. See [Filesystem references](docs/filesystem-references.md) for C# and F# examples, loading and mutation behavior.
+Documents can protect existing files and directories with Single and Many references. See [Filesystem references](https://github.com/Unconcurrent/SoloDB/blob/master/docs/filesystem-references.md) for C# and F# examples, loading and mutation behavior.
 
 ### Events API
 
-Filesystem changes are available through `db.FileSystem`, including typed header, metadata and logical byte-range callbacks. See [Filesystem events](docs/filesystem-events.md) for examples and callback semantics.
+Filesystem changes are available through `db.FileSystem`, including typed header, metadata and logical byte-range callbacks. See [Filesystem events](https://github.com/Unconcurrent/SoloDB/blob/master/docs/filesystem-events.md) for examples and callback semantics.
 
 SoloDB provides a powerful event system for reacting to collection changes. Events are implemented via SQLite triggers, ensuring they participate in the same transaction as the triggering operation.
 
@@ -784,13 +787,13 @@ foreach (var item in pooledConnection.Query<(string Name, long PriceInCents)>(
 }
 ```
 
-Typed Decimal and BigInteger document fields use the [stored numerical representation](docs/generated-metadata.md#numerical-storage-and-migration); raw SQL keeps SQLite's own value and arithmetic rules.
+Typed Decimal and BigInteger document fields use the [stored numerical representation](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md#numerical-storage-and-migration); raw SQL keeps SQLite's own value and arithmetic rules.
 
 ### ADO.NET emulation
 
 SoloDB includes ADO.NET emulation for compatibility in the same project, assembly and NuGet package. `GetInternalConnection()` and pooled `Borrow()` return it automatically; no extra package or wrapper is required. Its types are in `SoloDatabase.Data.Sqlite`. Recompile applications and dependent libraries against 1.4; preserved source syntax does not imply binary compatibility with assemblies built against 1.3.
 
-This is a limited compatibility layer, not a full ADO.NET provider. Stored procedures and output parameters are unsupported; async calls perform synchronous SQLite work, and `Cancel()` does not interrupt execution. See [supported operations and ownership](docs/native-sql.md#adonet-emulation).
+This is a limited compatibility layer, not a full ADO.NET provider. Stored procedures and output parameters are unsupported; async calls perform synchronous SQLite work, and `Cancel()` does not interrupt execution. See [supported operations and ownership](https://github.com/Unconcurrent/SoloDB/blob/master/docs/native-sql.md#adonet-emulation).
 
 ### F# Example
 
@@ -857,4 +860,4 @@ Full license details are available [here](https://solodb.org/legal.html).
 
 ### Direct SQL
 
-See [Direct SQL connections](docs/native-sql.md) for named SQL execution, typed rows, named parameters and transactions.
+See [Direct SQL connections](https://github.com/Unconcurrent/SoloDB/blob/master/docs/native-sql.md) for named SQL execution, typed rows, named parameters and transactions.
