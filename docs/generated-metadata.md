@@ -120,11 +120,11 @@ Register the [C#](#c) or [F#](#f) operations shown above. Set the standard SDK p
 
 ```xml
 <PropertyGroup>
-  <PublishAot>true</PublishAot>
+  <PublishAot Condition="'$(Configuration)' == 'Release'">true</PublishAot>
 </PropertyGroup>
 ```
 
-Keep this setting on the executable: passing it as a global command-line property also applies it to referenced .NET Standard libraries, which cannot themselves be published with NativeAOT. Then publish with the standard SDK command, for example on Linux x64:
+This keeps ordinary Debug discovery available with the registration conditions above. Keep this setting on the executable: passing it as a global command-line property also applies it to referenced .NET Standard libraries, which cannot themselves be published with NativeAOT. Then publish with the standard SDK command, for example on Linux x64:
 
 ```bash
 dotnet publish -c Release -r linux-x64
