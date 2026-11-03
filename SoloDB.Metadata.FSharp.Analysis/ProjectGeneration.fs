@@ -145,7 +145,7 @@ type ProjectGeneration private () =
                     writeSource "namespace SoloDatabase.Generated\ndo ()\n"
                     CompilerContext.Write(contextPath, project, "inactive", arguments, "", "", dependencies.ToArray() |> Array.distinct)
                 else
-                    FSharpConsumerOutput.Inactive(input,outputDirectory,helperPath,selection,dependencies.ToArray() |> Array.distinct)
+                    GeneratedConsumerOutput.Inactive(input,outputDirectory,helperPath,selection,dependencies.ToArray() |> Array.distinct)
                     if File.Exists(templatePath) then File.Delete(templatePath)
                     if File.Exists(attributeSource) then File.Delete(attributeSource)
                 ""

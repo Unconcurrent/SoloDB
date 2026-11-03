@@ -11,30 +11,25 @@ public sealed class GenerateHelper : ITask
     [Required] public string Output { get; set; } = "";
     [Required] public string Identity { get; set; } = "";
     [Output] public bool Active { get; private set; }
-    public string? Consumer { get; set; }
+    [Required] public string Consumer { get; set; } = "";
     public string? KeyFile { get; set; }
     public bool PublicSign { get; set; }
     public bool DelaySign { get; set; }
     public ITaskItem[] References { get; set; } = Array.Empty<ITaskItem>();
     public ITaskItem[]? CompilerReferences { get; set; }
+    [Required] public string ConsumerOutputDirectory { get; set; } = "";
     public string Selection { get; set; } = "";
 
     public bool Execute()
     {
         try
         {
-            if (string.IsNullOrEmpty(Consumer)) HelperAssembly.WriteContract(Output, Identity, KeyFile, References, PublicSign, DelaySign);
-            else
-            {
-                Active = HelperAssembly.WriteImplementation(Consumer!, Output, Identity, KeyFile, References, PublicSign, DelaySign, CompilerReferences);
-                if (Selection.Length != 0)
-                    HelperAssembly.Publish(Selection, new XElement("selection", new XAttribute("active", Active)));
-            }
+            Active = HelperAssembly.WriteImplementation(Consumer, Output, Identity, KeyFile, References, PublicSign, DelaySign, CompilerReferences, Selection, ConsumerOutputDirectory);
             return true;
         }
         catch (Exception error)
         {
-            BuildEngine.LogErrorEvent(new BuildErrorEventArgs("SoloDB", "SOLO002", Consumer ?? Output, 0, 0, 0, 0,
+            BuildEngine.LogErrorEvent(new BuildErrorEventArgs("SoloDB", "SOLO002", Consumer, 0, 0, 0, 0,
                 error.ToString(), null, nameof(GenerateHelper)));
             return false;
         }

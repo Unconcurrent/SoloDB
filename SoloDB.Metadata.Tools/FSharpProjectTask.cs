@@ -66,7 +66,7 @@ public sealed class PrepareFSharpProject : ICancelableTask
             {
                 // Admission follows the SDK compiler's selected source, before
                 // acquiring a checker or creating an analysis worker.
-                FSharpConsumerOutput.Inactive(Input,OutputDirectory,HelperOutput,Selection,Array.Empty<string>());
+                GeneratedConsumerOutput.Inactive(Input,OutputDirectory,HelperOutput,Selection,Array.Empty<string>());
                 System.IO.File.Delete(Template);
                 System.IO.File.Delete(AttributeSource);
                 Prepared = true;

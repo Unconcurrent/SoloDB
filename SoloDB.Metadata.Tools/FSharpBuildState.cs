@@ -41,9 +41,6 @@ internal static class FSharpBuildState
         }
     }
 
-    internal static string Value(XElement state, string name) => (string?)state.Attribute(name)
-        ?? throw new InvalidDataException("The FSharp build selection has no " + name + " fact.");
-
     internal static (string Mode, string Template, string Key, string[] Dependencies) Context(string path)
     {
         using var context = AssemblyDefinition.ReadAssembly(path);
@@ -158,9 +155,9 @@ public sealed class FSharpCompletionInputs : ITask
             if (File.Exists(Selection))
             {
                 var state = XElement.Load(Selection);
-                Assembly = FSharpBuildState.Value(state, "assembly");
-                Symbols = FSharpBuildState.Value(state, "symbols");
-                CompilerSymbols = FSharpBuildState.Value(state, "compilerSymbols");
+                Assembly = GeneratedConsumerOutput.Value(state, "assembly");
+                Symbols = GeneratedConsumerOutput.Value(state, "symbols");
+                CompilerSymbols = GeneratedConsumerOutput.Value(state, "compilerSymbols");
                 Changed = (bool)state.Attribute("changed")!;
                 Helper = (string?)state.Attribute("helper") ?? "";
                 Dependencies = Dependencies.Concat(state.Elements("dependency").Select(value => value.Value)).Distinct().ToArray();

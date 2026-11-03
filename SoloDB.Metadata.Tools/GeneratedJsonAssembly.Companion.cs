@@ -28,7 +28,7 @@ public static partial class GeneratedJsonAssembly
         using var consumer = AssemblyDefinition.ReadAssembly(input,new ReaderParameters { AssemblyResolver = resolver });
         if (consumer.Name.FullName != sourceIdentity.FullName)
             throw new InvalidOperationException("The fresh compiler identity differs from its checked source: " + consumer.Name.FullName);
-        FSharpConsumerOutput.ReadSymbols(consumer,input);
+        GeneratedConsumerOutput.ReadSymbols(consumer,input);
         using var imports = new TargetReflectionImports(references,resolver,product.MainModule);
         using var helper = HelperAssembly.Create(sourceIdentity.Name + ".SoloDB.Generated",resolver,imports);
         helper.Name.PublicKey = consumer.Name.PublicKey;
@@ -90,7 +90,7 @@ public static partial class GeneratedJsonAssembly
         Phase("aliases");
         HelperAssembly.Write(helper,output,key);
         Phase("helper-write");
-        FSharpConsumerOutput.PublishConsumer(consumer,input,outputDirectory,selection,key,output,dependencies);
+        GeneratedConsumerOutput.PublishConsumer(consumer,input,outputDirectory,selection,key,output,dependencies);
         Phase("consumer-write");
     }
 

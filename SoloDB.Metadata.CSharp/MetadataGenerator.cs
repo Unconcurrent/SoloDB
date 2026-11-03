@@ -24,18 +24,27 @@ public sealed class MetadataGenerator : IIncrementalGenerator
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        var contexts = context.SyntaxProvider.ForAttributeWithMetadataName(
-            "SoloDatabase.SoloDBAOTAttribute",
-            static (node, _) => node is TypeDeclarationSyntax,
-            static (ctx, _) => (INamedTypeSymbol)ctx.TargetSymbol).Collect();
+        var inputs = context.SyntaxProvider.CreateSyntaxProvider(
+            static (node, _) => IsInput(node), static (syntax, _) => syntax.Node).Collect();
         var helper = context.AnalyzerConfigOptionsProvider.Select(static (options, _) =>
             options.GlobalOptions.TryGetValue("build_property.SoloDBGeneratedHelper", out var enabled) && enabled == "true");
-        context.RegisterSourceOutput(contexts.Combine(context.CompilationProvider).Combine(helper),
+        context.RegisterSourceOutput(inputs.Combine(context.CompilationProvider).Combine(helper),
             static (ctx, input) => Generate(ctx, input.Left.Right, input.Left.Left, input.Right));
     }
 
-    private static void Generate(SourceProductionContext context, Compilation compilation, ImmutableArray<INamedTypeSymbol> contexts, bool helper)
+    private static bool IsInput(SyntaxNode node) => node switch
     {
+        InvocationExpressionSyntax call => call.Expression is MemberAccessExpressionSyntax member && member.Name.Identifier.ValueText == "Register" ||
+            call.Expression is IdentifierNameSyntax name && name.Identifier.ValueText == "Register",
+        TypeDeclarationSyntax type => type.AttributeLists.Count != 0 || type.Identifier.ValueText == "SoloDBAOT",
+        IdentifierNameSyntax name => name.Identifier.ValueText == "SoloDBAOT" &&
+            !name.Ancestors().OfType<AttributeSyntax>().Any(attribute => attribute.Name.Span.Contains(name.Span)),
+        _ => false
+    };
+
+    private static void Generate(SourceProductionContext context, Compilation compilation, ImmutableArray<SyntaxNode> inputs, bool helper)
+    {
+        if (inputs.IsEmpty) return;
         const string surface = "internal static class SoloDBAOT { public static void Register() {} }";
         var existing = compilation.Assembly.GlobalNamespace.GetTypeMembers("SoloDBAOT");
         if (existing.Length != 0)
@@ -44,20 +53,19 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                 "the project-local SoloDBAOT registration entry conflicts with this declaration"));
             return;
         }
-        var candidates = compilation.SyntaxTrees.SelectMany(tree => tree.GetRoot().DescendantNodes().OfType<InvocationExpressionSyntax>())
-            .Where(call => call.Expression is MemberAccessExpressionSyntax member && member.Name.Identifier.ValueText == "Register" ||
-                call.Expression is IdentifierNameSyntax name && name.Identifier.ValueText == "Register").ToArray();
-        var active = false;
-        if (candidates.Length != 0 && compilation is CSharpCompilation activation)
-        {
-            compilation = activation.AddSyntaxTrees(CSharpSyntaxTree.ParseText(surface,(CSharpParseOptions?)compilation.SyntaxTrees.FirstOrDefault()?.Options));
-            var entry = compilation.Assembly.GlobalNamespace.GetTypeMembers("SoloDBAOT").Single();
-            active = candidates.Any(call => compilation.GetSemanticModel(call.SyntaxTree).GetSymbolInfo(call).Symbol is IMethodSymbol method &&
-                SymbolEqualityComparer.Default.Equals(method.ContainingType,entry) && method.Name == "Register" && method.Parameters.Length == 0);
-        }
+        var candidates = inputs.OfType<InvocationExpressionSyntax>().ToArray();
+        var names = inputs.OfType<IdentifierNameSyntax>().ToArray();
+        if (candidates.Length == 0 && names.Length == 0) return;
+        if (compilation is not CSharpCompilation activation) return;
+        compilation = activation.AddSyntaxTrees(CSharpSyntaxTree.ParseText(surface,(CSharpParseOptions?)compilation.SyntaxTrees.FirstOrDefault()?.Options));
+        var entry = compilation.Assembly.GlobalNamespace.GetTypeMembers("SoloDBAOT").Single();
+        var active = candidates.Any(call => compilation.GetSemanticModel(call.SyntaxTree).GetSymbolInfo(call).Symbol is IMethodSymbol method &&
+            SymbolEqualityComparer.Default.Equals(method.ContainingType,entry) && method.Name == "Register" && method.Parameters.Length == 0);
         if (!active)
         {
-            context.AddSource("SoloDBAOT.g.cs",surface);
+            if (names.Any(name => SymbolEqualityComparer.Default.Equals(
+                    compilation.GetSemanticModel(name.SyntaxTree).GetSymbolInfo(name).Symbol,entry)))
+                context.AddSource("SoloDBAOT.g.cs",surface);
             return;
         }
         if (!helper)
@@ -66,6 +74,14 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                 "the SoloDB package build targets must be imported"));
             return;
         }
+        GenerateActive(context,compilation,inputs.OfType<TypeDeclarationSyntax>().ToArray());
+    }
+
+    private static void GenerateActive(SourceProductionContext context, Compilation compilation, TypeDeclarationSyntax[] declarations)
+    {
+        var contexts = declarations.Select(declaration => compilation.GetSemanticModel(declaration.SyntaxTree).GetDeclaredSymbol(declaration))
+            .OfType<INamedTypeSymbol>().Where(type => type.GetAttributes().Any(attribute =>
+                attribute.AttributeClass?.ToDisplayString() == "SoloDatabase.SoloDBAOTAttribute")).ToImmutableArray();
         // Public properties can have private accessors in referenced models. The
         // normal compiler import policy hides those symbols; semantic generation
         // needs the complete metadata of these exact references.
@@ -78,8 +94,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                 return (INamedTypeSymbol)compilation.GetSemanticModel(declaration.SyntaxTree).GetDeclaredSymbol(declaration)!;
             }).ToImmutableArray();
         }
-        if (helper)
-            context.AddSource("OperationRegistration.g.cs", """
+        context.AddSource("OperationRegistration.g.cs", """
                 // <auto-generated/>
                 [assembly: global::SoloDatabase.Generated.MetadataActivation]
                 namespace SoloDatabase.Generated {
@@ -143,20 +158,22 @@ public sealed class MetadataGenerator : IIncrementalGenerator
         const string registrationType = "MetadataOperations";
         const string queryRegistration = "MetadataOperationsQueries";
         var queryCode = QueryRegistrations.Collect(facts,models.Select(model => model.TypeName),sites,queryRegistration);
-        context.AddSource(queryRegistration + ".g.cs","// <auto-generated/>\nextern alias SoloDBGeneratedOperations;\n" + queryCode.Descriptors + "namespace SoloDatabase.Generated { internal static class " +
+        context.AddSource(queryRegistration + ".g.cs","// <auto-generated/>\n" + queryCode.Descriptors + "namespace SoloDatabase.Generated { internal static class " +
             queryRegistration + " {\n" + queryCode.Helpers + "}}\n");
-        context.AddSource(registrationType + ".g.cs","extern alias SoloDBGeneratedOperations;\n" +
+        context.AddSource(registrationType + ".g.cs",
             CSharpEmitter.Descriptors(models,registrationType));
         context.AddSource("SoloDBAOT.g.cs", """
             // <auto-generated/>
-            extern alias SoloDBGeneratedOperations;
             internal static class SoloDBAOT {
                 private static readonly object gate = new object();
                 private static bool complete;
+                private static void RegisterGenerated() {
+                    throw new global::System.InvalidOperationException("The generated SoloDB helper implementation was not delivered.");
+                }
                 public static void Register() {
                     lock (gate) {
                         if (complete) return;
-                        SoloDBGeneratedOperations::SoloDatabase.Generated.Registration.Register();
+                        RegisterGenerated();
                         complete = true;
                     }
                 }

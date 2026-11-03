@@ -44,17 +44,26 @@
     </ItemGroup>
   </Target>
   <Target Name="SoloDBCaptureProjectContext" AfterTargets="CoreCompile" Returns="@(_SoloDBProjectContextOutput)"
-          DependsOnTargets="SoloDBFSharpBuildPaths"
+          DependsOnTargets="SoloDBFSharpBuildPaths;SoloDBHelperBuildPaths"
           Condition="'$(ProvideCommandLineArgs)' == 'true'">
     <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="SoloDBExecutableInputs"
         Properties="DesignTimeBuild=true;SkipCompilerExecution=true;ProvideCommandLineArgs=true;SoloDBContextMode=execute"
         BuildInParallel="false" Condition="'@(FscCommandLineArgs)' == '' and !Exists('$(_SoloDBProjectContext)')">
       <Output TaskParameter="TargetOutputs" ItemName="_SoloDBProjectContextOutput" />
     </MSBuild>
+    <PropertyGroup>
+      <_SoloDBRegistrationInput Condition="'$(DesignTimeBuild)' != 'true' and '$(_SoloDBPriorProvideCommandLineArgs)' != 'true'">@(IntermediateAssembly)</_SoloDBRegistrationInput>
+    </PropertyGroup>
     <SoloDatabase.Metadata.Tools.CaptureProjectContext
         Output="$(_SoloDBProjectContext)" Project="$(MSBuildProjectFullPath)"
-        Mode="check" Arguments="@(FscCommandLineArgs)" Condition="'@(FscCommandLineArgs)' != ''" />
-    <ItemGroup Condition="'@(_SoloDBProjectContextOutput)' == ''">
+        Mode="check" Arguments="@(FscCommandLineArgs)" Input="$(_SoloDBRegistrationInput)"
+        ConsumerOutputDirectory="$(SoloDBGeneratedConsumerDirectory)" HelperOutput="$(SoloDBGeneratedImplementation)"
+        Selection="$(_SoloDBCompletionSelection)"
+        InactiveOutputs="$(_SoloDBAttributeSource);$(_SoloDBTemplate);$(_SoloDBCompletionInputFile);$(_SoloDBCompletionStamp)"
+        Condition="'@(FscCommandLineArgs)' != ''">
+      <Output TaskParameter="GenerationRequired" PropertyName="_SoloDBFSharpGenerationRequired" />
+    </SoloDatabase.Metadata.Tools.CaptureProjectContext>
+    <ItemGroup Condition="'@(_SoloDBProjectContextOutput)' == '' and '$(_SoloDBFSharpGenerationRequired)' != 'false'">
       <_SoloDBProjectContextOutput Include="$(_SoloDBProjectContext)">
         <Template>$(_SoloDBActiveTemplate)</Template>
       </_SoloDBProjectContextOutput>
@@ -68,16 +77,17 @@
     </PropertyGroup>
   </Target>
   <Target Name="SoloDBFSharpCompletionInputs" DependsOnTargets="SoloDBFSharpBuildPaths;SoloDBHelperBuildPaths;SoloDBCaptureProjectContext"
-          Condition="'$(DesignTimeBuild)' != 'true'">
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(_SoloDBFSharpGenerationRequired)' != 'false'">
     <PropertyGroup>
       <_SoloDBCurrentCompilerProject Condition="'@(FscCommandLineArgs)' != ''">$(MSBuildProjectFullPath)</_SoloDBCurrentCompilerProject>
       <_SoloDBCompletionContext>$(_SoloDBProjectContext)</_SoloDBCompletionContext>
     </PropertyGroup>
     <SoloDatabase.Metadata.Tools.FSharpCompletionInputs InputFile="$(_SoloDBCompletionInputFile)" Stamp="$(_SoloDBCompletionStamp)"
         Selection="$(_SoloDBCompletionSelection)" Input="@(IntermediateAssembly)" Context="$(_SoloDBCompletionContext)"
-        OutputDirectory="$(_SoloDBFSharpRoot)/consumer" References="@(ReferencePath);@(ReferenceCopyLocalPaths)"
+        OutputDirectory="$(SoloDBGeneratedConsumerDirectory)" References="@(ReferencePath);@(ReferenceCopyLocalPaths)"
         ImplementationInputs="@(_SoloDBFSharpImplementationInputs)"
-        AdditionalInputs="@(_DebugSymbolsIntermediatePath);$(MSBuildProjectFullPath);$(MSBuildAllProjects)">
+        AdditionalInputs="@(_DebugSymbolsIntermediatePath);$(MSBuildProjectFullPath);$(MSBuildAllProjects)"
+        Condition="'$(_SoloDBFSharpGenerationRequired)' != 'false'">
       <Output TaskParameter="Template" PropertyName="_SoloDBCompletionTemplate" />
       <Output TaskParameter="SigningKey" PropertyName="_SoloDBCompletionSigningKey" />
       <Output TaskParameter="Dependencies" ItemName="_SoloDBCompletionConsumedInputs" />
@@ -90,22 +100,22 @@
   </Target>
   <Target Name="SoloDBFSharpCompletionWork" DependsOnTargets="SoloDBFSharpCompletionInputs"
           Inputs="$(_SoloDBCompletionInputFile);@(IntermediateAssembly);@(_DebugSymbolsIntermediatePath);$(_SoloDBCompletionContext);$(_SoloDBCompletionTemplate);$(_SoloDBCompletionSigningKey);@(ReferencePath);@(ReferenceCopyLocalPaths);$(MSBuildProjectFullPath);$(MSBuildAllProjects);@(_SoloDBFSharpImplementationInputs);@(_SoloDBCompletionConsumedInputs)"
-          Outputs="$(_SoloDBCompletionStamp)" Condition="'$(DesignTimeBuild)' != 'true'">
+          Outputs="$(_SoloDBCompletionStamp)" Condition="'$(DesignTimeBuild)' != 'true' and '$(_SoloDBFSharpGenerationRequired)' != 'false'">
     <Delete Files="$(_SoloDBCompletionStamp)" />
     <SoloDatabase.Metadata.Tools.PrepareFSharpProject Input="@(IntermediateAssembly)" Context="$(_SoloDBCompletionContext)"
-        OutputDirectory="$(_SoloDBFSharpRoot)/consumer" Selection="$(_SoloDBCompletionSelection)" ProfileBuild="$(SoloDBBuildTiming)"
+        OutputDirectory="$(SoloDBGeneratedConsumerDirectory)" Selection="$(_SoloDBCompletionSelection)" ProfileBuild="$(SoloDBBuildTiming)"
         HelperOutput="$(SoloDBGeneratedImplementation)" Provider="$(SoloDBFSharpProviderPath)" DotNetHost="$(_SoloDBDotNetHost)"
         AssemblyName="$(AssemblyName)" AttributeSource="$(_SoloDBAttributeSource)" Template="$(_SoloDBTemplate)"
-        Project="$(_SoloDBCurrentCompilerProject)" Arguments="@(FscCommandLineArgs)" />
-    <Touch Files="$(_SoloDBCompletionStamp)" AlwaysCreate="true" />
+        Project="$(_SoloDBCurrentCompilerProject)" Arguments="@(FscCommandLineArgs)" Condition="'$(_SoloDBFSharpGenerationRequired)' != 'false'" />
+    <Touch Files="$(_SoloDBCompletionStamp)" AlwaysCreate="true" Condition="'$(_SoloDBFSharpGenerationRequired)' != 'false'" />
   </Target>
   <Target Name="SoloDBCompleteFSharpAssembly" AfterTargets="CoreCompile"
           BeforeTargets="GenerateBuildDependencyFile;CopyFilesToOutputDirectory;ComputeResolvedFilesToPublishList;BuiltProjectOutputGroup;DebugSymbolsProjectOutputGroup"
           DependsOnTargets="SoloDBFSharpCompletionWork"
-          Condition="'$(DesignTimeBuild)' != 'true'">
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(_SoloDBFSharpGenerationRequired)' != 'false'">
     <SoloDatabase.Metadata.Tools.FSharpCompletionInputs InputFile="$(_SoloDBCompletionInputFile)" Stamp="$(_SoloDBCompletionStamp)"
         Selection="$(_SoloDBCompletionSelection)" Input="@(IntermediateAssembly)" Context="$(_SoloDBCompletionContext)"
-        OutputDirectory="$(_SoloDBFSharpRoot)/consumer" ReadSelectionOnly="true">
+        OutputDirectory="$(SoloDBGeneratedConsumerDirectory)" ReadSelectionOnly="true" Condition="'$(_SoloDBFSharpGenerationRequired)' != 'false'">
       <Output TaskParameter="Assembly" PropertyName="_SoloDBCompletedAssembly" />
       <Output TaskParameter="Symbols" PropertyName="_SoloDBCompletedSymbols" />
       <Output TaskParameter="CompilerSymbols" PropertyName="_SoloDBCompilerSymbols" />
@@ -126,6 +136,9 @@
       <FileWrites Include="$(_SoloDBCompletedAssembly)" />
       <FileWrites Include="$(_SoloDBCompletedSymbols)" Condition="'$(_SoloDBCompletedSymbols)' != ''" />
     </ItemGroup>
+  </Target>
+  <Target Name="SoloDBRestoreCompilerArguments" AfterTargets="SoloDBCompleteFSharpAssembly;SoloDBCaptureProjectContext"
+          Condition="'$(DesignTimeBuild)' != 'true'">
     <PropertyGroup><ProvideCommandLineArgs>$(_SoloDBPriorProvideCommandLineArgs)</ProvideCommandLineArgs></PropertyGroup>
   </Target>
   <Import Project="$(MSBuildThisFileDirectory)SoloDB.Metadata.targets" />

@@ -30,40 +30,18 @@ internal static class HelperAssembly
         module.GetDebugHeader().Entries.Any(entry => entry.Directory.Type == ImageDebugType.CodeView ||
             entry.Directory.Type == ImageDebugType.EmbeddedPortablePdb);
 
-    internal static void WriteContract(string output, string identity, string? keyFile, ITaskItem[] references)
-        => WriteContract(output,identity,keyFile,references,false,false);
-
-    internal static void WriteContract(string output, string identity, string? keyFile, ITaskItem[] references, bool publicSign, bool delaySign)
-    {
-        // The reference contract is immutable across implementation refreshes.
-        using var assembly = Create(identity);
-        var method = EntryPoint(assembly.MainModule);
-        var il = method.Body.GetILProcessor();
-        il.Emit(OpCodes.Ldstr, "The generated SoloDB helper implementation was not delivered.");
-        var module = assembly.MainModule;
-        var standard = module.AssemblyReferences.First(reference => reference.Name == "netstandard");
-        var exception = new TypeReference("System", "InvalidOperationException", module, standard);
-        var constructor = new MethodReference(".ctor", method.ReturnType, exception) { HasThis = true };
-        constructor.Parameters.Add(new ParameterDefinition(module.TypeSystem.String));
-        il.Emit(OpCodes.Newobj, constructor);
-        il.Emit(OpCodes.Throw);
-        Write(assembly, output, Signing(assembly,keyFile,publicSign,delaySign));
-    }
-
-    internal static bool WriteImplementation(string input, string output, string identity, string? keyFile, ITaskItem[] references)
-        => WriteImplementation(input,output,identity,keyFile,references,false,false);
-
-    internal static bool WriteImplementation(string input, string output, string identity, string? keyFile, ITaskItem[] references, bool publicSign, bool delaySign, ITaskItem[]? compilerReferences = null)
+    internal static bool WriteImplementation(string input, string output, string identity, string? keyFile, ITaskItem[] references, bool publicSign, bool delaySign, ITaskItem[]? compilerReferences, string selection, string consumerOutputDirectory)
     {
         using var resolver = new DefaultAssemblyResolver();
         resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(input))!);
         foreach (var reference in references.Concat(compilerReferences ?? Array.Empty<ITaskItem>())) resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(reference.ItemSpec))!);
-        using var consumer = AssemblyDefinition.ReadAssembly(input, new ReaderParameters { ReadingMode = ReadingMode.Immediate, AssemblyResolver = resolver });
+        using var consumer = AssemblyDefinition.ReadAssembly(input, new ReaderParameters { AssemblyResolver = resolver });
         if (!consumer.CustomAttributes.Any(attribute => attribute.AttributeType.FullName == "SoloDatabase.Generated.MetadataActivationAttribute"))
         {
             if (File.Exists(output)) File.Delete(output);
             return false;
         }
+        GeneratedConsumerOutput.ReadSymbols(consumer,input);
         var runtimePath = references.Select(reference => reference.ItemSpec).First(path => Path.GetFileName(path) == "SoloDB.dll");
         using var product = AssemblyDefinition.ReadAssembly(runtimePath);
         var compilerPaths = (compilerReferences ?? references).Select(reference => reference.ItemSpec).ToArray();
@@ -81,6 +59,16 @@ internal static class HelperAssembly
         if (access.Count != 0) AllowAccess(module, access, entry.DeclaringType.BaseType.Scope);
         il.Emit(OpCodes.Ret);
         Write(helper, output, Signing(helper,keyFile,publicSign,delaySign,consumer));
+        var thunk = consumer.MainModule.GetType("SoloDBAOT").Methods.Single(method => method.Name == "RegisterGenerated" &&
+            method.IsPrivate && method.IsStatic && method.Parameters.Count == 0);
+        thunk.DebugInformation.SequencePoints.Clear();
+        thunk.DebugInformation.Scope = null;
+        thunk.DebugInformation.CustomDebugInformations.Clear();
+        thunk.Body = new MethodBody(thunk);
+        thunk.Body.GetILProcessor().Emit(OpCodes.Call,consumer.MainModule.ImportReference(entry));
+        thunk.Body.GetILProcessor().Emit(OpCodes.Ret);
+        GeneratedConsumerOutput.PublishConsumer(consumer,input,consumerOutputDirectory,
+            selection,publicSign || delaySign ? "" : keyFile ?? "",output,Array.Empty<string>());
         return true;
     }
 
