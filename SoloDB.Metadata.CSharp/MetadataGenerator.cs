@@ -37,6 +37,8 @@ public sealed class MetadataGenerator : IIncrementalGenerator
         InvocationExpressionSyntax call => call.Expression is MemberAccessExpressionSyntax member && member.Name.Identifier.ValueText == "Register" ||
             call.Expression is IdentifierNameSyntax name && name.Identifier.ValueText == "Register",
         TypeDeclarationSyntax type => type.AttributeLists.Count != 0 || type.Identifier.ValueText == "SoloDBAOT",
+        EnumDeclarationSyntax type => type.Identifier.ValueText == "SoloDBAOT",
+        DelegateDeclarationSyntax type => type.Identifier.ValueText == "SoloDBAOT",
         IdentifierNameSyntax name => name.Identifier.ValueText == "SoloDBAOT" &&
             !name.Ancestors().OfType<AttributeSyntax>().Any(attribute => attribute.Name.Span.Contains(name.Span)),
         _ => false
