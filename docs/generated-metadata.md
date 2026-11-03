@@ -1,6 +1,6 @@
 # Generated metadata registration
 
-The `SoloDB` package includes a C# source generator, an F# type provider and their build integration. Keep the package's build assets enabled; no separate generator package or manual build-target import is required for package consumers.
+To generate operations, build with .NET SDK 8 or later. The `SoloDB` package includes a C# source generator, an F# type provider and their build integration. Keep the package's build assets enabled; no separate generator package or manual build-target import is required for package consumers.
 
 You can use your existing model classes and records in JIT and NativeAOT applications. Models do not need `partial` declarations or a separate generated version. Both builds use the same database format; see the [numerical storage upgrade](#numerical-storage-and-migration) when upgrading existing data.
 
@@ -81,7 +81,7 @@ module Program =
 
 ## JIT and NativeAOT deployment
 
-Use the registration shown above and .NET SDK 8 or later. For NativeAOT, add this to the executable project file, even when your models live in a .NET Standard library:
+Use the registration shown above. For NativeAOT, add this to the executable project file, even when your models live in a .NET Standard library:
 
 ```xml
 <PropertyGroup>
@@ -134,9 +134,29 @@ The package prepares unsigned F# union libraries for NativeAOT when needed, with
 
 ## Direct typed JSON
 
-Direct JSON operations share model conversion policies across ordinary execution and generated support.
+Use direct JSON when you have a typed value and need JSON text or bytes, without building an intermediate tree. Use `Parse` and `Serialize` when you want to inspect or edit a `JsonValue` tree.
 
-`JsonValue.ParseInto<T>` reads a string, `ReadOnlySpan<byte>` containing UTF-8, or `ReadOnlySpan<char>` containing UTF-16 directly into a supported type. `JsonValue.WriteJson<T>` writes that type to a destination. Existing `Serialize<T>` still returns a `JsonValue` tree, and `Parse` still creates a tree. Writers take the model by `ref`, including class references. Mutable struct getters operate on that supplied location. Writers borrow proven mutable auto-property backing storage, so child getter mutations persist there; computed, effectful and readonly property results are captured once before their child writer runs. `ParseInto<T>` keeps its returning API.
+`ParseInto<T>` reads a string, UTF-8 byte span or UTF-16 character span directly into a supported type. `WriteJson<T>` writes that type to a span or appends it to a byte or character list:
+
+```csharp
+using System;
+using SoloDatabase.JsonSerializator;
+
+Span<byte> output = Span<byte>.Empty;
+int[] source = { 1, 2, 3 };
+int written = JsonValue.WriteJson(ref source, ref output);
+ReadOnlySpan<byte> json = output.Slice(0, written);
+int[] values = JsonValue.ParseInto<int[]>(json);
+Console.WriteLine(values.Length);
+```
+
+This writes `[1,2,3]` as UTF-8 and prints `3`. SoloDB grows the initially empty span with a managed array. Use only the written prefix of the final span returned through `ref output`.
+
+Choose UTF-8 for byte-oriented interfaces and UTF-16 when your input or output already uses characters. Returned models own their data; buffer growth, model construction and output copies can allocate. Ordinary execution and generated support use the same model conversion policies. See [registration](#conditional-activation) when publishing with NativeAOT.
+
+### Direct JSON overloads
+
+Writers take the model by `ref`, including class references. Mutable struct getters operate on that supplied location. Writers borrow proven mutable auto-property backing storage, so child getter mutations persist there; computed, effectful and readonly property results are captured once before their child writer runs. `ParseInto<T>` keeps its returning API.
 
 The overloads below use C# API notation:
 
@@ -149,37 +169,25 @@ int JsonValue.WriteJson<T>(ref T value, IList<byte> destination);
 int JsonValue.WriteJson<T>(ref T value, IList<char> destination);
 ```
 
+### Reading objects and handling errors
+
 `ParseInto<T>(null)` with the string overload returns the default value of `T`; an empty byte or character span raises `ArgumentException`.
 
 `Parse` and `ParseInto<T>` accept at most 1000 nested object or array containers and raise `FormatException` beyond that limit. Sibling containers and braces inside strings do not increase nesting.
 
-When `ParseInto<object>` infers an integral number, it permits up to 32768 additional decimal zero digits from positive exponent expansion. Beyond that budget it returns signed `Double` infinity. This is an inference work budget, not a maximum numerical value: `1e32769` saturates, while `10e32768` remains an exact `BigInteger` because one more coefficient digit is already written. Written coefficient digits are not capped, and explicitly requesting `BigInteger` retains its arbitrary precision within available runtime and memory limits. Encoded numerical parameters and symbolic exact arithmetic retain their exact representation.
-
 Forward object readers convert recognized properties in input order. Mutable properties are assigned as encountered; immutable constructor arguments are held in typed locals and the model is constructed after the object ends. Missing mutable properties retain their constructor defaults, and missing constructor arguments use their typed defaults.
 
-In forward object readers, each duplicate occurrence is converted: the last successfully converted value wins, including names made equivalent by JSON escapes. An invalid earlier occurrence fails even if a later occurrence would be valid. Constructors and setters may already have run when a later malformed value or trailing input causes failure; their effects are not rolled back. Explicit tree parsing and subsequent tree conversion retain their separate duplicate and conversion-order behavior. Optional wrappers, unions and directional collection readers, including Stack, retain their established policies.
+For example, reading `{"Count":1,"Count":2}` into a model with an integer `Count` property assigns both values and ends with `2`. Reading `{"Count":"invalid","Count":2}` fails on the first value; the later valid value does not rescue it.
+
+In forward object readers, each duplicate occurrence is converted: the last successfully converted value wins, including names made equivalent by JSON escapes. An invalid earlier occurrence fails even if a later occurrence would be valid. Constructors and setters may already have run when a later malformed value or trailing input causes failure; their effects are not rolled back. Explicit tree parsing and subsequent tree conversion retain their separate duplicate and conversion-order behavior; do not use tree conversion to predict direct-reader callback effects.
+
+Collection conversion preserves the requested collection's ordering. For example, reading `[1,2,3]` into `Stack<int>` produces that enumeration order, rather than reversing it as three successive `Push` calls would. Options and Result use the [representations below](#f-option-and-result), rather than ordinary mutable-object assignment rules.
 
 A different assignable runtime type selected by a late `$type` discriminator uses an exceptional read of the object as that type. A failed declared-type read may also select this route when the object identifies a different assignable type. Earlier declared-type effects remain and the selected read can add effects. When the selected type is unchanged, the original failure is preserved. Missing or same-type discriminators use the ordinary direct path.
 
-Each typed conversion uses a fixed operation for its type and encoding. Project registration supplies generated operations before use; ordinary JIT execution prepares its operation on first use. Runtime polymorphism preserves the actual type and its discriminator where required. Growth/release ownership and constructor, getter, setter and output callback effects retain their documented behavior.
-
 Typed byte-sequence writers materialize the sequence before destination callbacks, then write base64 directly to the destination without constructing an intermediate base64 string. The explicit `JsonValue` tree APIs retain their owning string representation.
 
-### Internal SQLite JSON reads
-
-Immediate internal materialization on the bundled engine parses borrowed native UTF-16 text through the existing JSON reader. SQLite's text conversion occurs before user callbacks; typed materialization uses the declared stored-value policy. Configured providers without this native UTF-16 access retain owning text. This applies to ordinary and compiled query enumeration, Many relation row loops, and native JSON-tree projections. The text is consumed synchronously while the private producing statement remains active; no native span or pointer escapes into returned models or lazy results. Public UTF-8 codecs remain separate.
-
-Deferred paths retain owning payloads where required by existing behavior: collection and scalar operations whose statement completion or cardinality checks precede construction, Single relation batches that gather rows before constructing per-owner instances, mutation payloads, and deferred hydration. Those copies preserve constructor and notification order and relation identity. Typed optional JSON reads through caller-controlled ADO readers also retain owning input: application code can advance or dispose that exact producer, so the private-statement lifetime proof does not apply. They are deliberate exceptions, not a claim that every internal read avoids a copy.
-
-Public `GetString` and requested string projections still return owning strings. Materialized model strings, arrays and objects also own their data; borrowed input does not make results zero-copy or allocation-free. Caller APIs, forward-reader effects, application callbacks and output-buffer ownership remain unchanged.
-
-### Internal JSON writes and parameters
-
-Insert, update/replacement and cascade writes retain the shared writer's default-grown character array and used range, then bind that owned UTF-16 text without constructing a final JSON string. Structured stored query parameters use the same owned-text representation. Serialization stays at its existing capture point, preserving getter effects and rebinding the captured output without serializing again.
-
-Compiled calls use one independent invocation frame and a bounded named-parameter range. Overlapping, lazy and recursive executions retain separate state; ref/out locations and exception writes remain intact. This changes internal transport, not public object parameter APIs or span/list writer callbacks and buffer ownership.
-
-Unicode compatibility fallback can still create owning strings. SQLite's transient text binding copies the supplied text before returning; removal of an intermediate managed JSON string is not zero-copy native binding or allocation-free execution. Existing TEXT/JSONB storage semantics remain.
+### Output buffers and callbacks
 
 The callback types are in `SoloDatabase.JsonSerializator`:
 
@@ -199,6 +207,18 @@ int written = JsonValue.WriteJson(ref person, ref destination);
 ReadOnlySpan<byte> json = destination.Slice(0, written);
 ```
 
+To choose a larger managed buffer yourself, supply a growth callback:
+
+```csharp
+Span<byte> output = Span<byte>.Empty;
+int[] source = { 1, 2, 3 };
+int written = JsonValue.WriteJson(ref source, ref output,
+    minimumCapacity => new byte[Math.Max(minimumCapacity, 4096)]);
+ReadOnlySpan<byte> json = output.Slice(0, written);
+```
+
+This callback receives the required total capacity. It returns independent managed storage; no release callback is needed. To use a pool or native allocator instead, provide a matching release callback and retain the ownership information your allocator needs. The rules below protect the old contents while the writer changes buffers.
+
 With no growth callback, SoloDB allocates a managed array when capacity is insufficient. Growth requests use checked, geometric capacity increases. Serialization does not restart or repeat getters and enumeration to size the output. A supplied growth callback must return at least the requested total capacity; an undersized result raises `InvalidOperationException` rather than switching to automatic allocation.
 
 A release callback requires a custom growth callback. An invalid pairing raises `ArgumentException` before serialization or callbacks. Growth must leave old storage valid until SoloDB copies the written prefix. SoloDB then publishes the replacement through `ref destination` and calls release with the full old span, including an empty initial span. It never releases the successful final destination; the caller releases it after use.
@@ -208,6 +228,10 @@ When supplying release, initial and replacement buffers must follow the same all
 If growth throws, destination still identifies the old buffer. If release throws after replacement publication, destination identifies the new buffer. An invalid replacement leaves the original destination unchanged. A nonempty, nonoverlapping rejected replacement is passed to release when supplied; cleanup failure does not replace the original validation error. Allocator independence remains the callback's responsibility, including rejected replacements.
 
 List overloads append to existing contents and return only the number of elements added. A null list raises `ArgumentNullException`; a read-only list raises `ArgumentException` before serialization. Writable lists use their append operations, with capacity growth for `List<byte>` and `List<char>`. No complete temporary JSON array is required merely to append. Callback, allocation, getter, enumeration and list failures propagate; partially written output is not rolled back. After a span failure, the caller retains responsibility for the buffer currently identified by destination.
+
+### JSON numbers
+
+When `ParseInto<object>` infers an integral number, it permits up to 32768 additional decimal zero digits from positive exponent expansion. Beyond that budget it returns signed `Double` infinity. This is an inference work budget, not a maximum numerical value: `1e32769` saturates, while `10e32768` remains an exact `BigInteger` because one more coefficient digit is already written. Written coefficient digits are not capped, and explicitly requesting `BigInteger` retains its arbitrary precision within available runtime and memory limits. Encoded numerical parameters and symbolic exact arithmetic retain their exact representation.
 
 Direct numeric conversion uses the declared integer, `double`, `float` or `decimal` type. Floating values avoid the decimal-backed tree's rounding and range limitations, so direct and tree output can differ for values outside Decimal precision or range. Direct floating-point writers use invariant numeric formatting, preserve negative zero as `-0`, and emit the JSON5 literals `NaN`, `Infinity` and `-Infinity` for nonfinite values. Explicit `JsonValue.Number` keeps its decimal representation. .NET Standard 2.0 UTF-16 numeric formatting may allocate a number-only string; direct output is not an allocation-free guarantee.
 
@@ -231,9 +255,23 @@ Migrate collections before accessing legacy numerical fields from event handlers
 
 ### Choosing a JSON API
 
-Use `ParseInto<T>` and `WriteJson<T>` when your application needs typed values and JSON text or bytes. They avoid constructing an intermediate `JsonValue` tree. Use `Parse` and `Serialize` when you need to inspect or edit a JSON tree. Choose UTF-8 for byte-oriented interfaces and UTF-16 for character-oriented interfaces, so encoding conversion is not added unnecessarily.
+Use `ParseInto<T>` and `WriteJson<T>` for typed conversion, or `Parse` and `Serialize` to inspect or edit a tree. The [reader rules](#reading-objects-and-handling-errors), [buffer ownership rules](#output-buffers-and-callbacks) and [number formats](#json-numbers) describe the differences that matter when choosing between them.
 
-The direct APIs share the database model conversion policies. Returned models own their data, and the caller owns the final output buffer. Buffer growth, model construction and required output copies can allocate.
+### Internal SQLite JSON reads
+
+Immediate internal materialization on the bundled engine parses borrowed native UTF-16 text through the existing JSON reader. SQLite's text conversion occurs before user callbacks; typed materialization uses the declared stored-value policy. Configured providers without this native UTF-16 access retain owning text. This applies to ordinary and compiled query enumeration, Many relation row loops, and native JSON-tree projections. The text is consumed synchronously while the private producing statement remains active; no native span or pointer escapes into returned models or lazy results. Public UTF-8 codecs remain separate.
+
+Deferred paths retain owning payloads where required by existing behavior: collection and scalar operations whose statement completion or cardinality checks precede construction, Single relation batches that gather rows before constructing per-owner instances, mutation payloads, and deferred hydration. Those copies preserve constructor and notification order and relation identity. Typed optional JSON reads through caller-controlled ADO readers also retain owning input: application code can advance or dispose that exact producer, so the private-statement lifetime proof does not apply. They are deliberate exceptions, not a claim that every internal read avoids a copy.
+
+Public `GetString` and requested string projections still return owning strings. Materialized model strings, arrays and objects also own their data; borrowed input does not make results zero-copy or allocation-free. Caller APIs, forward-reader effects, application callbacks and output-buffer ownership remain unchanged.
+
+### Internal JSON writes and parameters
+
+Insert, update/replacement and cascade writes retain the shared writer's default-grown character array and used range, then bind that owned UTF-16 text without constructing a final JSON string. Structured stored query parameters use the same owned-text representation. Serialization stays at its existing capture point, preserving getter effects and rebinding the captured output without serializing again.
+
+Compiled calls use one independent invocation frame and a bounded named-parameter range. Overlapping, lazy and recursive executions retain separate state; ref/out locations and exception writes remain intact. This changes internal transport, not public object parameter APIs or span/list writer callbacks and buffer ownership.
+
+Unicode compatibility fallback can still create owning strings. SQLite's transient text binding copies the supplied text before returning; removal of an intermediate managed JSON string is not zero-copy native binding or allocation-free execution. Existing TEXT/JSONB storage semantics remain.
 
 ## SQLite provider compatibility
 
@@ -252,9 +290,31 @@ Option uses the simple null/value format below in ordinary and generated convers
 | `None` | `null` |
 | `Some 7` | `7` |
 | `Some "Ada"` | `"Ada"` |
+| `Some null` | `null`, read back as `None` |
+| `Some None` | `null`, read back as `None` |
 
 Like `Nullable<T>`, an option stores absence as null and presence as the underlying value. This format does not preserve every possible option layer: `Some null` and `Some None` also write null, which reads back as `None`. Nested absent layers are not represented separately. Use an explicit model when your application needs to distinguish those states.
 
-The same policy applies to explicit trees and direct UTF-8/UTF-16 conversion through ordinary and generated operations. The option reader also accepts the Nullable-compatible object form: `{"HasValue":true,"Value":7}` reads as `Some 7`, and `{"HasValue":false}` reads as `None`. A true wrapper constructs `Some` even when its decoded payload is null or another absent option; writing that result in the flat format still loses the separate presence. An object containing `HasValue` is interpreted as this compatibility wrapper before ordinary payload decoding. Writers continue using the simple null/value format. Existing `Nullable<T>` behavior remains unchanged. `Result<T, TError>` retains its existing union representation and case identity; it does not use the option null/value format.
+### Reading legacy option wrappers
+
+The same policy applies to explicit trees and direct UTF-8/UTF-16 conversion through ordinary and generated operations. The option reader also accepts the Nullable-compatible object form: `{"HasValue":true,"Value":7}` reads as `Some 7`, and `{"HasValue":false}` reads as `None`. A true wrapper constructs `Some` even when its decoded payload is null or another absent option; writing that result in the flat format still loses the separate presence. An object containing `HasValue` is interpreted as this compatibility wrapper before ordinary payload decoding. Writers continue using the simple null/value format. Existing `Nullable<T>` behavior remains unchanged.
+
+### Result cases
+
+`Result<T, TError>` stores the selected case as an object, rather than using the option null/value format. For example, `Ok 7: Result<int,string>` writes:
+
+```json
+{"Tag":0,"IsOk":true,"IsError":false,"ResultValue":7,"ErrorValue":null}
+```
+
+`Error "failure"` writes:
+
+```json
+{"Tag":1,"IsOk":false,"IsError":true,"ResultValue":0,"ErrorValue":"failure"}
+```
+
+The inactive payload field keeps its typed default. These fields preserve case identity even when an error payload is null: `Error null` remains the Error case.
+
+### Relation properties
 
 General option conversion does not add option-wrapped relation properties. `option<DBRef<_>>` and `option<DBRefMany<_>>` remain unsupported; use the existing reference types and their empty-reference states.
