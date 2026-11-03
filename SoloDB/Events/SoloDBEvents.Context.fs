@@ -43,6 +43,8 @@ type internal EventContextBase(createDb: NativeSqliteConnection -> (unit -> unit
         member this.GetCollection<'A> () = this.ReadDB().GetCollection<'A> ()
         member this.GetCollection<'A> (name: string) = this.ReadDB().GetCollection<'A> (name)
         member this.GetUntypedCollection (name) = this.ReadDB().GetUntypedCollection(name)
+        member this.MigrateDecimal<'A>() = this.ReadDB().MigrateDecimal<'A>()
+        member this.MigrateDecimal<'A>(name) = this.ReadDB().MigrateDecimal<'A>(name)
         member this.CollectionExists (name) = this.ReadDB().CollectionExists (name)
         member this.CollectionExists<'A> () = this.ReadDB().CollectionExists<'A> ()
         member this.DropCollectionIfExists (name) = this.ReadDB().DropCollectionIfExists (name)

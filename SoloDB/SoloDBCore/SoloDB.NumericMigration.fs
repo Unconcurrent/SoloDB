@@ -61,10 +61,7 @@ module internal NumericMigration =
             if more then plan <- NumericMigrationPlan.create target actualTypes
         plan
 
-    let sample connection table target =
-        NumericMigrationProbe.sample connection table target
-
-    let migrate connection table target =
+    let private migrate connection table target =
         let plan = prepare connection table target
         if plan.Leaves.Length <> 0 then
             let statements = query table plan
@@ -92,7 +89,14 @@ module internal NumericMigration =
             finally
                 statement.Dispose()
 
-    let legacy = function
+    let private legacy = function
         | ValueNone | ValueSome "text" -> false
         | ValueSome "integer" | ValueSome "real" | ValueSome "object" -> true
         | _ -> raise(FormatException("A stored numerical value must be a number or an encoded numerical key."))
+
+    /// The caller owns an atomic transaction or savepoint for sampling and conversion together.
+    let run connection table target =
+        if not (Helper.existsCollection table connection) then
+            raise (KeyNotFoundException(sprintf "Collection %s does not exists." table))
+        if NumericMigrationProbe.sample connection table target |> legacy then
+            migrate connection table target

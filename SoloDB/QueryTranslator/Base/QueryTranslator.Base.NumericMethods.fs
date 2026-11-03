@@ -53,8 +53,42 @@ module internal QueryTranslatorNumericMethods =
                 || originalFSharpOwner "Microsoft.FSharp.Core.Operators+Checked" owner)
 
 
+    /// Nullable.fs owns false-on-absence relations; identify the original closed operands.
+    let nullableDateTimeComparison operation (method: MethodInfo) (left: Type) (right: Type) =
+        if isNull method then false else
+        let parameters = method.GetParameters()
+        let nullable = typeof<Nullable<DateTime>>
+        let native = typeof<DateTime>
+        let prefix, suffix =
+            if nullable.Equals(left) && native.Equals(right) then "Qmark", ""
+            elif native.Equals(left) && nullable.Equals(right) then "", "Qmark"
+            elif nullable.Equals(left) && nullable.Equals(right) then "Qmark", "Qmark"
+            else "", ""
+        let name =
+            match operation with
+            | ExpressionType.GreaterThan -> "Greater"
+            | ExpressionType.GreaterThanOrEqual -> "GreaterEquals"
+            | ExpressionType.LessThan -> "Less"
+            | ExpressionType.LessThanOrEqual -> "LessEquals"
+            | _ -> ""
+        name <> "" && (prefix <> "" || suffix <> "") &&
+        method.IsStatic && not method.ContainsGenericParameters && typeof<bool>.Equals(method.ReturnType) &&
+        originalFSharpOwner "Microsoft.FSharp.Linq.NullableOperators" method.DeclaringType &&
+        parameters.Length = 2 && parameters[0].ParameterType.Equals(left) && parameters[1].ParameterType.Equals(right) &&
+        method.Name = "op_" + prefix + name + suffix
+
+    let nullableDateTimeOperation (method: MethodInfo) left right =
+        let operation =
+            match method.Name with
+            | "op_QmarkGreater" | "op_GreaterQmark" | "op_QmarkGreaterQmark" -> ExpressionType.GreaterThan
+            | "op_QmarkGreaterEquals" | "op_GreaterEqualsQmark" | "op_QmarkGreaterEqualsQmark" -> ExpressionType.GreaterThanOrEqual
+            | "op_QmarkLess" | "op_LessQmark" | "op_QmarkLessQmark" -> ExpressionType.LessThan
+            | "op_QmarkLessEquals" | "op_LessEqualsQmark" | "op_QmarkLessEqualsQmark" -> ExpressionType.LessThanOrEqual
+            | _ -> ExpressionType.Extension
+        if nullableDateTimeComparison operation method left right then ValueSome operation else ValueNone
+
     let supportsRelationalMethod operation (method: MethodInfo) left right =
-        if isNull method || originalComparison operation method left right then true else
+        if isNull method || originalComparison operation method left right || nullableDateTimeComparison operation method left right then true else
         let left,right = underlying left,underlying right
         let owner = method.DeclaringType
         let parameters = method.GetParameters()

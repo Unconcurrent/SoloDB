@@ -17,6 +17,7 @@ module internal QueryTranslatorNumeric =
 
     let unsigned64 target =
         let target=underlying target
+        let target=if target.IsEnum then TypeMetadata.enumUnderlying target else target
         typeof<uint64>.Equals(target) || UIntPtr.Size=8 && typeof<unativeint>.Equals(target)
 
     let domain target =
@@ -64,6 +65,7 @@ module internal QueryTranslatorNumeric =
 
     let private nativeOperation target =
         let native = underlying target
+        let native = if native.IsEnum && unsigned64 native then TypeMetadata.enumUnderlying native else native
         let core = TypeSupport.NumericCore native.FullName |> Option.defaultValue native.FullName
         match core with
         | "System.Double" -> "TO_DOUBLE" | "System.Single" -> "TO_SINGLE"

@@ -53,6 +53,11 @@ module internal Bootstrap =
         let register (connection: NativeSqliteConnection) =
             NumericalFunctions.register connection
             QueryTranslatorCharacters.register lower connection
+            connection.CreateFunction("ENUM_TO_STRING", Func<string, string, string>(fun typeName value ->
+                let target = TypeMetadata.nameToType typeName
+                if isNull target || not target.IsEnum then invalidArg "typeName" "Enum text requires an enum type."
+                let json = JsonSerializator.JsonValue.Parse(if isNull value then "null" else value)
+                (json.ToObject(target)).ToString()), true)
             QueryOrderingPrimitives.register connection
             QueryTranslatorSpanSource.register connection
             connection.RegisterManagedScalar(JsonFunctions.rowErrorFunction, 1,

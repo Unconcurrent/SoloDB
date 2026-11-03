@@ -57,7 +57,7 @@ module internal QueryTranslatorVisitCoreCastAggregate =
                 | _ -> ValueNone
             | ValueNone -> ValueNone
           match converted with
-          | ValueSome converted -> QueryProduced.typed castToType converted
+          | ValueSome converted -> QueryProduced.converted castToType converted
           | ValueNone ->
               let nativeArgument =
                   if originalInput.IsSome && isSqlScalarResult castToType then QueryTranslatorNumeric.nativeScalar (framed argument)
@@ -66,7 +66,7 @@ module internal QueryTranslatorVisitCoreCastAggregate =
                   else argument
               let converted = QueryTranslatorNumeric.conversion checkedConversion castToType o.Type nativeArgument
               if obj.ReferenceEquals(converted, argument) then DirectValue(argument, input)
-              else QueryProduced.typed castToType converted
+              else QueryProduced.converted castToType converted
         QueryProduced.bind qb.SourceContext.NextAlias convert argument
 
     let private parseMathFormatDu (format: string) (resolveArg: int -> SqlExpr) : SqlExpr =

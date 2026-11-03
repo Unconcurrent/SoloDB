@@ -27,6 +27,13 @@ module internal QueryTranslatorVisitCoreMethodCall =
         match visitMathMethodDu m qb with
         | ValueSome result -> result
         | ValueNone ->
+        let nullableOperation =
+            if m.Arguments.Count = 2 then
+                QueryTranslatorNumericMethods.nullableDateTimeOperation m.Method m.Arguments[0].Type m.Arguments[1].Type
+            else ValueNone
+        match nullableOperation with
+        | ValueSome operation -> visitDu (Expression.MakeBinary(operation, m.Arguments[0], m.Arguments[1], false, m.Method)) qb
+        | ValueNone ->
         match m with
         | _ when QueryTranslatorCharacters.indexArguments m.Method ->
             let source, index = if m.Method.IsStatic then m.Arguments[0], m.Arguments[1] else m.Object, m.Arguments[0]
@@ -297,6 +304,12 @@ module internal QueryTranslatorVisitCoreMethodCall =
             SqlExpr.Binary(SqlExpr.Unary(UnaryOperator.IsNull, visitDu str qb), BinaryOperator.Or, SqlExpr.Binary(visitDu str qb, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.String "")))
         | OfShape1 null OfString "IsMatch" (OfString) (input, pattern) when typeof<System.Text.RegularExpressions.Regex>.Equals(m.Method.DeclaringType) ->
             SqlExpr.Binary(visitDu input qb, BinaryOperator.Regexp, visitDu pattern qb)
+        | _ when m.Method.Name = "ToString" && not (isNull m.Object) && m.Object.Type.IsEnum &&
+                 not m.Method.IsStatic && m.Arguments.Count = 0 && typeof<string>.Equals m.Method.ReturnType ->
+            TypeMetadata.registerType m.Object.Type
+            visitProduced m.Object qb |> QueryProduced.consume qb.SourceContext.NextAlias (fun value input ->
+                let token = input.Source |> ValueOption.defaultWith (fun () -> QueryProduced.treeToken qb.SourceContext.NextAlias value input)
+                SqlExpr.FunctionCall("ENUM_TO_STRING", [qb.AllocateParamExpr(TypeMetadataCache.RegisterExactName m.Object.Type); SqlExpr.FunctionCall("json", [token])]))
         | _ when m.Method.Name = "ToString" && not (isNull m.Object)
                  && DateTimeFunctions.supportsTemporalToStringTranslationType m.Object.Type ->
             DateTimeFunctions.translateDateTimeToStringCall

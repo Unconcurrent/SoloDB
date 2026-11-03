@@ -1598,6 +1598,16 @@ and ISoloDB =
     /// </remarks>
     abstract member GetUntypedCollection : name: string -> ISoloDBCollection<JsonSerializator.JsonValue>
 
+    /// <summary>Atomically migrates declared Decimal and BigInteger fields in the document type's existing collection.</summary>
+    /// <remarks>Collection acquisition performs no numerical migration. Not supported inside event handlers.</remarks>
+    /// <exception cref="System.Collections.Generic.KeyNotFoundException">The collection does not exist.</exception>
+    abstract member MigrateDecimal<'T> : unit -> unit
+
+    /// <summary>Atomically migrates declared Decimal and BigInteger fields in an existing named collection.</summary>
+    /// <remarks>Uses the current transaction, or starts a transaction on a root database. Not supported inside event handlers.</remarks>
+    /// <exception cref="System.Collections.Generic.KeyNotFoundException">The collection does not exist.</exception>
+    abstract member MigrateDecimal<'T> : name: string -> unit
+
     /// <summary>
     /// Returns true if a collection with the specified name exists.
     /// </summary>

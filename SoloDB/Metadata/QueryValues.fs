@@ -299,6 +299,12 @@ type internal QueryValueMetadata private () =
                 if typeof<obj>.Equals(input) && (kind = ExpressionType.Convert || kind = ExpressionType.ConvertChecked) && MetadataRuntime.supportsDynamicCode() then
                     typeof<QueryValueMetadata>.GetMethod("MakeConversion", BindingFlags.NonPublic ||| BindingFlags.Static)
                         .MakeGenericMethod(valueType).Invoke(null,[||]) :?> Func<obj,obj>
+                elif kind = ExpressionType.ArrayLength && input.IsArray && typeof<int>.Equals(valueType) then
+                    Func<obj,obj>(fun value -> box((value :?> Array).Length))
+                elif (kind = ExpressionType.Convert || kind = ExpressionType.ConvertChecked) &&
+                     input.Equals(Nullable.GetUnderlyingType(valueType)) then
+                    // A populated Nullable boxes as its original payload.
+                    Func<obj,obj>(id)
                 elif input.IsEnum && MetadataRuntime.supportsDynamicCode() then
                     let underlying = TypeMetadata.enumUnderlying input
                     let read = QueryMethodDiscovery.enumValue input underlying

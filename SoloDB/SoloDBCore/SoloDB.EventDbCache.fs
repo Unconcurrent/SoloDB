@@ -123,6 +123,8 @@ module internal EventContextDatabase =
                 cache.GetCollection<'U>(collectionName)
             member _.GetUntypedCollection(collectionName: string) =
                 cache.GetCollection<JsonSerializator.JsonValue>(collectionName)
+            member _.MigrateDecimal<'U>() = throwNestedTxInEventContext()
+            member _.MigrateDecimal<'U>(_name: string) = throwNestedTxInEventContext()
             member _.CollectionExists(collectionName: string) =
                 cache.CollectionExists(collectionName)
             member _.CollectionExists<'U>() =

@@ -23,16 +23,13 @@ module internal SoloDBRootOps =
             Helper.existsCollection name connection
 
         if existsAlready then
-            let needsMigration,needsIndexes =
+            let needsIndexes =
                 use connection=connectionManager.BorrowNative()
-                (NumericMigration.sample connection name typeof<'T> |> NumericMigration.legacy),
                 HelperSchema.unsignedIndexesRequireEnsure<'T> name connection
-            if needsMigration || needsIndexes then
+            if needsIndexes then
                 lock ddlLock (fun () ->
                     connectionManager.WithTransaction(fun connection ->
-                        if NumericMigration.sample connection name typeof<'T> |> NumericMigration.legacy then
-                            NumericMigration.migrate connection name typeof<'T>
-                        if needsIndexes then HelperSchema.ensureUnsignedIndexes<'T> name connection))
+                        HelperSchema.ensureUnsignedIndexes<'T> name connection))
 
         let hasRelations = RelationsSchemaValidator.hasReferenceProperties typeof<'T>
 
@@ -43,8 +40,6 @@ module internal SoloDBRootOps =
                     if shouldCreate then
                         Helper.createTableInner<'T> name connection
                     else
-                        if NumericMigration.sample connection name typeof<'T> |> NumericMigration.legacy then
-                            NumericMigration.migrate connection name typeof<'T>
                         HelperSchema.ensureUnsignedIndexes<'T> name connection
 
                     Helper.registerTypeCollection<'T> name connection

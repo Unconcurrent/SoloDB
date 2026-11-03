@@ -266,6 +266,10 @@ module internal QueryTranslatorVisitCore =
         | ExpressionType.Constant ->
             let c = exp :?> ConstantExpression
             (match c.Value with null -> SqlExpr.Literal(SqlLiteral.Null) | _ -> qb.AllocateParamExpr(c.Value)) |> QueryProduced.typed c.Type
+        | ExpressionType.ArrayLength ->
+            let array = (exp :?> UnaryExpression).Operand
+            visitMemberAccessDu valueUse { Expression = array; MemberName = "Length"; InputType = array.Type;
+                                          ReturnType = exp.Type; OriginalExpression = None } qb
         | ExpressionType.MemberAccess -> visitMemberAccessDu valueUse (exp :?> MemberExpression |> MemberAccess.From) qb
         | ExpressionType.Extension when (match exp with :? BoundValueAccessExpression as access -> not(isNull access.MemberName) | _ -> false) ->
             let access = exp :?> BoundValueAccessExpression

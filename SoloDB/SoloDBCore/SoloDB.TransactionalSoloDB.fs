@@ -71,9 +71,6 @@ type TransactionalSoloDB internal (connection: NativeCachingDbConnection, parent
         checkScope ()
         if not (Helper.existsCollection name connection) then
             Helper.createTableInner<'T> name connection
-        elif connection.EventDispatchState.Depth = 0 &&
-             (NumericMigration.sample connection name typeof<'T> |> NumericMigration.legacy) then
-            NumericMigration.migrate connection name typeof<'T>
 
         if connection.EventDispatchState.Depth = 0 &&
            HelperSchema.unsignedIndexesRequireEnsure<'T> name connection then
@@ -125,6 +122,17 @@ type TransactionalSoloDB internal (connection: NativeCachingDbConnection, parent
         let name = name |> Helper.validateUserCollectionName
         
         this.InitializeCollection<JsonSerializator.JsonValue>(name)
+
+    /// <summary>Atomically migrates declared Decimal and BigInteger fields in an existing collection.</summary>
+    /// <param name="name">The collection name.</param>
+    /// <remarks>Uses a savepoint in this transaction. Collection acquisition does not migrate values.</remarks>
+    member this.MigrateDecimal<'T>(name: string) =
+        checkScope()
+        let name = Helper.validateUserCollectionName name
+        ConnectionsTransactionHelpers.withSavepoint connection (fun _ -> NumericMigration.run connection name typeof<'T>)
+
+    /// <summary>Atomically migrates declared Decimal and BigInteger fields in the document type's existing collection.</summary>
+    member this.MigrateDecimal<'T>() = this.MigrateDecimal<'T>(Helper.collectionNameOf<'T>)
 
     /// <summary>
     /// Checks if a collection with the specified name exists.
@@ -254,6 +262,8 @@ type TransactionalSoloDB internal (connection: NativeCachingDbConnection, parent
         member this.GetCollection<'T>() = this.GetCollection<'T>()
         member this.GetCollection<'T>(name) = this.GetCollection<'T>(name)
         member this.GetUntypedCollection(name) = this.GetUntypedCollection(name)
+        member this.MigrateDecimal<'T>() = this.MigrateDecimal<'T>()
+        member this.MigrateDecimal<'T>(name) = this.MigrateDecimal<'T>(name)
         member this.CollectionExists(name) = this.CollectionExists(name)
         member this.CollectionExists<'T>() = this.CollectionExists<'T>()
         member this.DropCollectionIfExists(name) = this.DropCollectionIfExists(name)

@@ -139,6 +139,18 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         
         this.InitializeCollection<JsonSerializator.JsonValue>(name)
 
+    /// <summary>Atomically migrates declared Decimal and BigInteger fields in an existing collection.</summary>
+    /// <param name="name">The collection name.</param>
+    /// <remarks>Collection acquisition does not inspect or migrate numerical values.</remarks>
+    member this.MigrateDecimal<'T>(name: string) =
+        this.CheckDisposed()
+        let name = Helper.validateUserCollectionName name
+        lock ddlLock (fun () ->
+            connectionManager.WithTransaction(fun connection -> NumericMigration.run connection name typeof<'T>))
+
+    /// <summary>Atomically migrates declared Decimal and BigInteger fields in the document type's existing collection.</summary>
+    member this.MigrateDecimal<'T>() = this.MigrateDecimal<'T>(Helper.collectionNameOf<'T>)
+
     /// <summary>
     /// Checks if a collection with the specified name exists.
     /// </summary>
@@ -363,6 +375,8 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         member this.GetCollection<'T>() = this.GetCollection<'T>()
         member this.GetCollection<'T>(name) = this.GetCollection<'T>(name)
         member this.GetUntypedCollection(name) = this.GetUntypedCollection(name)
+        member this.MigrateDecimal<'T>() = this.MigrateDecimal<'T>()
+        member this.MigrateDecimal<'T>(name) = this.MigrateDecimal<'T>(name)
         member this.CollectionExists(name) = this.CollectionExists(name)
         member this.CollectionExists<'T>() = this.CollectionExists<'T>()
         member this.DropCollectionIfExists(name) = this.DropCollectionIfExists(name)

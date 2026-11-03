@@ -81,7 +81,8 @@ module internal QueryTranslatorVisitCoreBinary =
         let equality = b.NodeType = ExpressionType.Equal || b.NodeType = ExpressionType.NotEqual
         let scalarEquality = equality && not b.IsLiftedToNull && not complexTypes &&
                              (b.IsLifted || not b.Left.Type.IsValueType || not b.Right.Type.IsValueType)
-        let liftedRelation = relationalOperator.IsSome && not equality && b.IsLifted && not b.IsLiftedToNull
+        let liftedRelation = relationalOperator.IsSome && not equality && not b.IsLiftedToNull &&
+                             (b.IsLifted || QueryTranslatorNumericMethods.nullableDateTimeComparison b.NodeType b.Method b.Left.Type b.Right.Type)
         if optionComparison || not isAnyNull && scalarEquality then
             let first = visitRaw b.Left qb
             let second = visitRaw b.Right qb

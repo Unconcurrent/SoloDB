@@ -353,14 +353,23 @@ type internal TypeMetadataCache private () =
     static member RegisterName(modelType: Type) =
         gate.EnterWriteLock()
         try
-            let name = modelType.FullName
-            let registered =
-                match names.TryGetValue name with
-                | true, entry when Array.exists (fun registered -> modelType.Equals(registered)) entry.Registered -> entry.Registered
-                | true, entry -> Array.append entry.Registered [|modelType|]
-                | _ -> [|modelType|]
-            names.[name] <- { Registered = registered; Resolved = ValueNone }
+            // Stored polymorphism retains FullName; query operations carry exact assembly identity.
+            for name in [|modelType.FullName; modelType.AssemblyQualifiedName|] do
+                if not(isNull name) then
+                    let registered =
+                        match names.TryGetValue name with
+                        | true, entry when Array.exists (fun registered -> modelType.Equals(registered)) entry.Registered -> entry.Registered
+                        | true, entry -> Array.append entry.Registered [|modelType|]
+                        | _ -> [|modelType|]
+                    names.[name] <- { Registered = registered; Resolved = ValueNone }
         finally gate.ExitWriteLock()
+    static member RegisterExactName(modelType: Type) =
+        // Separate runtime identities can share even an assembly-qualified name.
+        let name = modelType.AssemblyQualifiedName + "\u0000" + modelType.TypeHandle.Value.ToInt64().ToString(Globalization.CultureInfo.InvariantCulture)
+        gate.EnterWriteLock()
+        try names.[name] <- { Registered = [|modelType|]; Resolved = ValueNone }
+        finally gate.ExitWriteLock()
+        name
     static member ResolveName(name: string, discover: Func<Type>) =
         let select() =
             match names.TryGetValue name with

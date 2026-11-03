@@ -9,9 +9,22 @@ open SoloDatabase.QuerySerializationSql
 
 /// Carries a selected value and its writer facts through one SQL binding.
 module internal QueryProduced =
+    let private unsignedEnum (input: QuerySerializationInput) =
+        (Utils.optionalPayloadType input.OriginalType).IsEnum && QueryTranslatorNumeric.unsigned64 input.OriginalType
+
+    let private preservesToken (input: QuerySerializationInput) =
+        input.Facts = JsonSerializator.JsonSerializationShape.Dynamic || unsignedEnum input
+
     let typed target value =
         let input = QuerySerializationInput.ForType target
         DirectValue(value, { input with Source = ValueSome(jsonToken value); Carrier = (if isSqlScalarResult target then SqlScalar else CanonicalToken) })
+
+    /// A computed unsigned enum retains its native-number writer beside its comparable key.
+    let converted target value =
+        let produced = typed target value
+        if unsignedEnum produced.Input then
+            DirectValue(value, { produced.Input with Source = ValueSome(QueryTranslatorNumeric.storedUnsigned target value) })
+        else produced
 
     /// Parameter metadata comes from the same acquisition as the parameter value.
     let parameter target expression writer =
@@ -26,8 +39,8 @@ module internal QueryProduced =
 
     /// Dynamic publication retains the original token beside its native scalar facet.
     let private publicationToken value (input: QuerySerializationInput) =
-        match input.Facts, input.Source with
-        | JsonSerializator.JsonSerializationShape.Dynamic, ValueSome token -> token
+        match input.Source with
+        | ValueSome token when preservesToken input -> token
         | _ -> jsonToken value
     let packet = function
         | DirectValue(value, input) -> SqlExpr.JsonArrayExpr [publicationToken value input; inputDescriptor input]
@@ -81,6 +94,7 @@ module internal QueryProduced =
                 Joins = []; Where = None; GroupBy = []; Having = None; OrderBy = []
                 Limit = None; Offset = None } }
     let private invariantLeaf (input: QuerySerializationInput) =
+        if preservesToken input then false else
         match input.Facts with
         | shape when shape.IsScalarCarrier -> true
         | JsonSerializator.JsonSerializationShape.Uninterpreted -> true
@@ -154,7 +168,7 @@ module internal QueryProduced =
         | ValueSome owner when typeof<JsonSerializator.JsonValue>.IsAssignableFrom input.OriginalType ->
             let value = withTreeRowIdentity value owner.Identity
             value, { input with Source = ValueSome(jsonToken value) }
-        | _ when input.Facts = JsonSerializator.JsonSerializationShape.Dynamic ->
+        | _ when preservesToken input ->
             let token = publicationToken value input
             token, { input with Source = ValueSome token; Carrier = CanonicalToken }
         | _ -> value, input
@@ -224,7 +238,7 @@ module internal QueryProduced =
     let canonical nextName produced =
         bind nextName (fun value input ->
             let token =
-                if input.Facts = JsonSerializator.JsonSerializationShape.Dynamic then publicationToken value input
+                if preservesToken input then publicationToken value input
                 else canonicalToken input.Carrier value
             DirectValue(token, { input with Carrier = CanonicalToken })) produced
 
@@ -251,7 +265,8 @@ module internal QueryProduced =
         else selected
 
     /// Publication binds a packed result after the producer's grouping and bounds.
-    let publishSlot nextName slot (core: SelectCore) produced preserveErrors =
+    let publishSlot nextName slot (core: SelectCore) (produced: QueryProducedValue) preserveErrors =
+        let produced = if unsignedEnum produced.Input then canonical nextName produced else produced
         let projections = ProjectionSetOps.toList core.Projections
         let publishIdentity (input: QuerySerializationInput) (projection: Projection) =
             match slot, input.PhysicalOwner, projection.Alias, projection.Expr with
@@ -266,7 +281,7 @@ module internal QueryProduced =
         match produced with
         | DirectValue(value, input) ->
             let value =
-                if input.Facts = JsonSerializator.JsonSerializationShape.Dynamic then publicationToken value input
+                if preservesToken input then publicationToken value input
                 else value
             let companions, output = publishInput nextName input
             struct({ Ctes = []; Body = SingleSelect { core with Projections = ProjectionSetOps.ofList(replaceValue value input @ companions) } }, output)
@@ -289,7 +304,7 @@ module internal QueryProduced =
             let inner = { Ctes = []; Body = SingleSelect innerCore }
             let selected, selectedInput = bound tokenValue elementAlias input
             let selected =
-                if selectedInput.Facts = JsonSerializator.JsonSerializationShape.Dynamic then publicationToken selected selectedInput
+                if preservesToken selectedInput then publicationToken selected selectedInput
                 else selected
             let selected =
                 if preserveErrors then
