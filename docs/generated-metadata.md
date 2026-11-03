@@ -2,7 +2,13 @@
 
 The `SoloDB` package includes a C# source generator, an F# type provider and their build integration. Keep the package's build assets enabled; no separate generator package or manual build-target import is required for package consumers.
 
-Both routes generate operations for your original model types, preserving their visibility and CLR identity. They share conversion and storage policies with ordinary runtime-discovered operations; registration does not select a different database format. The [numerical storage upgrade](#numerical-storage-and-migration) applies to both routes. You do not need replacement models or `partial` declarations on models. Generated operations can also be used in ordinary JIT applications.
+You can use your existing model classes and records in JIT and NativeAOT applications. Models do not need `partial` declarations or a separate generated version. Both builds use the same database format; see the [numerical storage upgrade](#numerical-storage-and-migration) when upgrading existing data.
+
+## Conditional activation
+
+The `#if !DEBUG` guards in the examples below keep generation out of Debug builds, so those builds pay no code-generation cost. SoloDB uses runtime discovery there. Release builds include generated operations for NativeAOT.
+
+In F#, guard both the provider alias and its registration call. Remove the guards if you want generated operations in Debug too. A runtime `if` cannot skip code generation because it runs after the build.
 
 ## C#
 
@@ -73,50 +79,9 @@ module Program =
 
 `0` is the provider's static argument, not a model identifier. Model roots are discovered from the current project's resolved SoloDB uses. `[<SoloDBAOT>]` on a model also selects it explicitly. Keep ordinary F# source ordering: declare the alias before calling it.
 
-## Root discovery and registration lifetime
-
-Active generation combines explicitly selected models with concrete types inferred from typed collection and JSON calls, closed generic helper uses and supported query signatures. It follows their required operation dependencies without generating every type in referenced assemblies. Explicit and inferred roots retain the same original types.
-
-Raw SQL argument inputs have their own generated capture capability; they do not need JSON model roots. See [SQL argument capture](native-sql.md#typed-arguments-and-direct-mapping) for property selection, source availability and acquisition behavior.
-
-An open-ended runtime-selected type cannot always be inferred. Resolve `SOLO003` warnings at the reported use: supply an explicit model root and a concrete closed signature where required. Attributes do not make an unsupported operation supported.
-
-Each consuming project registers its own generated operations. A library can call its project-local registration from its own initialization method. Call registration before generated metadata is needed, including in libraries used by the application. Successful repeated calls, including concurrent calls, are no-ops; a failed registration can be retried. Registration does not invoke model constructors or getters.
-
-## Conditional activation
-
-Generation follows the registration call in the compiled source. Attributes or an F# provider alias alone do not activate full model generation. An ordinary runtime `if` does not disable generation; exclude the call with a preprocessor condition instead.
-
-Use the standard `DEBUG` symbol to keep registration out of Debug builds. The examples above use `#if !DEBUG`: C# guards the registration call, and F# guards both the provider alias and its call. No project-file changes or custom symbols are needed.
-
-In C#:
-
-```csharp
-#if !DEBUG
-SoloDBAOT.Register();
-#endif
-```
-
-In F#, declare the alias before the code that calls it:
-
-```fsharp
-#if !DEBUG
-type AOTSupport = SoloDBAOT<0>
-#endif
-
-// Inside your startup function:
-#if !DEBUG
-AOTSupport.register()
-#endif
-```
-
-With the standard Debug and Release configurations, this selects generated operations in Release and ordinary runtime discovery in Debug. Choose a source condition that includes every configuration you publish with NativeAOT. An ordinary runtime `if` does not exclude generation. The package handles activation changes during normal builds.
-
 ## JIT and NativeAOT deployment
 
-When generation is inactive, ordinary JIT execution discovers supported type operations lazily at runtime. Registered generated operations take precedence when present. NativeAOT needs generated coverage; runtime discovery is not a substitute for missing operations. PublishAot belongs on the consuming executable project, including when its models live in a .NET Standard library.
-
-Register the [C#](#c) or [F#](#f) operations shown above. Set the standard SDK property in the executable project file:
+Use the registration shown above and .NET SDK 8 or later. For NativeAOT, add this to the executable project file, even when your models live in a .NET Standard library:
 
 ```xml
 <PropertyGroup>
@@ -124,25 +89,31 @@ Register the [C#](#c) or [F#](#f) operations shown above. Set the standard SDK p
 </PropertyGroup>
 ```
 
-This keeps ordinary Debug discovery available with the registration conditions above. Keep this setting on the executable: passing it as a global command-line property also applies it to referenced .NET Standard libraries, which cannot themselves be published with NativeAOT. Then publish with the standard SDK command, for example on Linux x64:
+This example enables NativeAOT for Release builds and keeps ordinary runtime discovery in Debug. Publish for your target platform, for example Linux x64:
 
 ```bash
 dotnet publish -c Release -r linux-x64
 ```
 
-Choose the runtime identifier for your target and install the SDK's [NativeAOT platform prerequisites](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/#prerequisites). Keep registration enabled in the configuration you publish. F# query construction uses the [whole-query `CompileQuotation` route](#f-query-quotations) below.
+Install the SDK's [NativeAOT platform prerequisites](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/#prerequisites) before publishing. Keep registration enabled in the configuration you publish. For F# queries, use [`CompileQuotation`](#f-query-quotations).
 
-Both C# and F# builds emit application operations into a project-specific runtime helper assembly. Package build integration generates and delivers the helper during normal builds and publishing. Keep it with managed application output; NativeAOT consumes it during native compilation. The generator and provider tooling are build-time dependencies and are not deployed with the application.
+The package includes generated operations in normal build and publish output. When copying a managed build, keep its generated helper assembly beside the application. NativeAOT publishing compiles those operations into the executable. Compiler tooling is needed only during the build.
 
-Generating operations requires .NET SDK 8 or later; installing SDK 10 separately is unnecessary. This compiler requirement is separate from the runtime requirements of ordinary SoloDB applications. F# analysis uses the installed SDK's .NET host. The runtime library requires FSharp.Core 6.0.7 or later and preserves newer consumer versions. The CSharp generator and FSharp provider use FSharp.Core 8 independently of the runtime library.
+The runtime library requires FSharp.Core 6.0.7 or later and supports newer application versions. The generation SDK requirement does not change the runtime requirements of ordinary SoloDB applications.
 
-Application APIs have separate NativeAOT requirements. On .NET 8 linux-x64 with FSharp.Core 8.0.403, formatted `printfn` can fail with missing native generic code even in an executable without SoloDB. Model registration does not supply that framework code. Use compatible application output, such as `Console.WriteLine`, for that deployment.
+On .NET 8 linux-x64 with FSharp.Core 8.0.403, formatted `printfn` can fail with missing native generic code even without SoloDB. Use `Console.WriteLine`, as in the examples, for that deployment.
 
-Registration prepares type operations and query execution routes; it does not pregenerate SQL. LINQ translation and `collection.Compile` retain their existing responsibilities.
+## Root discovery and registration lifetime
+
+The generator follows the concrete types used by collection, JSON and query calls, including closed generic helpers. If a type is chosen only at runtime, it may need an explicit `[SoloDBAOT]` model declaration or a concrete query signature. Follow `SOLO003` warnings at the reported call.
+
+Raw SQL parameter objects have [separate argument capture](native-sql.md#typed-arguments-and-direct-mapping); they do not need JSON model declarations.
+
+Each consuming project registers its own operations. A library can expose an initialization method that calls its project-local registration. Call it before using that library's generated operations. Successful repeated calls, including concurrent calls, are no-ops; a failed call can be retried. Registration does not run model constructors or getters.
 
 ## F# query quotations
 
-For F# NativeAOT applications, use `CompileQuotation` instead of passing an ordinary F# lambda to `Compile`. F# lambda-to-LINQ conversion through `LeafExpressionConverter` fails under NativeAOT when it accesses `MetadataToken`, before SoloDB receives the expression. Model registration does not fix that caller-side failure. `CompileQuotation` captures the whole query lambda before that conversion and uses SoloDB's existing query planning and execution. Existing `Compile` calls remain supported on JIT, and already constructed LINQ expressions retain their existing API.
+Use `CompileQuotation` for F# NativeAOT queries. It captures the query before FSharp.Core's ordinary lambda-to-LINQ conversion, which can fail under NativeAOT. Existing `Compile` calls continue to work in JIT applications.
 
 Write an ordinary lambda, without a marker argument or quotation brackets:
 
@@ -157,9 +128,9 @@ let find = people.CompileQuotation(fun query id ->
 let person = find.Invoke(id)
 ```
 
-Keep query construction, including `Where`, `OrderBy` and `Select` lambdas, inside the outer `CompileQuotation` lambda. Changing only the final method cannot repair conversion that already happened while building a query. Sequence, ordered sequence, scalar and client-result forms accept zero through three invocation arguments and retain their existing delegate and result semantics.
+Keep every query operator inside the outer `CompileQuotation` lambda. Constructing a query with an ordinary F# lambda first can trigger conversion before `CompileQuotation` sees it. Sequence, ordered sequence, scalar and client-result forms support up to three invocation arguments.
 
-Some F# union field accessors need a metadata flag correction for NativeAOT quotation deserialization. For affected unsigned model libraries, the package automatically prepares private native compiler inputs with the necessary flag; original assemblies, model signatures and method bodies remain unchanged. No manual patch or extra package is required, and `FSharp.Core` is not modified. A signed model library needing this correction remains unchanged and stops the native build with a `SOLO005` error because signed-library correction is unsupported. Signed assemblies that do not need the correction remain supported.
+The package prepares unsigned F# union libraries for NativeAOT when needed, without changing the original model libraries. If that preparation is required for a signed library, publishing stops with `SOLO005`. Other signed libraries remain supported.
 
 ## Direct typed JSON
 
