@@ -116,10 +116,18 @@ With the standard Debug and Release configurations, this selects generated opera
 
 When generation is inactive, ordinary JIT execution discovers supported type operations lazily at runtime. Registered generated operations take precedence when present. NativeAOT needs generated coverage; runtime discovery is not a substitute for missing operations. PublishAot belongs on the consuming executable project, including when its models live in a .NET Standard library.
 
-Register the [C#](#c) or [F#](#f) operations shown above, then publish your executable with the standard .NET SDK command. For example, on Linux x64:
+Register the [C#](#c) or [F#](#f) operations shown above. Set the standard SDK property in the executable project file:
+
+```xml
+<PropertyGroup>
+  <PublishAot>true</PublishAot>
+</PropertyGroup>
+```
+
+Keep this setting on the executable: passing it as a global command-line property also applies it to referenced .NET Standard libraries, which cannot themselves be published with NativeAOT. Then publish with the standard SDK command, for example on Linux x64:
 
 ```bash
-dotnet publish -c Release -r linux-x64 -p:PublishAot=true
+dotnet publish -c Release -r linux-x64
 ```
 
 Choose the runtime identifier for your target and install the SDK's [NativeAOT platform prerequisites](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/#prerequisites). Keep registration enabled in the configuration you publish. F# query construction uses the [whole-query `CompileQuotation` route](#f-query-quotations) below.
