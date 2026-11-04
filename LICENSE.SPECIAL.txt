@@ -1,5 +1,124 @@
-In addition, special permission is granted to distribute applications that
-incorporate an unmodified DLL of this library in Single-file deployments,
-Native AOT builds, and other bundling technologies that embed the library
-directly into the executable file. This ensures you can use modern .NET
-deployment strategies without violating the license.
+# SoloDB Distribution Exception, version 1.0
+
+## Purpose
+
+**TL;DR:**
+
+You can use and distribute SoloDB in any application or library, including commercial and closed-source software.
+
+You can ship it however you want: as a DLL, statically linked, bundled into a single executable, compiled with Native AOT, trimmed, obfuscated, encrypted, or distributed through an app store or on a locked-down device.
+
+You do **not** have to:
+- Open-source your application or other libraries.
+- Provide object files, relinking support, or a way to replace SoloDB.
+- Disable obfuscation, DRM, or other software protections.
+
+You only need to:
+- Include a brief notice acknowledging SoloDB, its license, and where its source code can be found.
+- If you modify SoloDB itself, publish the source code of the modified SoloDB under the LGPLv3 with this exception when distributing software that relies on these permissions.
+
+You can modify your own application and other independent libraries without publishing their source code.
+
+Sections 1 through 4 define the exact terms of this permission and shall be interpreted consistently with the purpose described above.
+
+This exception is an additional permission under Section 7 of the GNU General Public License version 3 ("GPLv3"), as incorporated by the GNU Lesser General Public License version 3 ("LGPLv3"). Terms defined in the LGPLv3 or GPLv3 have the same meaning here unless otherwise specified.
+
+## 1. Definitions
+
+**"Qualifying Library"** means either:
+
+(a) An unmodified version of the Library as released by the SoloDB copyright holder; or
+
+(b) A modified version of the Library, provided that:
+
+  (i) The modified Library, including all modifications to it, is licensed under the LGPLv3 together with this exception, version 1.0;
+
+  (ii) The complete Corresponding Source of the modified Library is made publicly available, at no charge, no later than the first conveyance of a Combined Work or Combined Library containing that version; and
+
+  (iii) That Corresponding Source remains publicly available for as long as the distributor continues to convey any Combined Work or Combined Library containing that modified version.
+
+**"Build Transformation"** means an automated operation performed during the compilation, optimization, linking, protection, packaging, or distribution of the Library that does not modify the Library's source code or introduce a separate substantive modification to its implementation.
+
+Build Transformations include, without limitation:
+
+- Compilation to native code, including Native AOT, ReadyToRun, Mono AOT, and IL2CPP;
+- IL trimming, dead-code elimination, and linking;
+- Single-file bundling, assembly merging, and static linking;
+- Compression, obfuscation, virtualization, and packing;
+- Anti-tamper, anti-debugging, and other software-protection measures;
+- Code signing; and
+- Encryption or packaging applied by a distribution platform.
+
+Changes inherent in these operations, including removal of unused code, compiler optimizations, platform adaptation, and the operation of protection mechanisms, do not by themselves constitute modifications of the Library.
+
+However, a substantive change to the Library's implementation, independent of such operations, constitutes a modification regardless of whether it is performed on source code, intermediate language, bytecode, or machine code. Such a modified Library must meet Section 1(b) to qualify for this exception.
+
+**"Combined Library"** means a combined library as described in LGPLv3 Section 5, containing facilities of the Library alongside other library facilities that are not Applications and are not covered by the LGPLv3.
+
+**"Covered Combination"** means either a Combined Work as defined in LGPLv3 or a Combined Library as defined above.
+
+## 2. Permission
+
+Provided that you comply with Section 3, you may convey a Covered Combination containing a Qualifying Library, in any form and after any Build Transformation, under terms of your choice for the Application or other independent library facilities.
+
+In doing so, you are granted additional permission to convey the Covered Combination without complying with:
+
+(a) The introductory requirement in LGPLv3 Section 4 that the terms governing a Combined Work, taken together, must not restrict modification of the portions of the Library contained in the Combined Work or reverse engineering for debugging such modifications. For conveyances relying on this exception, the reverse-engineering condition in Section 3(b) of this exception applies instead of the corresponding requirement in LGPLv3 Section 4.
+
+(b) LGPLv3 Sections 4(a) through 4(e), in the case of a Combined Work, and LGPLv3 Sections 5(a) and 5(b), in the case of a Combined Library; and
+
+(c) GPLv3 Section 6, solely with respect to Installation Information, and GPLv3 Sections 10 (third paragraph) and 12, solely to the extent necessary to permit conveyance of the Covered Combination subject to restrictions imposed by distribution platforms, application stores, digital rights management systems, or devices in which the Covered Combination is installed or with which it is distributed.
+
+The permission in Section 2(c) includes conveyance through platforms imposing mandatory license terms or technical protection measures, and conveyance in or with devices restricting the installation, modification, replacement, or execution of software.
+
+These permissions do not require you to:
+
+- Disclose the source code of the Application or independent library facilities;
+- Provide Corresponding Application Code or other material for relinking or recombining the Application with a modified Library;
+- Enable installation or execution of a modified Library on a device;
+- Disable obfuscation, encryption, anti-tamper, or other protection mechanisms; or
+- Distribute an uncombined copy of the Library solely because it forms part of a Combined Library.
+
+Nothing in this Section waives requirements applicable to the standalone Library or its Corresponding Source, including the requirements of Section 1(b) for a modified Qualifying Library.
+
+## 3. Conditions
+
+**(a) Notice.**
+
+You must state, in at least one place of your choice that is reasonably accessible to recipients, that the Covered Combination uses the Library under the LGPLv3 with this exception.
+
+The statement must include:
+
+- The Library's copyright notice;
+- The version, commit identifier, or other unambiguous identification of the Library used; and
+- Where the Library's Corresponding Source and the LGPLv3, GPLv3, and this exception can be obtained.
+
+A URL suffices for the source and license texts.
+
+Acceptable locations include documentation, a license or third-party notices file, a store listing, a website, or an in-application licenses screen.
+
+No splash screen, runtime display, prominent notice, or user interaction is required.
+
+**(b) Reverse engineering.**
+
+You may obfuscate, encrypt, or otherwise technically hinder analysis of the Covered Combination, including portions derived from the Library.
+
+However, terms imposed by you may not prohibit reverse engineering of the Covered Combination to the extent reasonably necessary to identify, examine, or debug functionality derived from the Library, including where that functionality has been inlined, optimized, or merged with Application code or other library facilities.
+
+This permission does not extend to reverse engineering unrelated functionality of the Application or independent library facilities for other purposes.
+
+Standard terms imposed by a distribution platform that you cannot alter do not breach this condition.
+
+## 4. Scope
+
+This exception grants additional permission only for the conveyance of Covered Combinations containing a Qualifying Library.
+
+It does not change the permissions or obligations governing standalone conveyance of the Library or modified versions of it, including the licensing options expressly permitted by the LGPLv3 and GPLv3.
+
+In particular, this exception does not independently authorize conveying the standalone Library, or a modified version of it, under proprietary terms.
+
+The portions of a Covered Combination derived from a Qualifying Library remain subject to the LGPLv3 together with this exception, without imposing those terms on the independent Application or other independent library facilities.
+
+When conveying a modified version of the Library, you may retain or remove this exception as permitted by GPLv3 Section 7. A modified version conveyed without this exception is not a Qualifying Library under Section 1(b), but may still be distributed under the applicable terms of the LGPLv3 or GPLv3.
+
+Nothing in this exception limits permissions already granted by the LGPLv3 or GPLv3 independently of this exception.
