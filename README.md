@@ -21,7 +21,7 @@ SoloDB is packed with features that provide a seamless and powerful developer ex
 - **Thread-Safe**: A built-in connection pool ensures safe, concurrent access from multiple threads.
 - **Customizable ID Generation**: Use the default long primary key, or implement your own custom ID generation strategy (e.g., string, Guid).
 - **.NET Standard 2.0 & 2.1**: Broad compatibility with .NET Framework, .NET Core, and modern .NET runtimes.
-- **Open Source**: Licensed under LGPL-3.0, with the bundling permission described below.
+- **Open Source**: Licensed under LGPLv3 with a [distribution exception](https://github.com/Unconcurrent/SoloDB/blob/master/LICENSE.SPECIAL.txt) for applications and independent libraries.
 - **Documentation**: See the [official documentation](https://solodb.org/docs.html) for detailed guides.
 
 ## Table of Contents
@@ -852,11 +852,9 @@ db.Optimize();
 
 ## License
 
-This project is licensed under the GNU Lesser General Public License v3.0 (LGPL-3.0).
+SoloDB is licensed under [LGPLv3](https://github.com/Unconcurrent/SoloDB/blob/master/LICENSE.txt) with the [SoloDB Distribution Exception, version 1.0](https://github.com/Unconcurrent/SoloDB/blob/master/LICENSE.SPECIAL.txt). The exception lets you distribute SoloDB with commercial or closed-source applications and independent libraries, including NativeAOT, single-file, statically linked and protected builds, without publishing their source or providing relinking support.
 
-In addition, special permission is granted to distribute applications that incorporate an unmodified DLL of this library in Single-file deployments, Native AOT builds, and other bundling technologies that embed the library directly into the executable file. This ensures you can use modern .NET deployment strategies without violating the license.
-
-Full license details are available [here](https://solodb.org/legal.html).
+To rely on it, include the required SoloDB notice and source/license links, meet its licensing and public-source conditions for modified SoloDB, and respect its limited library-related reverse-engineering condition. It does not authorize proprietary distribution of standalone SoloDB. See the complete exception for the terms and the [licensing guide](https://solodb.org/legal.html) for a summary.
 
 ### Direct SQL
 
