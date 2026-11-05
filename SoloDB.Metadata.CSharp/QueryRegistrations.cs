@@ -27,16 +27,17 @@ internal static partial class QueryRegistrations
         var known = new HashSet<string>(selected.Select(Name), StringComparer.Ordinal);
         foreach (var site in sites)
         {
-            if (site.Method.ContainingType.ToDisplayString() == "System.Linq.Queryable") continue;
-            foreach (var type in site.Method.TypeArguments.Concat(site.Method.ContainingType.TypeArguments))
-                if (Closed(type) && !HasAnonymous(type)) { known.Add(Name(type)); yield return type; }
-            if (site.Method.Name != "Compile" || site.Invocation.ArgumentList.Arguments.Count == 0 ||
-                site.Invocation.ArgumentList.Arguments[0].Expression is not LambdaExpressionSyntax lambda) continue;
-            foreach (var node in lambda.DescendantNodes().OfType<ExpressionSyntax>())
+            if (site.Method.ContainingType.ToDisplayString() != "System.Linq.Queryable")
+                foreach (var type in site.Method.TypeArguments.Concat(site.Method.ContainingType.TypeArguments))
+                    if (Closed(type) && !HasAnonymous(type)) { known.Add(Name(type)); yield return type; }
+            if (facts.Operation(site.Invocation) is not IInvocationOperation call) continue;
+            foreach (var input in QueryExpressionInputs.Arguments(facts,call.Arguments,site.Symbols))
+            foreach (var origin in input.Origins)
+            foreach (var node in origin.Lambda.DescendantNodes().OfType<ExpressionSyntax>())
             {
                 var original = facts.Type(node).Type;
                 if (original == null) continue;
-                var type = site.Symbols.Type(original);
+                var type = origin.Symbols.Type(original);
                 if (SequenceElement(type) != null || EnumerableElement(type) == null || !Closed(type) || HasAnonymous(type)) continue;
                 yield return type;
             }
@@ -419,6 +420,8 @@ internal static partial class QueryRegistrations
     }
     private static bool Writable(ITypeSymbol type)
     {
+        // Span constructions stay in the expression tree; value callbacks box.
+        if (type.IsRefLikeType) return false;
         var anonymous = new List<INamedTypeSymbol>();
         CollectAnonymous(type, anonymous);
         return anonymous.Count == 0;

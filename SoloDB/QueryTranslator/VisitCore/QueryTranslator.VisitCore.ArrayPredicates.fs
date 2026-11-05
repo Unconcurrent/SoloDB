@@ -100,6 +100,24 @@ module internal QueryTranslatorVisitCoreArrayPredicates =
         let start = span |> Option.bind (fun source -> source.Start) |> Option.map (fun expression -> visitProduced expression qb) |> Option.defaultWith (fun () -> QueryProduced.typed typeof<int> zero)
         let length = span |> Option.bind (fun source -> source.Length) |> Option.map (fun expression -> visitProduced expression qb) |> Option.defaultWith (fun () -> QueryProduced.typed typeof<int> absent)
         let comparison = if isSqlScalarResult value.Type then Some(visitComparisonDu value qb) else None
+        let invariant =
+            isFullyConstant normalizedArray ||
+            (qb.SourceContext.BindQueryValue |> ValueOption.exists (fun binder -> binder.IsValue normalizedArray))
+        let rec physicalSource (expression: Expression) =
+            match expression with
+            | :? MemberExpression as memberValue -> physicalSource memberValue.Expression
+            | :? BoundValueAccessExpression as access when not (isNull access.MemberName) -> physicalSource access.Parent
+            | :? ParameterExpression as parameter ->
+                let source = qb.ResolveParameterSource parameter
+                source.Position = BaseLayer && source.SerializationInput.PhysicalOwner.IsSome &&
+                (match source.Value with SourceParameter -> true | _ -> false)
+            | _ -> false
+        let directScalar =
+            invariant && physicalSource value && elementType.Equals(value.Type) &&
+            not (span |> Option.exists (fun source -> source.Start.IsSome)) &&
+            (match comparison with
+             | Some(SqlExpr.JsonExtractExpr _ | SqlExpr.JsonRootExtract _) -> true
+             | _ -> false)
         QueryProduced.construct qb.SourceContext.NextAlias (fun components ->
             let arrayExpr,input = components[0]
             let start,length = fst components[1],fst components[2]
@@ -122,12 +140,24 @@ module internal QueryTranslatorVisitCoreArrayPredicates =
             let target = QueryProduced.scalarValue value.Type token { element with Carrier = CanonicalToken }
                          |> fun valueExpr -> QueryTranslatorCharacters.comparable value.Type valueExpr element
             let nativeIn = isRootParameter value && Utils.isIntegerBasedType value.Type && (QueryTranslatorNumeric.domain value.Type).IsNone
-            if nativeIn then
+            // Direct extraction has no target conversion to force past an EXISTS
+            // match. Keep converters, correlated inputs and slice guards lazy.
+            let scalarIn = directScalar &&
+                           (match target with
+                            | SqlExpr.FunctionCall("jsonb_extract", [source; SqlExpr.Literal(SqlLiteral.String "$")]) -> Object.ReferenceEquals(source, token)
+                            | _ -> false)
+            if nativeIn || scalarIn then
+                let filter = if nativeIn then range else Some(SqlExpr.Unary(UnaryOperator.IsNotNull, target))
                 let values = { Ctes = []; Body = SingleSelect {
                     Distinct = false; Projections = Explicit({ Expr = target; Alias = None }, [])
-                    Source = Some(FromJsonEach(arraySource, None)); Joins = []; Where = range
+                    Source = Some(FromJsonEach(arraySource, None)); Joins = []; Where = filter
                     GroupBy = []; Having = None; OrderBy = []; Limit = None; Offset = None } }
-                SqlExpr.InSubquery(comparison.Value, values) |> QueryProduced.typed typeof<bool>
+                let membership = SqlExpr.InSubquery(comparison.Value, values)
+                // EXISTS is two-valued even for an absent member or NULL element.
+                // These guards retain that truth table without wrapping the seek.
+                (if nativeIn then membership
+                 else SqlExpr.Binary(SqlExpr.Unary(UnaryOperator.IsNotNull, comparison.Value), BinaryOperator.And, membership))
+                |> QueryProduced.typed typeof<bool>
             else
                 let whereExpr =
                     if isSqlScalarResult value.Type then

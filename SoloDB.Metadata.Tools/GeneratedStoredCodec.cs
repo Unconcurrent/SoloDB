@@ -85,7 +85,7 @@ internal static class GeneratedStoredCodec
             }
 
         }
-        if(models.Any(model=>TypeSupport.StoredDynamic(model.Facts.Shape,model.Facts.NonGenericEnumerable)))
-            entry.Emit(OpCodes.Call,api.Metadata("RegisterStoredDynamic"));
+        // Structured query parameters enter through Object even for sealed models.
+        entry.Emit(OpCodes.Call,api.Metadata("RegisterStoredDynamic"));
     }
 }

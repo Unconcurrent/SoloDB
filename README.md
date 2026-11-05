@@ -2,7 +2,7 @@
 
 Store your C# and F# objects, query them with LINQ, and keep related documents and files together in one SQLite database. SoloDB runs inside your application, with transactions and SQL available when you need them.
 
-Upgrading to 1.4.0 requires manual migration of existing Decimal and BigInteger data. Follow the [upgrade instructions](https://github.com/Unconcurrent/SoloDB/blob/master/docs/numeric-migration.md).
+Upgrading to 1.4 requires manual migration of existing Decimal and BigInteger data. Follow the [upgrade instructions](https://github.com/Unconcurrent/SoloDB/blob/master/docs/numeric-migration.md).
 
 ## Core Features
 
@@ -495,6 +495,8 @@ For supported ordered pages with an explicit `Id` tie-breaker, compiled queries 
 ### Indexing for Performance
 
 Use index attributes for property-level defaults, and use expression APIs for operational index management and composite keys.
+
+Captured-array membership such as `names.Contains(item.Name)` can seek a matching member index, including string and Guid identifiers. Queries without `OrderBy` have no guaranteed row order; a different access path can change their enumeration order and which rows `First`, `Take` or `Skip` select. Apply an explicit order when the selected row or page must be stable.
 
 #### Attribute Indexes
 
