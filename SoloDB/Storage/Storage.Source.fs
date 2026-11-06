@@ -221,10 +221,8 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
         | None when not(isNull coordination) ->
             builder.["Data Source"] <- "custom-storage"
             builder.["Storage Coordination"] <- coordination.Filename
-            builder.["Storage Vfs"] <-
-                if isNull coordination.RegisteredVfs then
-                    if Runtime.InteropServices.RuntimeInformation.IsOSPlatform(Runtime.InteropServices.OSPlatform.Windows) then "win32" else "unix"
-                else coordination.RegisteredVfs
+            if not(isNull coordination.RegisteredVfs) then
+                builder.["Storage Vfs"] <- coordination.RegisteredVfs
         | None -> builder.["Data Source"] <- identity
         builder.ConnectionString
     member internal _.IsRetired = lock gate (fun () -> retired)

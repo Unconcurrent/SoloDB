@@ -18,13 +18,7 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
     let coordinator =
         if isNull coordination then None
         else
-            // The closed File choice uses the engine's OS implementation, even
-            // if an application changed the default VFS. Custom parents are explicit.
-            let name =
-                if not(isNull coordination.RegisteredVfs) then coordination.RegisteredVfs
-                elif RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "win32"
-                else "unix"
-            Some(StorageNativeVfs(name))
+            Some(StorageNativeVfs(coordination.RegisteredVfs))
     let callbacks = ResizeArray<Delegate>()
     let nameBytes = bytes name
     let methodSize = methodFields + 18 * ptr
