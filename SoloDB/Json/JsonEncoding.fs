@@ -94,6 +94,7 @@ module internal JsonLexerConstants =
     let packedTrue = MemoryMarshal.Read<uint32>("true"B.AsSpan())
     let packedFals = MemoryMarshal.Read<uint32>("fals"B.AsSpan())
     let packedNaN = MemoryMarshal.Read<uint32>(ReadOnlySpan<byte>([| 'N'B; 'a'B; 'N'B; 0uy |]))
+    let packedThreeByteMask = MemoryMarshal.Read<uint32>(ReadOnlySpan<byte>([| 255uy; 255uy; 255uy; 0uy |]))
     let packedInfinity = MemoryMarshal.Read<uint64>("Infinity"B.AsSpan())
     let packedNullUtf16 = MemoryMarshal.Read<uint64>(MemoryMarshal.AsBytes("null".AsSpan()))
     let packedNullUpperUtf16 = MemoryMarshal.Read<uint64>(MemoryMarshal.AsBytes("NULL".AsSpan()))
@@ -175,7 +176,7 @@ type internal Utf8Reader =
                         if codeUnitIndex + 4 <= input.Length then
                             let word = MemoryMarshal.Read<uint32>(input.Slice(codeUnitIndex, 4))
                             if word = JsonLexerConstants.packedNULL then ValueSome (struct (CommonLiteral.NullUpper, 4))
-                            elif word &&& 0x00FFFFFFu = JsonLexerConstants.packedNaN then ValueSome (struct (CommonLiteral.NaN, 3))
+                            elif word &&& JsonLexerConstants.packedThreeByteMask = JsonLexerConstants.packedNaN then ValueSome (struct (CommonLiteral.NaN, 3))
                             else ValueNone
                         elif codeUnitIndex + 3 <= input.Length then
                             if input.[codeUnitIndex] = 'N'B && input.[codeUnitIndex + 1] = 'a'B && input.[codeUnitIndex + 2] = 'N'B then
@@ -369,7 +370,7 @@ type internal Utf16Reader =
                             else
                                 ValueNone
                         elif c0 = 'N' then
-                            if charIndex + 3 <= charsLength then
+                            if charIndex + 3 < charsLength then
                                 if Utf16Helpers.readUtf16Char inputUtf16 (charIndex) = 'N' &&
                                    Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 1) = 'U' &&
                                    Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 2) = 'L' &&

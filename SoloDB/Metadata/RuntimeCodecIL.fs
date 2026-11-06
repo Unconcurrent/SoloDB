@@ -1,6 +1,7 @@
 namespace SoloDatabase.Metadata.CodecGeneration
 
 open System
+open System.Buffers.Binary
 open System.Reflection
 open System.Reflection.Emit
 open System.Collections.Generic
@@ -27,7 +28,7 @@ type internal RuntimeCodecIL(generator: ILGenerator, ?input: Type) =
             let bytes = if isNull body then null else body.GetILAsByteArray()
             let direct = not(isNull bytes) && bytes.Length = 7 && bytes[0] = 0x02uy && bytes[1] = 0x7buy && bytes[6] = 0x2auy
             if not direct then None else
-            let field = getter.Module.ResolveField(BitConverter.ToInt32(bytes,2),getter.DeclaringType.GetGenericArguments(),getter.GetGenericArguments())
+            let field = getter.Module.ResolveField(BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(2,4)),getter.DeclaringType.GetGenericArguments(),getter.GetGenericArguments())
             if CodecMemberStorage.allowed(direct,getter.IsVirtual,getter.IsFinal,getter.DeclaringType.IsSealed,
                     field.IsStatic,field.IsInitOnly || field.IsLiteral,
                     field.DeclaringType.Equals(getter.DeclaringType),field.FieldType.Equals(getter.ReturnType),

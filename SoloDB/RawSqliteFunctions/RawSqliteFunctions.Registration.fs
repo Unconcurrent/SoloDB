@@ -88,7 +88,7 @@ module internal RawFunctionRegistration =
         let db = database.Handle
         if isNull name then nullArg (nameof name)
         if isNull func then nullArg (nameof func)
-        if count < -1 || count > 127 then invalidArg "argCount" "argCount must be -1 (variable) or 0-127"
+        if count < -1 then invalidArg "argCount" "argCount must be -1 (variable) or nonnegative."
         let state = RawCallbackState(database, func, preserveManagedFailure)
         let result =
             if usesBundledEngine() then
