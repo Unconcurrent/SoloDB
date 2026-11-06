@@ -66,14 +66,17 @@ module internal QuerySerializationSql =
 
     and internal inputDescriptor (input: QuerySerializationInput) =
         let writer = writerDescriptor input
-        if input.PhysicalOwner.IsNone && input.ReferenceOwner.IsNone && input.OriginalComparisonOperand.IsNone then writer
+        if input.PhysicalOwner.IsNone && input.ReferenceOwner.IsNone && input.OriginalComparisonOperand.IsNone && input.SearchOwner.IsNone then writer
         else
             let physical = input.PhysicalOwner |> ValueOption.map _.Descriptor |> ValueOption.defaultValue (SqlExpr.Literal SqlLiteral.Null)
             let reference = input.ReferenceOwner |> ValueOption.map _.Descriptor |> ValueOption.defaultValue (SqlExpr.Literal SqlLiteral.Null)
             let fields = [SqlExpr.Literal(SqlLiteral.Integer 3L); writer; physical; reference]
-            match input.OriginalComparisonOperand with
-            | ValueNone -> SqlExpr.JsonArrayExpr fields
-            | ValueSome units -> SqlExpr.JsonArrayExpr (fields @ [SqlExpr.JsonArrayExpr [units.Data.Value; units.Path]])
+            match input.SearchOwner, input.OriginalComparisonOperand with
+            | ValueNone, ValueNone -> SqlExpr.JsonArrayExpr fields
+            | ValueNone, ValueSome units -> SqlExpr.JsonArrayExpr (fields @ [SqlExpr.JsonArrayExpr [units.Data.Value; units.Path]])
+            | ValueSome search, units ->
+                let original = units |> ValueOption.map(fun units -> SqlExpr.JsonArrayExpr [units.Data.Value; units.Path]) |> ValueOption.defaultValue(SqlExpr.Literal SqlLiteral.Null)
+                SqlExpr.JsonArrayExpr(fields @ [original; search.Descriptor])
 
     and private positionsDescriptor declared children =
         SqlExpr.JsonArrayExpr [SqlExpr.Literal(SqlLiteral.Integer 1L);

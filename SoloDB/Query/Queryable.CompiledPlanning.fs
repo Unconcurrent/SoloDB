@@ -262,5 +262,10 @@ module internal QueryReadPlanning =
             | _ -> query
         | _ -> query
 
+    let planSearch model estimates nextAlias sources query =
+        let movable table source core value = movableValue model table source core value
+        let indexes = sources |> List.map _.Index |> List.distinctBy _.Id
+        QuerySearchPage.plan movable nextAlias indexes query |> planGroups model |> planPage model estimates
+
     let plan model estimates query =
         planGroups model query |> planPage model estimates

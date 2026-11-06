@@ -17,26 +17,13 @@ module internal CompiledQueries =
 
     // F# nests quoted predicates inside the outer expression. Rebind quotation
     // variables symbolically instead of evaluating SubstHelper with sample values.
-    type private NormalizeQueryLambdas() =
+    type private NormalizeQueryLambdas(owner: obj, source: ParameterExpression) =
         inherit ExpressionVisitor()
         override this.VisitMethodCall call =
             if not (isNull call.Method.DeclaringType)
                && call.Method.DeclaringType.FullName = "Microsoft.FSharp.Linq.RuntimeHelpers.LeafExpressionConverter"
                && call.Method.Name = "QuotationToLambdaExpression" then
-                let quoted, variables, values =
-                    match call.Arguments.[0] with
-                    | :? MethodCallExpression as substitution when substitution.Method.Name = "SubstHelper" ->
-                        let quoted = (substitution.Arguments.[0] :?> ConstantExpression).Value :?> Microsoft.FSharp.Quotations.Expr
-                        let variables = (substitution.Arguments.[1] :?> NewArrayExpression).Expressions
-                                        |> Seq.map (fun e -> (e :?> ConstantExpression).Value :?> Microsoft.FSharp.Quotations.Var) |> Seq.toArray
-                        let values = (substitution.Arguments.[2] :?> NewArrayExpression).Expressions |> Seq.toArray
-                        quoted, variables, values
-                    | :? ConstantExpression as constant ->
-                        (constant.Value :?> Microsoft.FSharp.Quotations.Expr), [||], [||]
-                    | _ -> raise (NotSupportedException "Unsupported F# query quotation.")
-                let delegateType = call.Type.GetGenericArguments().[0]
-                let replacements = values |> Array.mapi(fun i value -> variables.[i], (Expression.Convert(value, variables.[i].Type) :> Expression))
-                let lambda = QueryQuotationSyntax.fromQuotation delegateType replacements quoted
+                let lambda = QueryQuotationSyntax.tryFromExpression call |> ValueOption.get
                 Expression.Quote(this.Visit(lambda) :?> LambdaExpression) :> Expression
             elif typeof<Queryable>.Equals(call.Method.DeclaringType) then
                 let arguments =
@@ -51,6 +38,20 @@ module internal CompiledQueries =
                         | _ -> this.Visit argument)
                     |> Seq.toArray
                 call.Update(this.Visit call.Object, arguments) :> Expression
+            elif not(isNull call.Object) && (call.Method.Name = "Search" || call.Method.Name = "SearchIn") &&
+                 call.Method.DeclaringType.IsGenericType && call.Method.DeclaringType.GetGenericTypeDefinition().Equals(typedefof<ISoloDBCollection<_>>) then
+                let receiver = ExpressionEvaluation.evaluateExpr<obj> call.Object :?> ISearchOwner
+                if receiver.InTransaction then raise (NotSupportedException("Transactional collections cannot compile queries."))
+                let root =
+                    if Object.Equals(receiver.Owner,owner) then source :> Expression
+                    elif receiver.Database = (owner :?> ISearchOwner).Database then receiver.RootExpression
+                    else raise (NotSupportedException("Search sources must belong to the same database."))
+                let name,query =
+                    if call.Method.Name = "SearchIn" then call.Arguments.[0],call.Arguments.[1]
+                    else Expression.Constant("default") :> Expression,call.Arguments.[0]
+                // Definition names are layout decisions, not invocation parameters.
+                let name = Expression.Constant(ExpressionEvaluation.evaluateExpr<string> name)
+                receiver.Build(root,name,this.Visit(query))
             else base.VisitMethodCall call
 
     let private invalid message = raise (NotSupportedException("Cannot compile query: " + message))
@@ -150,7 +151,7 @@ module internal CompiledQueries =
         if isNull (box source) then nullArg "source"
         if isNull queryBody then nullArg "query"
         if source.InTransaction then invalid "transactional collections are not supported."
-        let body = NormalizeQueryLambdas().Visit queryBody
+        let body = NormalizeQueryLambdas(box source,parameters.[0]).Visit queryBody
         checkRoot parameters.[0] body
         let replacements =
             Array.append [|parameters.[0], source.Expression|]
@@ -366,7 +367,7 @@ module internal CompiledQueries =
         (source: ISoloDBCollection<'Source>) (query: LambdaExpression)
         (argument: ParameterExpression) (arguments: Expression array) =
         if isNull query then nullArg "query"
-        let body = NormalizeQueryLambdas().Visit query.Body
+        let body = NormalizeQueryLambdas(box source,query.Parameters.[0]).Visit query.Body
         let parameters = Seq.toArray query.Parameters
         let rec rooted (expression: Expression) =
             match expression with

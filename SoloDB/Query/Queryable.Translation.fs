@@ -171,7 +171,7 @@ module internal QueryableTranslationCore =
             | ValueNone ->
                 let binder, acquire = QueryableValueBindings.create variables
                 ValueSome binder, acquire
-        let ctx = { QueryContext.SingleSource(source.Name) with MetadataSource = ValueSome (RelationMetadataSource metadataConnection); BindQueryValue = bindQueryValue; GeneralPrefixMatch = generalPrefixMatch || ordinaryBindings }
+        let ctx = { QueryContext.SingleSource(source.Name) with SearchCatalog = ValueSome(SearchCatalogSource metadataConnection); MetadataSource = ValueSome (RelationMetadataSource metadataConnection); BindQueryValue = bindQueryValue; GeneralPrefixMatch = generalPrefixMatch || ordinaryBindings }
         // Mark this as the OUTERMOST translation context. Cleared in CloneForSubquery
         // so nested cardinality emit sites can detect they are nested and emit bare
         // scalars (default(T) propagation) rather than typed exceptions.
@@ -280,7 +280,7 @@ module internal QueryableTranslationCore =
             let counted =
                 if doesNotReturnIdFn expression then QueryCountPlanning.plan source.Name indexModel estimates query
                 else query
-            QueryReadPlanning.plan indexModel estimates counted
+            QueryReadPlanning.planSearch indexModel estimates ctx.NextAlias ctx.SearchSources.Value counted
         let sql = emitSelectSql variables indexModel retainedPlan outerSelect
 
         let batchLoadContext =

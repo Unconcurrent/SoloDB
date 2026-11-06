@@ -102,6 +102,7 @@ type internal PreprocessedQuery =
     OriginalMethod: MethodInfo;
     Expressions: Expression array |}
 | RootQuery of IRootQueryable
+| Search of name: Expression * query: Expression * selector: Expression
 | Relation of RelationQueryExpression
 
 /// <summary>

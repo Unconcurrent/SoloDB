@@ -35,6 +35,22 @@ module internal QueryTranslatorVisitCoreMethodCall =
         | ValueSome operation -> visitDu (Expression.MakeBinary(operation, m.Arguments[0], m.Arguments[1], false, m.Method)) qb
         | ValueNone ->
         match m with
+        | _ when QuerySearchAuxiliary.isMethod m.Method -> QuerySearchAuxiliary.translate visitProduced visitDu m qb
+        | _ when m.Method.DeclaringType = typeof<SearchSql> ->
+            if m.Method.Name = "Identity" then SqlExpr.Column(qb.SourceAlias,"Id") else
+            if m.Method.Name = "Rank" then
+                QueryProduced.consume qb.SourceContext.NextAlias (fun value input ->
+                    match input.SearchOwner |> ValueOption.bind _.Direct with
+                    | ValueSome direct -> direct.Rank
+                    | ValueNone ->
+                        let score = QueryTranslatorVisitCoreMemberAccess.accessValue (QueryDefault.value qb.Variables) qb.SourceContext.NextAlias false
+                                        (ClrMember("Score",typeof<double>)) typeof<double> (DirectValue(value,input))
+                        QueryProduced.consume qb.SourceContext.NextAlias (fun value input ->
+                            SqlExpr.Unary(UnaryOperator.Neg,QueryProduced.scalarValue typeof<double> value input)) score) (visitProduced m.Arguments.[0] qb)
+            else
+            let index = ExpressionEvaluation.evaluateExpr<string> m.Arguments.[1]
+            if m.Method.Name = "Score" then SqlExpr.Unary(UnaryOperator.Neg,SqlExpr.Column(Some index,"rank"))
+            else invalidOp "Unknown search SQL operation."
         | _ when QueryTranslatorCharacters.indexArguments m.Method ->
             let source, index = if m.Method.IsStatic then m.Arguments[0], m.Arguments[1] else m.Object, m.Arguments[0]
             let sourceValue = visitDu source qb

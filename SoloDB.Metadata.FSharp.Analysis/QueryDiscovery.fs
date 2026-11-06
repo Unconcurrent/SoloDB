@@ -88,6 +88,18 @@ module internal QueryDiscovery =
                 entity.Assembly.SimpleName = "SoloDB" &&
                 soloNamespace entity &&
                 not(entity.CompiledName.Contains("Metadata")))
+        let sequence (typ: FSharpType) =
+            let typ = typ.StripAbbreviations()
+            if typ.HasTypeDefinition && typ.GenericArguments.Count = 1 &&
+               (typ.TypeDefinition.TryFullName = Some "System.Linq.IQueryable`1" || typ.TypeDefinition.TryFullName = Some "System.Linq.IOrderedQueryable`1")
+            then Some typ.GenericArguments[0] else None
+        let collection (typ: FSharpType) =
+            let typ = typ.StripAbbreviations()
+            seq { yield typ; yield! typ.AllInterfaces }
+            |> Seq.tryPick(fun contract ->
+                if contract.HasTypeDefinition && contract.TypeDefinition.Assembly.SimpleName = "SoloDB" &&
+                   contract.TypeDefinition.TryFullName = Some "SoloDatabase.ISoloDBCollection`1" && contract.GenericArguments.Count = 1
+                then Some contract.GenericArguments[0] else None)
         for useSite in uses do
             match useSite.Symbol with
             | :? FSharpMemberOrFunctionOrValue as method when not useSite.IsFromDefinition && soloDBUse method ->
@@ -100,14 +112,12 @@ module internal QueryDiscovery =
                         complete <- true
                         for actual in actuals do
                             if not actual.IsFunctionType then roots.Add actual
+                        match instantiate substitutions method.ReturnParameter.Type |> sequence with
+                        | Some result when closed result -> roots.Add result
+                        | _ -> ()
                 if not complete && not useSite.GenericArguments.IsEmpty then
                     report useSite.Range method.FullName
             | _ -> ()
-        let sequence (typ: FSharpType) =
-            let typ = typ.StripAbbreviations()
-            if typ.HasTypeDefinition && typ.GenericArguments.Count = 1 &&
-               (typ.TypeDefinition.TryFullName = Some "System.Linq.IQueryable`1" || typ.TypeDefinition.TryFullName = Some "System.Linq.IOrderedQueryable`1")
-            then Some typ.GenericArguments[0] else None
         let addTupleResult (typ: FSharpType) =
             let result = typ.GenericArguments[typ.GenericArguments.Count - 1].StripAbbreviations()
             if result.IsTupleType && closed result then roots.Add result
@@ -162,17 +172,18 @@ module internal QueryDiscovery =
         for useSite in uses do
             match useSite.Symbol with
             | :? FSharpMemberOrFunctionOrValue as operation when not useSite.IsFromDefinition &&
-                (operation.DeclaringEntity |> Option.exists(fun entity -> entity.TryFullName = Some "System.Linq.Queryable")) ->
+                (soloDBUse operation || (operation.DeclaringEntity |> Option.exists(fun entity -> entity.TryFullName = Some "System.Linq.Queryable"))) ->
                 for context in contexts Set.empty useSite do
                     let substitutions = context @ useSite.GenericArguments
                     let actual = instantiate substitutions
+                    let queryable = operation.DeclaringEntity |> Option.exists(fun entity -> entity.TryFullName = Some "System.Linq.Queryable")
                     let receiver =
-                        if operation.IsExtensionMember && operation.IsInstanceMember then Some operation.ApparentEnclosingType
+                        if not queryable || operation.IsExtensionMember && operation.IsInstanceMember then Some operation.ApparentEnclosingType
                         else operation.CurriedParameterGroups |> Seq.collect id |> Seq.tryHead |> Option.map _.Type
-                    match receiver |> Option.bind(actual >> sequence) with
+                    match receiver |> Option.bind(actual >> (if queryable then sequence else collection)) with
                     | Some source when closed source ->
                         let result = actual operation.ReturnParameter.Type
-                        if closed result then
+                        if closed result && (queryable || (sequence result).IsSome) then
                             let reference = bound context useSite
                             for parameter in operation.CurriedParameterGroups |> Seq.collect id do
                                 addParameterFacts reference (actual parameter.Type)

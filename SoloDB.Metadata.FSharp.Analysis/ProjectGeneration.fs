@@ -109,11 +109,15 @@ type ProjectGeneration private () =
                                         | :? FSharpEntity as entity when entity.IsProvidedAndGenerated -> aliases.Add entity
                                         | _ -> ()
                         | _ -> ()) () input
+                // Provided entities are recreated across checked source files.
+                // Compare their original compiler identity, not wrapper equality.
+                let identity (entity: FSharpEntity) = struct(entity.Assembly.QualifiedName,entity.QualifiedName)
+                let aliasIdentities = System.Collections.Generic.HashSet<_>(aliases |> Seq.map identity)
                 let active = uses |> Array.exists(fun useSite ->
                     not useSite.IsFromDefinition &&
                     match useSite.Symbol with
                     | :? FSharpMemberOrFunctionOrValue as method when method.CompiledName = "register" ->
-                        method.DeclaringEntity |> Option.exists(fun entity -> aliases |> Seq.exists(entity.Equals))
+                        method.DeclaringEntity |> Option.exists(fun entity -> entity.IsProvidedAndGenerated && aliasIdentities.Contains(identity entity))
                     | _ -> false)
                 if active then
                     let rec enclosing (entity: FSharpEntity) =

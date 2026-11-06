@@ -28,8 +28,12 @@ internal static partial class QueryRegistrations
         foreach (var site in sites)
         {
             if (site.Method.ContainingType.ToDisplayString() != "System.Linq.Queryable")
+            {
                 foreach (var type in site.Method.TypeArguments.Concat(site.Method.ContainingType.TypeArguments))
                     if (Closed(type) && !HasAnonymous(type)) { known.Add(Name(type)); yield return type; }
+                if (SequenceElement(site.Method.ReturnType) is ITypeSymbol element && Closed(element) && !HasAnonymous(element))
+                { known.Add(Name(element)); yield return element; }
+            }
             if (facts.Operation(site.Invocation) is not IInvocationOperation call) continue;
             foreach (var input in QueryExpressionInputs.Arguments(facts,call.Arguments,site.Symbols))
             foreach (var origin in input.Origins)
@@ -52,8 +56,10 @@ internal static partial class QueryRegistrations
         foreach (var site in sites)
         {
             var method = site.Method;
-            if (method.ContainingType.ToDisplayString() != "System.Linq.Queryable" || method.Parameters.Length == 0 ||
-                SequenceElement(method.Parameters[0].Type) is not ITypeSymbol source || !Closed(source) || !Closed(method.ReturnType)) continue;
+            var source = method.ContainingType.ToDisplayString() == "System.Linq.Queryable"
+                ? method.Parameters.Length == 0 ? null : SequenceElement(method.Parameters[0].Type)
+                : SequenceElement(method.ReturnType) != null ? CollectionElement(method.ContainingType) : null;
+            if (source == null || !Closed(source) || !Closed(method.ReturnType)) continue;
             var element = SequenceElement(method.ReturnType);
             direct.Add((element != null,source,element ?? method.ReturnType));
         }
@@ -390,6 +396,10 @@ internal static partial class QueryRegistrations
     private static ITypeSymbol? SequenceElement(ITypeSymbol type) =>
         type is INamedTypeSymbol named && named.ContainingNamespace.ToDisplayString() == "System.Linq" &&
         named.Name is "IQueryable" or "IOrderedQueryable" && named.TypeArguments.Length == 1 ? named.TypeArguments[0] : null;
+    private static ITypeSymbol? CollectionElement(INamedTypeSymbol type) =>
+        new[] { type }.Concat(type.AllInterfaces).FirstOrDefault(contract =>
+            contract.ContainingAssembly.Name == "SoloDB" && contract.ContainingNamespace.ToDisplayString() == "SoloDatabase" &&
+            contract.Name == "ISoloDBCollection" && contract.TypeArguments.Length == 1)?.TypeArguments[0];
     private static ITypeSymbol? EnumerableElement(ITypeSymbol type) =>
         type is IArrayTypeSymbol array ? array.ElementType :
         type is INamedTypeSymbol named && named.SpecialType != SpecialType.System_String ?

@@ -14,6 +14,9 @@ open SoloDatabase.QuerySerializationChildren
 /// One input owner follows authored writers and the children of produced payloads.
 module internal QueryTranslatorSerialization =
 
+    let rec internal hasSearchContext (input: QuerySerializationInput) =
+        input.SearchOwner.IsSome || (input.Children |> Array.exists hasSearchContext)
+
     let internal isStoredNumericalInput target =
         let target = Utils.optionalPayloadType target
         let target = if target.IsEnum then TypeMetadata.enumUnderlying target else target
@@ -42,7 +45,9 @@ module internal QueryTranslatorSerialization =
                          original.WithSource(lazy (field "$[4][0]"), field "$[4][1]"))
                      PhysicalOwner = owner 2 input.PhysicalOwner
                      ReferenceOwner = input.ReferenceOwner |> ValueOption.map (fun original ->
-                         { original with Descriptor = SqlExpr.CaseExpr((framed, at "$[3]"), [], Some(SqlExpr.Literal SqlLiteral.Null)) }) }
+                         { original with Descriptor = SqlExpr.CaseExpr((framed, at "$[3]"), [], Some(SqlExpr.Literal SqlLiteral.Null)) })
+                     SearchOwner = input.SearchOwner |> ValueOption.map(fun search ->
+                         { search with Descriptor = SqlExpr.CaseExpr((framed,at "$[5]"),[],Some(SqlExpr.Literal SqlLiteral.Null)); Direct = ValueNone }) }
 
     /// Equivalent authored layouts retain each selected child's known source alternatives.
     let rec internal mergeInputs target (inputs: QuerySerializationInput array) =
@@ -81,6 +86,11 @@ module internal QueryTranslatorSerialization =
             LegacyCharacterText = inputs |> Array.exists _.LegacyCharacterText
             StructuralDefault = inputs |> Array.exists _.StructuralDefault
             PhysicalOwner = sharedPhysicalOwner inputs
+            SearchOwner =
+                let sources = inputs |> Array.collect(fun input -> input.SearchOwner |> ValueOption.map _.Sources |> ValueOption.defaultValue Array.empty)
+                if sources.Length = 0 then ValueNone else
+                ValueSome { Sources = sources |> Array.distinctBy _.Key; Descriptor = SqlExpr.Literal SqlLiteral.Null; Direct = ValueNone
+                            Complete = inputs |> Array.forall(fun input -> input.SearchOwner |> ValueOption.exists _.Complete) }
             ReferenceOwner = sharedReferenceOwner inputs
             Navigation = inputs |> Array.collect _.Navigation |> Array.distinct }
 
@@ -97,7 +107,12 @@ module internal QueryTranslatorSerialization =
                           MemberType = qualify step.MemberType; ActualType = qualify step.ActualType }) })
                 Children = input.Children |> Array.map qualifyInput
                 PhysicalOwner = input.PhysicalOwner |> ValueOption.map (fun owner -> { owner with Descriptor = qualify owner.Descriptor })
-                ReferenceOwner = input.ReferenceOwner |> ValueOption.map (fun owner -> { owner with Descriptor = qualify owner.Descriptor }) }
+                ReferenceOwner = input.ReferenceOwner |> ValueOption.map (fun owner -> { owner with Descriptor = qualify owner.Descriptor })
+                SearchOwner = input.SearchOwner |> ValueOption.map(fun owner ->
+                    { owner with Descriptor = qualify owner.Descriptor
+                                 Direct = owner.Direct |> ValueOption.map(fun direct ->
+                                     { Item = qualify direct.Item; Rank = qualify direct.Rank
+                                       Owner = { direct.Owner with Descriptor = qualify direct.Owner.Descriptor } }) }) }
         let input = qualifyInput input
         TypeMetadata.registerType input.OriginalType
         let source =
@@ -265,7 +280,7 @@ module internal QueryTranslatorSerialization =
                     | _, ClrMember(name, _) -> name
                     | _, StoredLabel(:? string as name) -> name
                     | _ -> null
-                let inherited =
+                let inherited: QueryReferenceOwner voption =
                     match parent.PhysicalOwner with
                     | ValueSome owner -> ValueSome {
                         Sources = owner.Sources |> Array.map (fun source -> { Owner = ValueSome source; PropertyName = propertyName })
@@ -328,12 +343,13 @@ module internal QueryTranslatorSerialization =
                      OriginalComparisonOperand = input.OriginalComparisonOperand |> ValueOption.map (fun original -> original.WithSource(lazy (SqlExpr.Literal SqlLiteral.Null), SqlExpr.Literal SqlLiteral.Null))
                      Children = Array.map rebaseSerializationInput input.Children
                      PhysicalOwner = input.PhysicalOwner |> ValueOption.map (fun owner -> { owner with Descriptor = SqlExpr.Literal SqlLiteral.Null })
-                     ReferenceOwner = input.ReferenceOwner |> ValueOption.map (fun owner -> { owner with Descriptor = SqlExpr.Literal SqlLiteral.Null }) }
+                     ReferenceOwner = input.ReferenceOwner |> ValueOption.map (fun owner -> { owner with Descriptor = SqlExpr.Literal SqlLiteral.Null })
+                     SearchOwner = input.SearchOwner |> ValueOption.map(fun owner -> { owner with Descriptor = SqlExpr.Literal SqlLiteral.Null; Direct = ValueNone }) }
 
     /// Known produced children remain independently live; dynamic roots stay paired.
     let rec internal publishInput nextName (input: QuerySerializationInput) =
         let output = rebaseSerializationInput input
-        if input.Operand.IsNone && input.PhysicalOwner.IsNone && input.ReferenceOwner.IsNone && input.OriginalComparisonOperand.IsNone then
+        if input.Operand.IsNone && input.PhysicalOwner.IsNone && input.ReferenceOwner.IsNone && input.OriginalComparisonOperand.IsNone && input.SearchOwner.IsNone then
             let children = input.Children |> Array.map (publishInput nextName)
             children |> Array.toList |> List.collect fst,
             { output with Children = children |> Array.map snd }
@@ -344,7 +360,24 @@ module internal QueryTranslatorSerialization =
                 else
                     let name = nextName()
                     [{ Alias = Some name; Expr = descriptor }], SqlExpr.Column(None, name)
-            projections, fromDescriptor descriptor output
+            let output = fromDescriptor descriptor output
+            match input.SearchOwner |> ValueOption.bind _.Direct with
+            | ValueNone -> projections,output
+            | ValueSome direct ->
+                let itemName,scoreName,idName = nextName(),nextName(),nextName()
+                let column name = SqlExpr.Column(None,name)
+                let owner =
+                    match direct.Owner.Descriptor with
+                    | SqlExpr.JsonArrayExpr [collection;target;_;policy] ->
+                        { direct.Owner with Descriptor = SqlExpr.JsonArrayExpr [collection;target;column idName;policy] }
+                    | _ -> invalidOp "A direct search item requires its original physical source."
+                let facets = [
+                    { Alias = Some itemName; Expr = direct.Item }
+                    { Alias = Some scoreName; Expr = direct.Rank }
+                    { Alias = Some idName; Expr = direct.Owner.Identity } ]
+                let direct = { Item = column itemName; Rank = column scoreName; Owner = owner }
+                projections @ facets,
+                { output with SearchOwner = output.SearchOwner |> ValueOption.map(fun search -> { search with Direct = ValueSome direct }) }
 
     /// A completed input keeps companions from the same row as its selected payload.
     let internal companionProjections alias (input: QuerySerializationInput) =
@@ -356,6 +389,9 @@ module internal QueryTranslatorSerialization =
                 | SqlExpr.Column(None, name) when seen.Add name -> projections.Add { Alias = Some name; Expr = SqlExpr.Column(alias, name) }
                 | _ -> ()) () expression
         let rec collect input =
+            input.SearchOwner |> ValueOption.iter(fun owner ->
+                inspect owner.Descriptor
+                owner.Direct |> ValueOption.iter(fun direct -> inspect direct.Item; inspect direct.Rank; inspect direct.Owner.Descriptor))
             input.OriginalComparisonOperand |> ValueOption.iter (fun original -> inspect original.Data.Value; inspect original.Path)
             match input.Operand with
             | ValueSome operand ->

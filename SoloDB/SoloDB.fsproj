@@ -226,6 +226,8 @@
     <Compile Include="FileStorage/FileStorage.Core.fs" />
     <Compile Include="Metadata/RelationMembers.fs" />
     <Compile Include="Metadata/OwnerCloning.fs" />
+    <Compile Include="Search/Search.Definitions.fs" />
+    <Compile Include="Search/Search.Types.fs" />
     <Compile Include="Interfaces/SoloDBInterfaces.fs" />
     <Compile Include="Core/IdGenerator.fs" />
     <Compile Include="Metadata/CustomIdentity.fs" />
@@ -235,6 +237,8 @@
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.NumericMethods.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.StoredValueParameter.fs" />
     <Compile Include="Query/QueryValueBindingOrder.fs" />
+    <Compile Include="Search/Search.DefinitionCodec.fs" />
+    <Compile Include="Search/Search.Catalog.fs" />
     <Compile Include="Query/RelationMetadataSource.fs" />
     <Compile Include="Query/QueryInput.fs" />
     <Compile Include="Query/QueryContext.fs" />
@@ -313,6 +317,9 @@
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Binary.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.StringFormatting.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.PreparedCall.fs" />
+    <Compile Include="Search/Query.SearchFields.fs" />
+    <Compile Include="Search/Search.Definition.fs" />
+    <Compile Include="Search/Query.SearchAuxiliary.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.MethodCall.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Construction.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.ArrayPredicates.fs" />
@@ -353,6 +360,7 @@
 		    <Compile Include="Metadata/Indexes.fs" />
     <Compile Include="SoloDBCore/SoloDB.Helper.Schema.fs" />
 		    <Compile Include="Metadata/CustomIdExecution.fs" />
+    <Compile Include="Search/Search.Schema.fs" />
     <Compile Include="SoloDBCore/SoloDB.Helper.Core.fs" />
 		    <Compile Include="Relations/Relations.Schema.Builder.fs" />
 		    <Compile Include="Metadata/RelationDeclarations.fs" />
@@ -396,11 +404,13 @@
             <Compile Include="Query/Queryable.IndexedFilterPlanning.fs" />
             <Compile Include="Query/Queryable.CountPlanning.fs" />
             <Compile Include="Query/Queryable.CompiledPage.fs" />
+            <Compile Include="Search/Query.SearchPage.fs" />
             <Compile Include="Query/Queryable.CompiledPlanning.fs" />
 		    <Compile Include="Query/Queryable.Translation.fs" />
 		    <Compile Include="Metadata/QueryDispatch.fs" />
     <Compile Include="Query/Queryable.Provider.fs" />
-            <Compile Include="Metadata/CompiledQueryMetadata.fs" />
+            <Compile Include="Search/Search.Query.fs" />
+    <Compile Include="Metadata/CompiledQueryMetadata.fs" />
     <Compile Include="Metadata/CompiledQueryOperations.fs" />
     <Compile Include="Metadata/QueryOperations.fs" />
 	    <Compile Include="SoloDBCore/SoloDB.Location.fs" />
@@ -408,6 +418,7 @@
     <Compile Include="SoloDBCore/SoloDB.SchemaMigration.fs" />
     <Compile Include="Events/FileSystemEvents.Schema.fs" />
     <Compile Include="SoloDBCore/SoloDB.NumericalFunctions.fs" />
+    <Compile Include="Search/Search.Functions.fs" />
     <Compile Include="SoloDBCore/SoloDB.Bootstrap.fs" />
     <Compile Include="SoloDBCore/SoloDB.QueryUtils.fs" />
     <Compile Include="SoloDBCore/SoloDB.NumericMigrationPlan.fs" />
@@ -415,6 +426,7 @@
     <Compile Include="SoloDBCore/SoloDB.NumericMigrationProbe.fs" />
     <Compile Include="SoloDBCore/SoloDB.NumericMigration.fs" />
     <Compile Include="SoloDBCore/SoloDB.EventDbCache.fs" />
+    <Compile Include="Search/Search.Lifecycle.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Core.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Insert.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.ReadDelete.fs" />

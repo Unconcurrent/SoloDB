@@ -15,6 +15,7 @@ SoloDB is packed with features that provide a seamless and powerful developer ex
 - **Full NativeAOT Support**: Build C# and F# applications with generated operations for your models and queries. See the [NativeAOT setup guide](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md#jit-and-nativeaot-deployment).
 - **ACID Transactions**: Guarantees atomicity, consistency, isolation, and durability for all operations, thanks to SQLite's transactional nature.
 - **Expressive Indexing**: Create unique or non-unique indexes on document properties for lightning-fast queries, using simple attributes.
+- **Full-Text Search**: Declare weighted string fields and query documents with FTS5 ranking, text and snippets. See the [search guide](https://github.com/Unconcurrent/SoloDB/blob/master/docs/full-text-search.md).
 - **Integrated File Storage**: A robust, hierarchical file system API (similar to System.IO) for storing and managing large files and binary data directly within the database.
 - **Polymorphic Collections**: Store objects of different derived types within a single collection and query them by their base or concrete type.
 - **Events API**: Subscribe to collection lifecycle events (`OnInserting`, `OnInserted`, `OnUpdating`, `OnUpdated`, `OnDeleting`, `OnDeleted`) with full transactional guarantees via SQLite triggers.
@@ -37,6 +38,7 @@ SoloDB is packed with features that provide a seamless and powerful developer ex
   - [Relations (DBRef, DBRefMany, SoloRef)](#relations-dbref-dbrefmany-soloref)
   - [Compiled Queries](#compiled-queries)
   - [Indexing for Performance](#indexing-for-performance)
+  - [Full-Text Search](#full-text-search)
   - [Atomic Transactions](#atomic-transactions)
   - [Storing Polymorphic Data](#storing-polymorphic-data)
   - [Custom ID Generation](#custom-id-generation)
@@ -572,6 +574,10 @@ Invalid index expressions are rejected with typed exceptions (argument/operation
 - constant or outside expressions,
 - expressions with captured variables,
 - unsupported expression node shapes.
+
+### Full-Text Search
+
+Declare search fields with `EnsureSearchIndex`, then compose `Search` or named `SearchIn` results with LINQ. Hits contain the original Item and Score; select Text/Snippet inside the query. Shared and Copied storage, literal and native query modes, versioned declarations and explicit maintenance are described in the [full-text search guide](https://github.com/Unconcurrent/SoloDB/blob/master/docs/full-text-search.md).
 
 ### Atomic Transactions
 

@@ -16,6 +16,8 @@ module internal QueryDefaultEquality =
     let private nullValue = SqlExpr.Literal SqlLiteral.Null
 
     let private isRecordRole target = (TypeMetadata.recordFields target).IsSome
+    let private isSearchHit (target: Type) =
+        target.IsGenericType && target.GetGenericTypeDefinition() = typedefof<SearchHit<_>>
 
     /// Identity-only relation rows cannot supply structural record comparison fields.
     let canUseIdentityOnly target =
@@ -46,7 +48,7 @@ module internal QueryDefaultEquality =
         else ValueNone
 
     let requiresPrepared target input =
-        QueryTranslatorCharacters.requiresComparable target input || isTree target || (referenceType target input).IsSome || (physicalRoles target input |> ValueOption.exists (fun struct(_, entities, records) -> entities.IsSome || records.IsSome))
+        isSearchHit target || hasSearchContext input || QueryTranslatorCharacters.requiresComparable target input || isTree target || (referenceType target input).IsSome || (physicalRoles target input |> ValueOption.exists (fun struct(_, entities, records) -> entities.IsSome || records.IsSome))
 
     let private nativeValue target value (input: QuerySerializationInput) =
         let value = QueryProduced.scalarValue target value input |> fun value -> QueryTranslatorCharacters.comparable target value input
@@ -54,26 +56,30 @@ module internal QueryDefaultEquality =
         if typeof<obj>.Equals target then SqlExpr.Unary(UnaryOperator.Pos, value) else value
 
     /// Logical fields stay separate from the authored value and its input descriptor.
-    type Operand = { Role: SqlExpr; Qualifier: SqlExpr; Value: SqlExpr }
+    type Operand = { Role: SqlExpr; Qualifier: SqlExpr; Value: SqlExpr; Parts: SqlExpr list voption }
 
     let private integer value = SqlExpr.Literal(SqlLiteral.Integer value)
-    let private operand role qualifier value = { Role = integer role; Qualifier = qualifier; Value = value }
+    let private operand role qualifier value = { Role = integer role; Qualifier = qualifier; Value = value; Parts = ValueNone }
     let private valueOperand value = operand 0L (integer 0L) value
     let private absent value = SqlExpr.Unary(UnaryOperator.IsNull, value)
     let private constant = function SqlExpr.Literal _ -> true | _ -> false
 
     /// Presence makes inactive fields harmless without reserving any public value.
     let private components key =
+        match key.Parts with
+        | ValueSome parts -> parts
+        | ValueNone ->
         let missing = absent key.Value
         let inactive value = SqlExpr.CaseExpr((missing, integer 0L), [], Some value)
         [missing; inactive key.Role; inactive key.Qualifier; SqlExpr.Coalesce(key.Value, [integer 0L])]
 
     let terms key =
-        if constant key.Role && constant key.Qualifier then [key.Value]
+        if key.Parts.IsSome then key.Parts.Value
+        elif constant key.Role && constant key.Qualifier then [key.Value]
         else components key
 
     let private pairedTerms left right =
-        if constant left.Role && constant left.Qualifier &&
+        if left.Parts.IsNone && right.Parts.IsNone && constant left.Role && constant left.Qualifier &&
            left.Role = right.Role && left.Qualifier = right.Qualifier then
             [left.Value], [right.Value]
         else components left, components right
@@ -84,8 +90,23 @@ module internal QueryDefaultEquality =
         |> List.reduce (fun left right -> SqlExpr.Binary(left, BinaryOperator.And, right))
 
     /// The actual producer retains its own physical subject through identity views.
-    let key nextName target value (input: QuerySerializationInput) =
-        if isTree target then
+    let rec key nextName target value (input: QuerySerializationInput) =
+        if isSearchHit target then
+            // Compose the existing Item and Score equality roles. Hidden search context
+            // selects a representative; it is never part of the visible hit's key.
+            let token = QueryProduced.treeToken nextName value input
+            let memberKey name target =
+                let struct(child,path) = serializationAccess input (ClrMember(name,target))
+                let token = SqlExpr.FunctionCall("jsonb",[SqlExpr.Binary(token,BinaryOperator.JsonText,
+                                        SqlExpr.Literal(SqlLiteral.String(JsonPathOps.text path)))])
+                let value = jsonTokenValue target token
+                let child = { child with Source = ValueSome token
+                                         Carrier = if isSqlScalarResult target then SqlScalar else CanonicalToken }
+                components(key nextName target value child)
+            let item = target.GetGenericArguments()[0]
+            let parts = absent value :: (memberKey "Item" item @ memberKey "Score" typeof<double>)
+            { valueOperand value with Parts = ValueSome parts }
+        elif isTree target then
             let identity = input.PhysicalOwner |> ValueOption.map _.Identity |> ValueOption.defaultValue nullValue
             operand 1L (integer 0L) (SqlExpr.FunctionCall(JsonFunctions.treeValueFunction,
                 [SqlExpr.FunctionCall("json", [QueryProduced.treeToken nextName value input]); identity;
@@ -112,7 +133,7 @@ module internal QueryDefaultEquality =
                     let selected = selected condition
                     { Role = SqlExpr.CaseExpr((selected, integer 3L), [], Some(integer 0L))
                       Qualifier = SqlExpr.CaseExpr((selected, owner.Collection), [], Some(integer 0L))
-                      Value = SqlExpr.CaseExpr((selected, owner.Identity), [], Some recordValue) }
+                      Value = SqlExpr.CaseExpr((selected, owner.Identity), [], Some recordValue); Parts = ValueNone }
                 | _ -> valueOperand recordValue
             | ValueNone -> valueOperand value
 
@@ -136,7 +157,7 @@ module internal QueryDefaultEquality =
         QueryProduced.consume nextName (fun value input ->
             let legacyValue = context = RootValueMembership && detached && not(isTree target)
                               && not(isSqlScalarResult target) && (QueryTranslatorNumeric.domain target).IsNone
-                              && not(typeof<obj>.Equals(target))
+                              && not(typeof<obj>.Equals(target)) && not(isSearchHit target)
             if legacyValue then valueMatch value
             else
                 match anchoredIdentity target context detached input with

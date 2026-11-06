@@ -291,6 +291,31 @@ and ISoloDBCollection<'T> =
     inherit IOrderedQueryable<'T>
     inherit ISoloDBCollectionEvents<'T>
 
+    /// Declares the default search index at version one; equal declarations perform no writes.
+    abstract EnsureSearchIndex: configure: Action<SearchIndexBuilder<'T>> -> unit
+    /// Declares a named search index at version one.
+    abstract EnsureSearchIndex: name: string * configure: Action<SearchIndexBuilder<'T>> -> unit
+    /// Atomically creates or advances a search definition. Changed definitions require a higher version.
+    abstract EnsureSearchIndex: name: string * version: int * configure: Action<SearchIndexBuilder<'T>> -> unit
+    /// Reconstructs the declared index from documents without changing its identity or meaning.
+    abstract RebuildSearchIndex: name: string -> unit
+    /// Removes one declared index and its owned artifacts, retaining the identity sequence.
+    abstract DropSearchIndexIfExists: name: string -> bool
+    /// Returns immutable snapshots of the collection's search declarations.
+    abstract ListSearchIndexes: unit -> SearchIndexInfo[]
+    /// Diagnoses structural and content damage without silently repairing it.
+    abstract VerifySearchIndex: name: string -> SearchVerification
+    /// Explicitly compacts a declared native FTS index; cost depends on the indexed corpus.
+    abstract OptimizeSearchIndex: name: string -> unit
+    /// Searches the default index with all literal words required.
+    abstract Search: text: string -> IQueryable<SearchHit<'T>>
+    /// Searches the default index with the selected query syntax.
+    abstract Search: query: SearchQuery -> IQueryable<SearchHit<'T>>
+    /// Searches a named index with all literal words required.
+    abstract SearchIn: name: string * text: string -> IQueryable<SearchHit<'T>>
+    /// Searches a named index. Ordinary execution reads the current declaration; compilation retains its generation.
+    abstract SearchIn: name: string * query: SearchQuery -> IQueryable<SearchHit<'T>>
+
     // Separate ordered signatures prevent a lambda ending in OrderBy/ThenBy from
     // selecting the generic-result overload and exposing IQueryable as its result.
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>

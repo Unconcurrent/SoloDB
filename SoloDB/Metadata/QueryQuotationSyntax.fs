@@ -217,3 +217,23 @@ module internal QueryQuotationSyntax =
 
     let expression<'Delegate> quotation =
         fromQuotation typeof<'Delegate> [||] quotation :?> Expression<'Delegate>
+
+    /// Nested field and query lambdas use the compiler's supplied quotation data.
+    let tryFromExpression (expression: Expression) =
+        match expression with
+        | :? MethodCallExpression as call
+            when not(isNull call.Method.DeclaringType) &&
+                 call.Method.DeclaringType.FullName = "Microsoft.FSharp.Linq.RuntimeHelpers.LeafExpressionConverter" &&
+                 call.Method.Name = "QuotationToLambdaExpression" ->
+            let quoted,variables,values =
+                match call.Arguments.[0] with
+                | :? MethodCallExpression as substitution when substitution.Method.Name = "SubstHelper" ->
+                    let quoted = (substitution.Arguments.[0] :?> ConstantExpression).Value :?> Expr
+                    let variables = (substitution.Arguments.[1] :?> NewArrayExpression).Expressions
+                                    |> Seq.map(fun value -> (value :?> ConstantExpression).Value :?> Var) |> Seq.toArray
+                    quoted,variables,(substitution.Arguments.[2] :?> NewArrayExpression).Expressions |> Seq.toArray
+                | :? ConstantExpression as constant -> (constant.Value :?> Expr),[||],[||]
+                | _ -> raise(NotSupportedException("Unsupported F# query quotation."))
+            let replacements = values |> Array.mapi(fun index value -> variables.[index],Expression.Convert(value,variables.[index].Type) :> Expression)
+            ValueSome(fromQuotation (call.Type.GetGenericArguments().[0]) replacements quoted)
+        | _ -> ValueNone

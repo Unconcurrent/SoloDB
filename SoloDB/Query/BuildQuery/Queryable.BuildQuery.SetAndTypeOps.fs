@@ -126,14 +126,33 @@ module internal QueryableBuildQuerySetAndTypeOps =
                         let rhs = readSoloDBQueryable<'T> m.Expressions[0]
                         let completed = translateQueryFn sourceCtx ctx.Vars rhs
                         let name = "_input" + sourceCtx.NextAlias()
-                        let arm query input alias =
+                        let ordered = QueryTranslatorSerialization.hasSearchContext ctx.Input ||
+                                      QueryTranslatorSerialization.hasSearchContext completed.SerializationInput
+                        let branchName = "_set_branch" + sourceCtx.NextAlias()
+                        let positionName = "_set_position" + sourceCtx.NextAlias()
+                        let arm query input alias branch =
+                            let query = if ordered then QueryProduced.completedRows sourceCtx.NextAlias query input else query
                             let input = QueryTranslatorSerialization.scopeSerializationInput (Some alias) OuterLayer input
-                            mkCore [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some alias, "Id") }
-                                    { Alias = Some "Value"; Expr = SqlExpr.Column(Some alias, "Value") }
-                                    { Alias = Some name; Expr = QuerySerializationSql.inputDescriptor input }]
+                            let fields = [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some alias, "Id") }
+                                          { Alias = Some "Value"; Expr = SqlExpr.Column(Some alias, "Value") }
+                                          { Alias = Some name; Expr = QuerySerializationSql.inputDescriptor input }]
+                            let fields =
+                                if not ordered then fields else
+                                fields @ [{ Alias = Some branchName; Expr = SqlExpr.Literal(SqlLiteral.Integer branch) }
+                                          { Alias = Some positionName; Expr = SqlExpr.Column(Some alias,"_tree_ordinal") }]
+                            mkCore fields
                                    (Some(DerivedTable(query, alias)))
                         let output = QueryTranslatorSerialization.fromDescriptor (SqlExpr.Column(None, name)) (QueryTranslatorSerialization.mergeInputs ctx.Input.OriginalType [|ctx.Input; completed.SerializationInput|])
-                        { Query = { Ctes = []; Body = UnionAllSelect(arm ctx.Inner ctx.Input "set_left", [arm completed.Query completed.SerializationInput "set_right"]) }
+                        let combined = { Ctes = []; Body = UnionAllSelect(arm ctx.Inner ctx.Input "set_left" 0L, [arm completed.Query completed.SerializationInput "set_right" 1L]) }
+                        let combined =
+                            if not ordered then combined else
+                            let alias = sourceCtx.NextAlias()
+                            let fields = ["Id";"Value";name] |> List.map(fun name ->
+                                { Alias = Some name; Expr = SqlExpr.Column(Some alias,name) })
+                            wrapCore { mkCore fields (Some(DerivedTable(combined,alias))) with
+                                         OrderBy = [branchName;positionName] |> List.map(fun name ->
+                                             { Expr = SqlExpr.Column(Some alias,name); Direction = SortDirection.Asc }) }
+                        { Query = combined
                           SerializationInput = output; KeyInput = ValueNone })
 
                     if m.Value = SupportedLinqMethods.Union then

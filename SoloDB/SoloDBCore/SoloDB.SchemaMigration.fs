@@ -195,6 +195,31 @@ module internal SchemaMigration =
     /// Takes the pooled connection itself rather than a callback. Declaring it unfit is a field set,
     /// which cannot fail, so there is no recovery path to model and none is pretended.
     /// </remarks>
+    /// Applies feature adoption inside the caller's existing transaction.
+    let internal applyInTransaction (connection: NativeSqliteConnection) (plan: Plan) =
+        if inAutocommit connection then invalidOp "A schema change requires an owned transaction."
+        // The caller read the version before taking this lock, so another process may have
+        // applied this very step in between. Re-reading under the lock is what makes the step
+        // idempotent; without it the second process runs the step's statements against a schema
+        // that has already moved and fails on the first one.
+        let versionUnderLock =
+            readVersion connection
+
+        if versionUnderLock = plan.FromVersion then
+            executeStatements connection plan.Label plan.Body
+            executeBoundary connection plan.Label $"PRAGMA user_version = {plan.TargetVersion};"
+        else
+            // Not our starting version. Only an advance a peer could legitimately have made is
+            // acceptable; anything else is state this build cannot explain and must not commit
+            // over.
+            match classifyVersion versionUnderLock plan.TargetVersion plan.SupportedCeiling with
+            | Established -> ()
+            | NotApplied ->
+                raise (InvalidOperationException $"Error: migration {plan.Label} found schema version {versionUnderLock} under the lock.\nReason: it is neither the expected {plan.FromVersion} nor an advance to {plan.TargetVersion} or beyond.\nFix: investigate what wrote this version.")
+            | BeyondSupported ->
+                raise (unsupportedVersion versionUnderLock plan.SupportedCeiling)
+
+
     let internal run (pooled: NativeCachingDbConnection) (plan: Plan) =
         let connection = pooled.Inner
         let handle =
@@ -229,26 +254,7 @@ module internal SchemaMigration =
          try
             executeBoundary connection plan.Label "BEGIN EXCLUSIVE;"
 
-            // The caller read the version before taking this lock, so another process may have
-            // applied this very step in between. Re-reading under the lock is what makes the step
-            // idempotent; without it the second process runs the step's statements against a schema
-            // that has already moved and fails on the first one.
-            let versionUnderLock =
-                readVersion connection
-
-            if versionUnderLock = plan.FromVersion then
-                executeStatements connection plan.Label plan.Body
-                executeBoundary connection plan.Label $"PRAGMA user_version = {plan.TargetVersion};"
-            else
-                // Not our starting version. Only an advance a peer could legitimately have made is
-                // acceptable; anything else is state this build cannot explain and must not commit
-                // over.
-                match classifyVersion versionUnderLock plan.TargetVersion plan.SupportedCeiling with
-                | Established -> ()
-                | NotApplied ->
-                    raise (InvalidOperationException $"Error: migration {plan.Label} found schema version {versionUnderLock} under the lock.\nReason: it is neither the expected {plan.FromVersion} nor an advance to {plan.TargetVersion} or beyond.\nFix: investigate what wrote this version.")
-                | BeyondSupported ->
-                    raise (unsupportedVersion versionUnderLock plan.SupportedCeiling)
+            applyInTransaction connection plan
 
             executeBoundary connection plan.Label "COMMIT TRANSACTION;"
          with ex ->

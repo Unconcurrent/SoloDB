@@ -27,6 +27,13 @@ module internal QueryableBuildQueryMain =
     open QueryableBuildQuerySequenceOps
     open QueryableBuildQueryJoinAndTerminalOps
     open QueryableBuildQuerySetAndTypeOps
+    type private BindSearchIndex(table: string) =
+        inherit ExpressionVisitor()
+        override _.VisitMethodCall call =
+            if call.Method.DeclaringType = typeof<SearchSql> && call.Method.Name = "Score" then
+                call.Update(null,[|call.Arguments.[0];Expression.Constant(table) :> Expression|]) :> Expression
+            else base.VisitMethodCall call
+
     let rec internal buildQuery<'T> (translationStepCounter: int ref) (sourceCtx: QueryContext) (statements: SQLSubquery ResizeArray) (e: Expression) =
         let next = translationStepCounter.Value + 1
         translationStepCounter.Value <- next
@@ -116,6 +123,34 @@ module internal QueryableBuildQueryMain =
                 tableName <- rq.SourceTableName
                 rootElementType <- QueryRootFacts.elementType rq
             | Relation _ -> ()
+            | Search(nameExpression,queryExpression,selector) ->
+                let name = ExpressionEvaluation.evaluateExpr<string> nameExpression
+                let catalog = sourceCtx.SearchCatalog |> ValueOption.defaultWith(fun () -> invalidOp "Search translation requires its executing connection.")
+                let definition = catalog.Find(tableName,name)
+                let index = definition.Table
+                let physicalTable = tableName
+                let selector = BindSearchIndex(index).Visit selector
+                addComplexFinal statements (fun ctx ->
+                    let core = match ctx.Inner.Body with SingleSelect core -> core | _ -> invalidOp "A search starts at its collection source."
+                    let join = ConditionedJoin(JoinKind.Inner,BaseTable(index,None),
+                        SqlExpr.Binary(SqlExpr.Column(Some physicalTable,"Id"),BinaryOperator.Eq,SqlExpr.Column(Some index,"rowid")))
+                    let currentCtx = { sourceCtx with SerializationInput = ctx.Input; LayerPosition = BaseLayer; Joins = ResizeArray() }
+                    let text = translateExprDu currentCtx physicalTable queryExpression ctx.Vars
+                    let matching = SqlExpr.FunctionCall("match",[text;SqlExpr.Column(None,index)])
+                    let core = { core with Joins = core.Joins @ [join]; Where = Some(match core.Where with None -> matching | Some previous -> SqlExpr.Binary(previous,BinaryOperator.And,matching)) }
+                    let produced = QueryTranslator.translateProduced currentCtx physicalTable selector ctx.Vars
+                    let source = { Key = string sourceCtx.SearchSources.Value.Length; Index = definition; Match = text }
+                    sourceCtx.SearchSources.Value <- source :: sourceCtx.SearchSources.Value
+                    let direct = {
+                        Item = SqlExpr.Column(Some physicalTable,"Value")
+                        Rank = SqlExpr.Column(Some index,"rank")
+                        Owner = (QueryTranslatorPhysicalSource.ownerInput sourceCtx rootElementType physicalTable (SqlExpr.Column(Some physicalTable,"Id"))).PhysicalOwner.Value }
+                    let owner = { Sources = [|source|]; Descriptor = SqlExpr.JsonArrayExpr [
+                        SqlExpr.Literal(SqlLiteral.String source.Key);SqlExpr.Column(Some physicalTable,"Id");text]; Direct = ValueSome direct; Complete = true }
+                    let input = { produced.Input with SearchOwner = ValueSome owner }
+                    let produced = match produced with DirectValue(value,_) -> DirectValue(value,input) | PackedValue(value,_) -> PackedValue(value,input)
+                    let struct(query,input) = QueryProduced.publishCore currentCtx.NextAlias core produced false
+                    { Query = query; SerializationInput = input; KeyInput = ValueNone })
             | Method m ->
                 let inline simpleCurrent() = simpleCurrent statements
                 let inline installTerminalOrdering (ordering: Expression) (direction: SortDirection) (rawExpr: SqlExpr option) =

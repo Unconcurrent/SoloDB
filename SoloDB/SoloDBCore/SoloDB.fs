@@ -283,6 +283,44 @@ type internal Collection<'T>(connection: NativeConnection, name: string, connect
         CollectionInstanceCrud.replaceOne<'T> item filter name this.HasRelations connection.WithTransaction this.ensureRelationTx Collection<'T>.mkRelationPathSets this.setSerializedItem
     member this.UpdateMany(transform: Expression<System.Action<'T>> array)(filter: Expression<Func<'T, bool>>) =
         CollectionInstanceCrud.updateMany<'T> transform filter name this.HasRelations (fun () -> connection.Get()) connection.WithTransaction this.ensureRelationTx (fun conn currentFilter takeOne -> this.SelectMutationRows(conn, currentFilter, takeOne)) (fun conn rows expressions -> this.ExecuteJsonUpdateManyByRows(conn, rows, expressions))
+    member private this.ConfigureSearch(name: string, version: int, configure: Action<SearchIndexBuilder<'T>>) =
+        connection.CheckAccess()
+        if isNull configure then nullArg "configure"
+        let builder = SearchIndexBuilder<'T>()
+        configure.Invoke builder
+        let definition = SearchDefinitionResolution.resolve this.Name builder
+        SearchLifecycle.ensure connection this.Name name version definition
+    member private _.BuildSearch(source: Expression, indexName: Expression, query: Expression) =
+        SearchQueryBuilding.build<'T> source indexName query
+    member this.EnsureSearchIndex(configure: Action<SearchIndexBuilder<'T>>) = this.ConfigureSearch("default",1,configure)
+    member this.EnsureSearchIndex(name: string, configure: Action<SearchIndexBuilder<'T>>) = this.ConfigureSearch(name,1,configure)
+    member this.EnsureSearchIndex(name: string, version: int, configure: Action<SearchIndexBuilder<'T>>) = this.ConfigureSearch(name,version,configure)
+    member this.RebuildSearchIndex(name: string) =
+        connection.WithTransaction(fun native -> SearchLifecycle.rebuild native this.Name name)
+    member this.DropSearchIndexIfExists(name: string) =
+        connection.WithTransaction(fun native -> SearchLifecycle.drop native this.Name name)
+    member this.ListSearchIndexes() =
+        use native = connection.Get()
+        SearchLifecycle.list native this.Name
+    member this.VerifySearchIndex(name: string) =
+        connection.WithTransaction(fun native -> SearchLifecycle.verify native this.Name name)
+    member this.OptimizeSearchIndex(name: string) =
+        connection.WithTransaction(fun native -> SearchLifecycle.optimize native this.Name name)
+    member this.Search(text: string) = this.SearchIn("default",text)
+    member this.Search(query: SearchQuery) = this.SearchIn("default",query)
+    member this.SearchIn(name: string, text: string) =
+        connection.CheckAccess()
+        SearchCatalog.validateName name
+        if isNull text then nullArg "text"
+        let query = this.BuildSearch(this.SoloDBQueryable.Expression,Expression.Constant(name),Expression.Constant(text))
+        this.SoloDBQueryable.Provider.CreateQuery<SearchHit<'T>>(query)
+    member this.SearchIn(name: string, query: SearchQuery) =
+        connection.CheckAccess()
+        SearchCatalog.validateName name
+        if isNull (box query) then nullArg "query"
+        let expression = this.BuildSearch(this.SoloDBQueryable.Expression,Expression.Constant(name),Expression.Constant(query))
+        this.SoloDBQueryable.Provider.CreateQuery<SearchHit<'T>>(expression)
+
     member this.EnsureIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
         CollectionInstanceSurface.ensureIndex name (fun () -> connection.Get()) this.InvalidateIndexModelSnapshot expression
     member this.EnsureUniqueAndIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
@@ -330,7 +368,26 @@ type internal Collection<'T>(connection: NativeConnection, name: string, connect
     interface INativeConnectionSource with
         member this.AcquireNativeConnection() = this.Connection.Get()
 
+    interface ISearchOwner with
+        member _.Owner = box this
+        member _.InTransaction = this.InTransaction
+        member _.Database = connectionString
+        member _.RootExpression = this.SoloDBQueryable.Expression
+        member _.Build(source,name,query) = this.BuildSearch(source,name,query)
+
     interface ISoloDBCollection<'T> with
+        member this.EnsureSearchIndex(configure) = this.EnsureSearchIndex(configure)
+        member this.EnsureSearchIndex(name,configure) = this.EnsureSearchIndex(name,configure)
+        member this.EnsureSearchIndex(name,version,configure) = this.EnsureSearchIndex(name,version,configure)
+        member this.RebuildSearchIndex(name) = this.RebuildSearchIndex(name)
+        member this.DropSearchIndexIfExists(name) = this.DropSearchIndexIfExists(name)
+        member this.ListSearchIndexes() = this.ListSearchIndexes()
+        member this.VerifySearchIndex(name) = this.VerifySearchIndex(name)
+        member this.OptimizeSearchIndex(name) = this.OptimizeSearchIndex(name)
+        member this.Search(text: string) = this.Search(text)
+        member this.Search(query: SearchQuery) = this.Search(query)
+        member this.SearchIn(name,text: string) = this.SearchIn(name,text)
+        member this.SearchIn(name,query: SearchQuery) = this.SearchIn(name,query)
         member this.Compile(query: Expression<Func<IQueryable<'T>, IQueryable<'R>>>) : Func<IEnumerable<'R>> =
             let argument = Expression.Parameter(typeof<unit>, "args")
             let run = CompiledQueries.compile<'T, unit, 'R> (this :> ISoloDBCollection<'T>) query argument [||]

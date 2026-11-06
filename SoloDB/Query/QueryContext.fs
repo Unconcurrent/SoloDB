@@ -119,6 +119,8 @@ type internal QueryContext = {
     SerializationInput: QuerySerializationInput
     /// Query source graph roots. Single-source queries keep exactly one root.
     RootGraph: QueryRootGraph
+    SearchSources: QuerySearchSource list ref
+    SearchCatalog: SearchCatalogSource voption
     /// Accumulated join edges (populated during expression translation)
     Joins: ResizeArray<JoinEdge>
     /// Monotonic alias counter (shared by reference across cloned contexts to prevent collisions)
@@ -161,6 +163,8 @@ type internal QueryContext = {
           LayerPosition = BaseLayer
           SerializationInput = QuerySerializationInput.ForType null
           RootGraph = QueryRootGraph.Single(tableName)
+          SearchSources = ref []
+          SearchCatalog = ValueNone
           Joins = ResizeArray()
           AliasCounter = ref 0
           ExcludedPaths = HashSet()
@@ -186,6 +190,8 @@ type internal QueryContext = {
           LayerPosition = BaseLayer
           SerializationInput = QuerySerializationInput.ForType null
           RootGraph = graph
+          SearchSources = ref []
+          SearchCatalog = ValueNone
           Joins = ResizeArray()
           AliasCounter = ref 0
           ExcludedPaths = HashSet()
@@ -221,7 +227,7 @@ type internal QueryContext = {
     /// must keep the parent's metadata authority; without it relation access through the child
     /// silently falls back to defaults.
     static member ChildOf(parent: QueryContext, tableName: string) =
-        { QueryContext.SingleSource(tableName) with MetadataSource = parent.MetadataSource; BindQueryValue = parent.BindQueryValue; GeneralPrefixMatch = parent.GeneralPrefixMatch }
+        { QueryContext.SingleSource(tableName) with MetadataSource = parent.MetadataSource; BindQueryValue = parent.BindQueryValue; GeneralPrefixMatch = parent.GeneralPrefixMatch; SearchSources = parent.SearchSources; SearchCatalog = parent.SearchCatalog }
 
     member this.CloneForSubquery(?rootTable: string) =
         { this with

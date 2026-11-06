@@ -23,60 +23,71 @@ open SoloDatabase.QuerySerializationSql
 module internal QueryTranslatorVisitCoreMemberAccess =
     let private accessCore createDefault nextName updateMode finish access resultType (produced: QueryProducedValue) : QueryProducedValue =
         QueryProduced.bind nextName (fun value input ->
-            let input = if input.Source.IsSome then input else { input with Source = ValueSome(jsonToken value) }
-            let struct(child, segments) = serializationAccess input access
-            let source = if updateMode then value else input.Source.Value
-            let explicitToken =
-                match JsonSerializator.JsonValue.SerializedValueFacts(Utils.optionalPayloadType resultType) with
-                | JsonSerializator.JsonSerializationShape.Uninterpreted -> true
-                | _ -> false
-            let physicalIdentity =
-                match segments, input.PhysicalOwner with
-                | [Member "Id"], ValueSome owner when not updateMode &&
-                    (typeof<JsonSerializator.JsonValue>.Equals resultType ||
-                     (match access with StoredLabel(:? string as name) -> name = "Id" && (typeof<int64>.Equals resultType || typeof<int32>.Equals resultType) | _ -> false) ||
-                     typeof<int64>.Equals resultType &&
-                        (owner.Sources |> Array.forall (fun source -> ModelMetadata.MemberType(source.OwnerType, "Id", false) = Some typeof<int64>))) -> ValueSome owner
-                | _ -> ValueNone
-            let extracted =
-                match segments, value with
-                | [], _ when child.SourceOffset > 0 ->
-                    let length =
-                        match child.Facts with
-                        | JsonSerializator.JsonSerializationShape.ArrayMembers members -> members.Length
-                        | JsonSerializator.JsonSerializationShape.DeclaredArrayMembers members -> members.Length
-                        | _ -> invalidOp "A retained tuple Rest requires its declared positional layout."
-                    SqlExpr.JsonArrayExpr [for index in 0 .. length - 1 -> tupleLeafToken source (child.SourceOffset + index)]
-                | [], _ -> value
-                | _, SqlExpr.Literal(SqlLiteral.String path) when updateMode ->
-                    SqlExpr.Literal(SqlLiteral.String(path + (JsonPathOps.text segments).Substring(1)))
-                | _, _ when explicitToken && not updateMode ->
-                    SqlExpr.FunctionCall("jsonb", [SqlExpr.Binary(source, BinaryOperator.JsonText, SqlExpr.Literal(SqlLiteral.String(JsonPathOps.text segments)))])
-                | _, SqlExpr.JsonExtractExpr(alias, column, path) ->
-                    SqlExpr.JsonExtractExpr(alias, column, JsonPathOps.ofSegments(JsonPathOps.toList path @ segments))
-                | _, SqlExpr.FunctionCall("jsonb", [SqlExpr.Column(alias, column)]) ->
-                    SqlExpr.JsonExtractExpr(alias, column, JsonPathOps.ofSegments segments)
-                | _ -> SqlExpr.FunctionCall("jsonb_extract", [source; SqlExpr.Literal(SqlLiteral.String(JsonPathOps.text segments))])
-            let extracted =
-                match physicalIdentity with
-                | ValueSome owner ->
-                    match owner.Descriptor with
-                    | SqlExpr.JsonArrayExpr _ -> owner.Identity
-                    | _ -> SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNotNull, owner.Descriptor), owner.Identity), [], Some extracted)
-                | _ -> extracted
-            let carrier = if updateMode || physicalIdentity.IsSome || isSqlScalarResult resultType then SqlScalar else CanonicalToken
-            let child =
-                if child.SourceOffset > 0 && segments.IsEmpty then { child with SourceOffset = 0; Source = ValueSome extracted }
-                else child
-            let child = if physicalIdentity.IsSome then { child with Source = ValueSome(jsonToken extracted); Operand = ValueNone } else child
-            // A packed child retains its original scalar token until the actual
-            // value or presence consumer chooses the owning scalar operation.
-            let packedScalar = not updateMode && isSqlScalarResult resultType && (match produced with PackedValue _ -> true | _ -> false)
-            let selected =
-                if packedScalar then
-                    DirectValue(child.Source |> ValueOption.defaultWith (fun () -> jsonToken extracted), { child with Carrier = CanonicalToken })
-                else DirectValue(extracted, { child with Carrier = carrier })
-            if updateMode then selected else QueryDefault.memberResult createDefault resultType value input (finish selected)) produced
+            let direct =
+                if updateMode || not(input.OriginalType.IsGenericType && input.OriginalType.GetGenericTypeDefinition() = typedefof<SearchHit<_>>) then ValueNone
+                else input.SearchOwner |> ValueOption.bind _.Direct
+            match direct,access with
+            | ValueSome direct,ClrMember("Item",_) ->
+                let struct(child,_) = serializationAccess input access
+                let item = SqlExpr.FunctionCall("jsonb",[direct.Item])
+                finish(DirectValue(item,{ child with Source = ValueSome item; Carrier = CanonicalToken;
+                                                    Operand = ValueNone; PhysicalOwner = ValueSome direct.Owner }))
+            | ValueSome direct,ClrMember("Score",_) -> finish(QueryProduced.typed resultType (SqlExpr.Unary(UnaryOperator.Neg,direct.Rank)))
+            | _ ->
+                let input = if input.Source.IsSome then input else { input with Source = ValueSome(jsonToken value) }
+                let struct(child, segments) = serializationAccess input access
+                let source = if updateMode then value else input.Source.Value
+                let explicitToken =
+                    match JsonSerializator.JsonValue.SerializedValueFacts(Utils.optionalPayloadType resultType) with
+                    | JsonSerializator.JsonSerializationShape.Uninterpreted -> true
+                    | _ -> false
+                let physicalIdentity =
+                    match segments, input.PhysicalOwner with
+                    | [Member "Id"], ValueSome owner when not updateMode &&
+                        (typeof<JsonSerializator.JsonValue>.Equals resultType ||
+                         (match access with StoredLabel(:? string as name) -> name = "Id" && (typeof<int64>.Equals resultType || typeof<int32>.Equals resultType) | _ -> false) ||
+                         typeof<int64>.Equals resultType &&
+                            (owner.Sources |> Array.forall (fun source -> ModelMetadata.MemberType(source.OwnerType, "Id", false) = Some typeof<int64>))) -> ValueSome owner
+                    | _ -> ValueNone
+                let extracted =
+                    match segments, value with
+                    | [], _ when child.SourceOffset > 0 ->
+                        let length =
+                            match child.Facts with
+                            | JsonSerializator.JsonSerializationShape.ArrayMembers members -> members.Length
+                            | JsonSerializator.JsonSerializationShape.DeclaredArrayMembers members -> members.Length
+                            | _ -> invalidOp "A retained tuple Rest requires its declared positional layout."
+                        SqlExpr.JsonArrayExpr [for index in 0 .. length - 1 -> tupleLeafToken source (child.SourceOffset + index)]
+                    | [], _ -> value
+                    | _, SqlExpr.Literal(SqlLiteral.String path) when updateMode ->
+                        SqlExpr.Literal(SqlLiteral.String(path + (JsonPathOps.text segments).Substring(1)))
+                    | _, _ when explicitToken && not updateMode ->
+                        SqlExpr.FunctionCall("jsonb", [SqlExpr.Binary(source, BinaryOperator.JsonText, SqlExpr.Literal(SqlLiteral.String(JsonPathOps.text segments)))])
+                    | _, SqlExpr.JsonExtractExpr(alias, column, path) ->
+                        SqlExpr.JsonExtractExpr(alias, column, JsonPathOps.ofSegments(JsonPathOps.toList path @ segments))
+                    | _, SqlExpr.FunctionCall("jsonb", [SqlExpr.Column(alias, column)]) ->
+                        SqlExpr.JsonExtractExpr(alias, column, JsonPathOps.ofSegments segments)
+                    | _ -> SqlExpr.FunctionCall("jsonb_extract", [source; SqlExpr.Literal(SqlLiteral.String(JsonPathOps.text segments))])
+                let extracted =
+                    match physicalIdentity with
+                    | ValueSome owner ->
+                        match owner.Descriptor with
+                        | SqlExpr.JsonArrayExpr _ -> owner.Identity
+                        | _ -> SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNotNull, owner.Descriptor), owner.Identity), [], Some extracted)
+                    | _ -> extracted
+                let carrier = if updateMode || physicalIdentity.IsSome || isSqlScalarResult resultType then SqlScalar else CanonicalToken
+                let child =
+                    if child.SourceOffset > 0 && segments.IsEmpty then { child with SourceOffset = 0; Source = ValueSome extracted }
+                    else child
+                let child = if physicalIdentity.IsSome then { child with Source = ValueSome(jsonToken extracted); Operand = ValueNone } else child
+                // A packed child retains its original scalar token until the actual
+                // value or presence consumer chooses the owning scalar operation.
+                let packedScalar = not updateMode && isSqlScalarResult resultType && (match produced with PackedValue _ -> true | _ -> false)
+                let selected =
+                    if packedScalar then
+                        DirectValue(child.Source |> ValueOption.defaultWith (fun () -> jsonToken extracted), { child with Carrier = CanonicalToken })
+                    else DirectValue(extracted, { child with Carrier = carrier })
+                if updateMode then selected else QueryDefault.memberResult createDefault resultType value input (finish selected)) produced
 
     let internal accessValue createDefault nextName updateMode access resultType produced =
         accessCore createDefault nextName updateMode id access resultType produced

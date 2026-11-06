@@ -90,6 +90,27 @@ type internal QueryOriginalComparisonOperand(target: System.Type, data: System.L
     member _.Child(target,path,steps: int array) =
         QueryOriginalComparisonOperand(target,data,path,depth+steps.Length,(fun suffix -> demand(Array.append steps suffix)),project)
 
+type internal QuerySearchSource = {
+    Key: string
+    Index: SearchIndexDescriptor
+    Match: SqlExpr
+}
+
+/// A search source publishes its stored document bytes and native score.
+/// Packed bindings and set selection use the paired payload instead.
+type internal QuerySearchDirect = {
+    Item: SqlExpr
+    Rank: SqlExpr
+    Owner: QueryPhysicalOwner
+}
+
+type internal QuerySearchOwner = {
+    Sources: QuerySearchSource array
+    Descriptor: SqlExpr
+    Direct: QuerySearchDirect voption
+    Complete: bool
+}
+
 [<Struct>]
 type internal QuerySerializationInput = {
     OriginalType: System.Type
@@ -107,10 +128,11 @@ type internal QuerySerializationInput = {
     StructuralDefault: bool
     PhysicalOwner: QueryPhysicalOwner voption
     ReferenceOwner: QueryReferenceOwner voption
+    SearchOwner: QuerySearchOwner voption
     Navigation: QueryNavigationScope array
 } with
     static member ForType(target) =
-        { OriginalType = target; Shape = ValueNone; Children = Array.empty; Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
+        { OriginalType = target; Shape = ValueNone; Children = Array.empty; Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; SearchOwner = ValueNone; Navigation = Array.empty }
     static member ForOwner(target, table, identity, ?loading: QueryOwnerLoading) =
         let loading = defaultArg loading { Excluded = Array.empty; Included = Array.empty; Whitelist = false }
         let texts values = SqlExpr.JsonArrayExpr(values |> Array.map (SqlLiteral.String >> SqlExpr.Literal) |> Array.toList)
@@ -128,25 +150,25 @@ type internal QuerySerializationInput = {
         { OriginalType = target
           Shape = ValueSome(JsonSerializator.JsonSerializationShape.GroupingValues(key.OriginalType, item.OriginalType))
           Children = [|key; item|]
-          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
+          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; SearchOwner = ValueNone; Navigation = Array.empty }
     static member Sequence(target, item: QuerySerializationInput) =
         { OriginalType = target
           Shape = ValueSome(JsonSerializator.JsonSerializationShape.SequenceValues(ModelMetadata.SequenceElement target))
           Children = [|item|]
-          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
+          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; SearchOwner = ValueNone; Navigation = Array.empty }
     static member Members(target, names: string array, declared: System.Type array, children: QuerySerializationInput array) =
         { OriginalType = target
           Shape = ValueSome(JsonSerializator.JsonSerializationShape.DeclaredMembers(
               Array.mapi (fun index name -> struct(name, declared.[index])) names))
           Children = children
-          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
+          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; SearchOwner = ValueNone; Navigation = Array.empty }
     static member Positions(target, children: QuerySerializationInput array) =
         { OriginalType = target
           Shape = ValueSome(
               if target.IsArray then JsonSerializator.JsonSerializationShape.DeclaredArrayMembers(Array.create children.Length (target.GetElementType()))
               else JsonSerializator.JsonValue.SerializedValueFacts target)
           Children = children
-          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
+          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; SearchOwner = ValueNone; Navigation = Array.empty }
 
 /// A producer retains both its value and the original writer responsibility.
 /// Packed results select the value and descriptor in one SQL occurrence.

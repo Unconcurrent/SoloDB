@@ -167,6 +167,7 @@ module internal Helper =
                 statement.Dispose()
             with error -> statement.Abort(error); reraise()
 
+        SearchSchema.dropCollection connection name
         dropTriggersForTable name connection
         let mutable table = connection.OpenStatement(sprintf "DROP TABLE IF EXISTS \"%s\"" name)
         try

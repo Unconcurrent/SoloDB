@@ -51,6 +51,7 @@ module internal Bootstrap =
         let lower (value: string) = value.ToLower(usCultureInfo)
         let regexpTimeout = TimeSpan.FromMilliseconds(100)
         let register (connection: NativeSqliteConnection) =
+            SearchFunctions.register connection
             NumericalFunctions.register connection
             QueryTranslatorCharacters.register lower connection
             connection.CreateFunction("ENUM_TO_STRING", Func<string, string, string>(fun typeName value ->
@@ -291,7 +292,7 @@ module internal Bootstrap =
     /// <summary>
     /// The current supported schema version. The database will refuse to open future versions.
     /// </summary>
-    let [<Literal>] currentSupportedSchemaVersion = 6
+    let [<Literal>] currentSupportedSchemaVersion = 7
 
     /// <summary>
     /// The minimum required SQLite version.
@@ -455,18 +456,19 @@ module internal Bootstrap =
 
         let fileSystemEvents = FileSystemEventSchema.forExistingTables dbConnection
         if dbSchemaVersion = 5 || fileSystemEvents.Length <> 0 then
+            let targetVersion = max 6 dbSchemaVersion
             let label = if dbSchemaVersion = 5 then "v5->v6" else "filesystem event initialization"
             SchemaMigration.run dbConnection
                 { Label = label
                   Setup = ""; Body = fileSystemEvents
                   FromVersion = dbSchemaVersion
-                  TargetVersion = currentSupportedSchemaVersion
+                  TargetVersion = targetVersion
                   SupportedCeiling = currentSupportedSchemaVersion
                   LegacyTextPolicy = SchemaMigration.Strict }
             dbSchemaVersion <- SchemaMigration.readVersion dbConnection
-            match SchemaMigration.classifyVersion dbSchemaVersion currentSupportedSchemaVersion currentSupportedSchemaVersion with
+            match SchemaMigration.classifyVersion dbSchemaVersion targetVersion currentSupportedSchemaVersion with
             | SchemaMigration.Established -> ()
-            | SchemaMigration.NotApplied -> raise (migrationVerificationError label currentSupportedSchemaVersion dbSchemaVersion)
+            | SchemaMigration.NotApplied -> raise (migrationVerificationError label targetVersion dbSchemaVersion)
             | SchemaMigration.BeyondSupported -> raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
         // https://www.sqlite.org/pragma.html#pragma_optimize

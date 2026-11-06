@@ -38,6 +38,9 @@ module internal QueryableHelperPreprocess =
                 typeof<IQueryable>.IsAssignableFrom(conversion.Type) ->
                 // F# inserts the ordered-query upcast when supplying a query to a terminal operator.
                 expression <- conversion.Operand
+            | :? MethodCallExpression as mce when mce.Method.DeclaringType = typeof<SearchMarker> ->
+                queries.Add(Search(mce.Arguments.[1],mce.Arguments.[2],mce.Arguments.[3]))
+                expression <- mce.Arguments.[0]
             | :? MethodCallExpression as mce ->
                 match parseSupportedMethod mce.Method.Name with
                 | Some SupportedLinqMethods.SelectMany when mce.Arguments.Count = 3 ->
@@ -158,6 +161,8 @@ module internal QueryableHelperPreprocess =
             RootTable = sourceCtx.RootTable
             // Shared so a lookup made in the cloned layer is cached for the whole translation.
             MetadataSource = sourceCtx.MetadataSource
+            SearchSources = sourceCtx.SearchSources
+            SearchCatalog = sourceCtx.SearchCatalog
             BindQueryValue = sourceCtx.BindQueryValue
             GeneralPrefixMatch = sourceCtx.GeneralPrefixMatch
             LayerPosition = OuterLayer

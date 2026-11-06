@@ -392,14 +392,37 @@ module internal QueryProduced =
             singleton alias packet (nullCarrier input.Carrier value)
 
     /// Position describes the selected row occurrence, independently of physical Id.
-    let withPosition name (core: SelectCore) =
+    let private positionRows name order (core: SelectCore) =
         { core with Projections = ProjectionSetOps.ofList(ProjectionSetOps.toList core.Projections
-                        @ [{ Alias = Some name; Expr = QueryableBuildQueryWindowHelpers.rowNumberOver [] }]) }
+                        @ [{ Alias = Some name; Expr = QueryableBuildQueryWindowHelpers.rowNumberOver order }]) }
+    let withPosition name core = positionRows name [] core
 
     /// Preserve the actual completed columns, including authored keys and input companions.
     let completedRows nextName (source: SqlSelect) input =
         let alias = nextName()
         let original = match source.Body with SingleSelect core | UnionAllSelect(core, _) -> core
+        let source, order =
+            match source.Body with
+            | SingleSelect core when hasSearchContext input && not core.OrderBy.IsEmpty ->
+                let projections = ResizeArray<Projection>(ProjectionSetOps.toList core.Projections)
+                let orders = core.OrderBy |> List.map(fun order ->
+                    let existing = projections |> Seq.tryPick(fun field ->
+                        match field.Alias,field.Expr,order.Expr with
+                        | Some name,_,SqlExpr.Column(None,column) when name = column -> Some name
+                        | Some name,value,_ when value = order.Expr -> Some name
+                        | None,SqlExpr.Column(_,name),_ when field.Expr = order.Expr -> Some name
+                        | _ -> None)
+                    let name = existing |> Option.defaultWith(fun () ->
+                        let name = "_search_position_" + nextName()
+                        projections.Add { Alias = Some name; Expr = order.Expr }
+                        name)
+                    name,order.Direction)
+                let ordered = { core with Projections = ProjectionSetOps.ofList(List.ofSeq projections)
+                                          OrderBy = orders |> List.map(fun (name,direction) ->
+                                              { Expr = SqlExpr.Column(None,name); Direction = direction }) }
+                { source with Body = SingleSelect ordered },
+                (orders |> List.map(fun (name,direction) -> SqlExpr.Column(Some alias,name),direction))
+            | _ -> source,[]
         let fields = ProjectionSetOps.toList original.Projections
                      |> List.filter (fun field -> field.Alias <> Some "_tree_ordinal")
                      |> List.map (fun projection ->
@@ -409,7 +432,7 @@ module internal QueryProduced =
             { Alias = Some name; Expr = SqlExpr.Column(Some alias, name) })
         let companions = companionProjections (Some alias) input
                          |> List.filter (fun companion -> not(fields |> List.exists (fun field -> field.Alias = companion.Alias)))
-        { Ctes = []; Body = SingleSelect(withPosition "_tree_ordinal" {
+        { Ctes = []; Body = SingleSelect(positionRows "_tree_ordinal" order {
             Distinct = false; Projections = ProjectionSetOps.ofList(fields @ companions)
             Source = Some(DerivedTable(source, alias)); Joins = []; Where = None; GroupBy = []; Having = None
             OrderBy = []; Limit = None; Offset = None }) }
