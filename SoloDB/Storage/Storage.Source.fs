@@ -168,6 +168,10 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
                         raise(StorageConfigurationError("WAL storage requires an existing 4096-byte WAL image. Import another image through BackupTo."))
                     if profile = SqliteStorageProfile.Simple && (header.[18] = 2uy || header.[19] = 2uy) then
                         raise(StorageConfigurationError("Simple storage requires a rollback-journal image. Import a WAL image through BackupTo.")))
+    let validateExisting main log =
+        if profile = SqliteStorageProfile.Wal && main = 0L && log <> 0L then
+            raise(StorageConfigurationError("A nonempty WAL requires its main image. Preserve both backings and restore a coherent pair."))
+        validateHeader()
     let initialize timeout (state: StorageHandle) =
         if profile = SqliteStorageProfile.ReadOnly then 0 else
         let timer = Stopwatch.StartNew()
@@ -188,8 +192,8 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
                                 lock nodes.[0].Gate (fun () ->
                                     nodes.[0].File.WriteAt(0L, ReadOnlySpan<byte>(page)) |> StorageFiles.check
                                     nodes.[0].File.Flush() |> StorageFiles.check)
-                            else validateHeader()
-                    else validateHeader()
+                            else validateExisting main log
+                    else validateExisting main log
             finally
                 // In particular, release our own SHARED/PENDING grants before a
                 // bounded upgrade retry; two empty openers cannot block each other.
