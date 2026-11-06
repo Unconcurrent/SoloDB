@@ -17,6 +17,7 @@ module internal SearchCatalog =
           UNIQUE(Collection,Name)) STRICT;
         """
     let validateName (name: string) =
+        if isNull name then nullArg "name"
         if String.IsNullOrWhiteSpace name || name.IndexOf('\000') >= 0 then
             invalidArg "name" "A search index name must be nonblank and cannot contain NUL."
     let exists (connection: NativeSqliteConnection) =
@@ -155,7 +156,7 @@ module internal SearchCatalog =
             while statement.Step() do
                 let name = statement.Row.GetString(0)
                 if not(owned.Contains name) then
-                    findings.Add(SearchVerificationFinding(SearchVerificationKind.UnownedArtifact,name,"No search declaration owns this reserved artifact."))
+                    findings.Add(SearchVerificationFinding(SearchVerificationKind.UnownedArtifact,name,"This database-wide reserved artifact has no search declaration; it does not establish damage to the selected index."))
             statement.Dispose()
             findings.ToArray()
         with error -> statement.Abort(error); reraise()

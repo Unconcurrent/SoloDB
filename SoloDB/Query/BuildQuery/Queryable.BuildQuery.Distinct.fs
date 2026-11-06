@@ -46,15 +46,7 @@ module internal QueryableBuildQueryDistinct =
         addComplexFinal statements (fun ctx ->
             // Default equality retains the complete selected row and its admitted identity.
             let target = TypeMetadata.GenericMethodArgCache.Get(m.OriginalMethod).[0]
-            let input = QueryTranslatorSerialization.scopeSerializationInput (Some "o") OuterLayer ctx.Input
-            let groupByExpr = QueryDefaultEquality.key sourceCtx.NextAlias target (SqlExpr.Column(Some "o", "Value")) input
-            let core =
-                { mkCore
-                    ([{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                      { Alias = Some "Value"; Expr = SqlExpr.Column(None, "Value") }]
-                     @ QueryTranslatorSerialization.companionProjections (Some "o") ctx.Input)
-                    (Some (DerivedTable(ctx.Inner, "o")))
-                  with GroupBy = QueryDefaultEquality.terms groupByExpr }
+            TypeMetadata.registerType ctx.Input.OriginalType
             let query =
                 if QueryDefaultEquality.requiresPrepared target ctx.Input then
                     let rows = QueryProduced.completedRows sourceCtx.NextAlias ctx.Inner ctx.Input
@@ -66,7 +58,17 @@ module internal QueryableBuildQueryDistinct =
                                  @ QueryTranslatorSerialization.companionProjections (Some "o") ctx.Input
                     QueryDefaultEquality.firstRows sourceCtx.NextAlias (mkCore fields (Some(DerivedTable(rows, "o")))) equality
                         [SqlExpr.Column(Some "o", "_tree_ordinal"), SortDirection.Asc]
-                else wrapCore core
+                else
+                    let input = QueryTranslatorSerialization.scopeSerializationInput (Some "o") OuterLayer ctx.Input
+                    let groupByExpr = QueryDefaultEquality.key sourceCtx.NextAlias target (SqlExpr.Column(Some "o", "Value")) input
+                    let core =
+                        { mkCore
+                            ([{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                              { Alias = Some "Value"; Expr = SqlExpr.Column(None, "Value") }]
+                             @ QueryTranslatorSerialization.companionProjections (Some "o") ctx.Input)
+                            (Some (DerivedTable(ctx.Inner, "o")))
+                          with GroupBy = QueryDefaultEquality.terms groupByExpr }
+                    wrapCore core
             { Query = query; SerializationInput = ctx.Input; KeyInput = ValueNone }
         )
         if carriedOrders.Length > 0 then

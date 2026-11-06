@@ -183,12 +183,24 @@ module internal QuerySearchPage =
                     let orderName i = "_search_order_" + string i
                     let keys = core.OrderBy |> List.mapi(fun i order ->
                         { Alias = Some(orderName i); Expr = order.Expr })
-                    let ids = { core with Projections = ProjectionSetOps.ofList({Alias = Some "_search_id";Expr = id}::keys) }
+                    let rank = Column(Some fts,"rank")
+                    let needsRank = values |> List.exists(fun projection ->
+                        SqlExpr.exists(fun node -> normalize node = rank) projection.Expr)
+                    let rankKey =
+                        if not needsRank then None else
+                        core.OrderBy |> List.tryFindIndex(fun order -> normalize order.Expr = rank)
+                        |> Option.map orderName |> Option.orElse(Some "_search_rank")
+                    let rankField =
+                        match rankKey with
+                        | Some "_search_rank" -> [{Alias = rankKey;Expr = rank}]
+                        | _ -> []
+                    let ids = { core with Projections = ProjectionSetOps.ofList({Alias = Some "_search_id";Expr = id}::keys @ rankField) }
                     let selectedId = Column(Some pageAlias,"_search_id")
                     let rewrite expression =
                         expression |> SqlExpr.map(fun node ->
                             let isId = match normalize node with Column(alias,"Id") -> fromSource source alias | _ -> false
                             if isId then selectedId else
+                            if needsRank && normalize node = rank then Column(Some pageAlias,rankKey.Value) else
                             match core.OrderBy |> List.tryFindIndex(fun order -> normalize order.Expr = normalize node) with
                             | Some i -> Column(Some pageAlias,orderName i)
                             | None -> node)
@@ -208,12 +220,18 @@ module internal QuerySearchPage =
                         | _ -> false))
                     let joins = [
                         if usesDocument then
-                            ConditionedJoin(JoinKind.Inner,BaseTable(table,alias),Binary(id,BinaryOperator.Eq,selectedId))
+                            CrossJoin(BaseTable(table,alias))
                         if usesFts then
-                            ConditionedJoin(JoinKind.Inner,BaseTable(fts,None),Binary(Column(Some fts,"rowid"),BinaryOperator.Eq,selectedId)) ]
+                            CrossJoin(BaseTable(fts,None)) ]
+                    // Output fetches depend on the completed page, never on a second
+                    // traversal of all MATCH candidates. Candidate joins remain reorderable.
+                    let predicates = [
+                        if usesDocument then Binary(id,BinaryOperator.Eq,selectedId)
+                        if usesFts then Binary(Column(Some fts,"rowid"),BinaryOperator.Eq,selectedId)
+                        if usesFts && needsMatch then FunctionCall("match",[text;Column(None,fts)]) ]
                     { core with Source = Some(DerivedTable(select ids,pageAlias)); Joins = joins
                                 Projections = result
-                                Where = if usesFts && needsMatch then Some(FunctionCall("match",[text;Column(None,fts)])) else None
+                                Where = if predicates.IsEmpty then None else Some(List.reduce (fun left right -> Binary(left,BinaryOperator.And,right)) predicates)
                                 Limit = None; Offset = None
                                 OrderBy = core.OrderBy |> List.mapi(fun i order -> { order with Expr = Column(Some pageAlias,orderName i) }) }
                 | _ -> core

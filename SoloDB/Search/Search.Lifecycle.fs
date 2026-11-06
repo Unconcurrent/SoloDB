@@ -43,7 +43,7 @@ module internal SearchLifecycle =
         if not(SearchCatalog.exists connection) then invalidOp "The adopted search catalog is missing."
     let private validateVersion name version =
         SearchCatalog.validateName name
-        if version <= 0 then invalidArg "version" "Search definition versions must be positive."
+        if version <= 0 then raise(ArgumentOutOfRangeException("version", "Search definition versions must be positive."))
     let private sameCurrent connection collection name version definition =
         match SearchCatalog.tryFind connection collection name with
         | ValueSome index when index.Version = version && index.Definition = definition ->

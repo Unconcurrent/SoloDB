@@ -5,6 +5,20 @@ open SoloDatabase.NativeSQLiteTools
 open SearchDefinition
 
 module internal SearchSchema =
+    // FTS5 rank arguments accept decimal literals, but not exponent notation.
+    let private rankLiteral (value: double) =
+        let text = value.ToString("R",Globalization.CultureInfo.InvariantCulture)
+        let exponent = text.IndexOf('E')
+        if exponent < 0 then text else
+        let mantissa = text.Substring(0,exponent)
+        let point = mantissa.IndexOf('.')
+        let digits = mantissa.Replace(".","")
+        let position = (if point < 0 then mantissa.Length else point) +
+                       Int32.Parse(text.Substring(exponent+1),Globalization.CultureInfo.InvariantCulture)
+        if position <= 0 then "0." + String('0',-position) + digits
+        elif position >= digits.Length then digits + String('0',position-digits.Length)
+        else digits.Insert(position,".")
+
     let execute (connection: NativeSqliteConnection) sql =
         let mutable statement = connection.AcquireScript(NativeStatementSource.Text sql,null)
         try statement.Consume() |> ignore; statement.Dispose()
@@ -18,8 +32,8 @@ module internal SearchSchema =
         let names = fields |> Array.map(fun field -> quote field.Alias) |> String.concat ","
         let values owner = fields |> Array.map(fun field -> projection owner field.Path) |> String.concat ","
         let columns = fields |> Array.map(fun field -> projection "" field.Path + " AS " + quote field.Alias) |> String.concat ","
-        let content = if definition.Storage = SearchTextStorage.Shared then ",content=" + literal index.View + ",content_rowid='Id'" else ""
-        let weights = fields |> Array.map(fun field -> field.Weight.ToString("R",Globalization.CultureInfo.InvariantCulture)) |> String.concat ","
+        let content = if definition.Storage = SearchTextStorage.Shared then ",content=" + literal index.View + ",content_rowid='rowid'" else ""
+        let weights = fields |> Array.map(fun field -> rankLiteral field.Weight) |> String.concat ","
         let configuredRank = literal("bm25(" + weights + ")")
         let prefix = if definition.Prefix.Length = 0 then "" else ",prefix=" + literal(String.Join(" ",definition.Prefix))
         let oldValues, newValues = values "old.", values "new."
@@ -31,12 +45,12 @@ module internal SearchSchema =
             let oldValue, newValue = projection "old." field.Path, projection "new." field.Path
             $"({oldValue}) IS NOT ({newValue})") |> String.concat " OR ")
         execute connection $"""
-            CREATE VIEW {view} AS SELECT Id,{columns} FROM {quote index.Collection};
+            CREATE VIEW {view} AS SELECT Id AS rowid,{columns} FROM {quote index.Collection};
             CREATE VIRTUAL TABLE {table} USING fts5({names}{content},tokenize={literal definition.Tokenizer}{prefix});
             CREATE TRIGGER {quote(index.Table+"_insert")} AFTER INSERT ON {quote index.Collection} BEGIN {insert} END;
             CREATE TRIGGER {quote(index.Table+"_delete")} AFTER DELETE ON {quote index.Collection} BEGIN {remove} END;
             CREATE TRIGGER {quote(index.Table+"_update")} AFTER UPDATE OF Id,Value ON {quote index.Collection} WHEN {changed} BEGIN {remove} {insert} END;
-            INSERT INTO {table}(rowid,{names}) SELECT Id,{names} FROM {view};
+            INSERT INTO {table}(rowid,{names}) SELECT rowid,{names} FROM {view};
             INSERT INTO {table}({table},rank) VALUES('rank',{configuredRank});
             """
     let drop connection (index: SearchIndexDescriptor) =
@@ -65,9 +79,6 @@ module internal SearchSchema =
                 statement.Dispose()
                 missing
             with error -> statement.Abort(error); reraise()
-        let unowned = SearchCatalog.unowned connection
-        if unowned.Length <> 0 then
-            invalidOp "Unowned search artifacts require explicit inspection before rebuilding."
         if missingConfig then
             let findings = SearchCatalog.inspectObjects connection index
             if findings |> Array.exists(fun finding -> finding.Kind = SearchVerificationKind.AlteredArtifact) then
@@ -95,7 +106,7 @@ module internal SearchSchema =
                 findings.Add(SearchVerificationFinding(SearchVerificationKind.IntegrityFailure,index.Table,error.Message))
             if index.Definition.Storage = SearchTextStorage.Copied then
                 let columns = index.Definition.Fields |> Array.map(fun field -> quote field.Alias) |> String.concat ","
-                let expected = $"SELECT Id,{columns} FROM {quote index.View}"
+                let expected = $"SELECT rowid,{columns} FROM {quote index.View}"
                 let observed = $"SELECT rowid,{columns} FROM {table}"
                 let sql = $"SELECT EXISTS(SELECT * FROM ({expected} EXCEPT {observed})) OR EXISTS(SELECT * FROM ({observed} EXCEPT {expected}))"
                 let mutable statement = connection.OpenStatement(sql)

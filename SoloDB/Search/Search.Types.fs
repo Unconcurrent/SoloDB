@@ -53,7 +53,7 @@ type internal SearchLiteral =
         if isNull value then nullArg name
         value
     static member Tokens(value: int) =
-        if value < 1 || value > 64 then invalidArg "tokens" "Snippet token counts must be between 1 and 64."
+        if value < 1 || value > 64 then raise(ArgumentOutOfRangeException("tokens", "Snippet token counts must be between 1 and 64."))
         value
     static member AllWords(text: string) =
         if isNull text then nullArg "text"

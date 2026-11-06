@@ -179,22 +179,6 @@ module internal SchemaMigration =
                 $"Error: migration {label} failed and could not be cleaned up.\nReason: {failure.Message}\nCleanup: {joined}.\nFix: do not reuse this connection; investigate the migration step.",
                 failure)))
 
-    /// <summary>
-    /// Runs one migration step inside an exclusive transaction and establishes its version.
-    ///
-    /// On failure the transaction is rolled back and the original error is raised. Cleanup is fail
-    /// closed: if the rollback itself fails, or the connection is still inside a transaction
-    /// afterwards, that is reported rather than swallowed, with the original failure carried as the
-    /// inner cause. A connection must never return to the pool holding a transaction, and this
-    /// function will not let one leave quietly.
-    ///
-    /// Version verification is not performed here. The caller re-reads the version after this
-    /// returns, so a verification failure is outside this scope entirely.
-    /// </summary>
-    /// <remarks>
-    /// Takes the pooled connection itself rather than a callback. Declaring it unfit is a field set,
-    /// which cannot fail, so there is no recovery path to model and none is pretended.
-    /// </remarks>
     /// Applies feature adoption inside the caller's existing transaction.
     let internal applyInTransaction (connection: NativeSqliteConnection) (plan: Plan) =
         if inAutocommit connection then invalidOp "A schema change requires an owned transaction."
@@ -220,6 +204,22 @@ module internal SchemaMigration =
                 raise (unsupportedVersion versionUnderLock plan.SupportedCeiling)
 
 
+    /// <summary>
+    /// Runs one migration step inside an exclusive transaction and establishes its version.
+    ///
+    /// On failure the transaction is rolled back and the original error is raised. Cleanup is fail
+    /// closed: if the rollback itself fails, or the connection is still inside a transaction
+    /// afterwards, that is reported rather than swallowed, with the original failure carried as the
+    /// inner cause. A connection must never return to the pool holding a transaction, and this
+    /// function will not let one leave quietly.
+    ///
+    /// Version verification is not performed here. The caller re-reads the version after this
+    /// returns, so a verification failure is outside this scope entirely.
+    /// </summary>
+    /// <remarks>
+    /// Takes the pooled connection itself rather than a callback. Declaring it unfit is a field set,
+    /// which cannot fail, so there is no recovery path to model and none is pretended.
+    /// </remarks>
     let internal run (pooled: NativeCachingDbConnection) (plan: Plan) =
         let connection = pooled.Inner
         let handle =

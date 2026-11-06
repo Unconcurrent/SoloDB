@@ -2,6 +2,8 @@
 
 Declare the stored string fields to search, then use `Search` or `SearchIn` with ordinary LINQ. SoloDB maintains the index when documents change.
 
+The first successful `EnsureSearchIndex` advances the database to schema 7. **SoloDB 1.4.1 and earlier then refuse to open that database.** Upgrade every process that uses it before declaring an index.
+
 ## Declare fields and search
 
 ```csharp
@@ -39,7 +41,7 @@ public sealed class Article
 
 `EnsureSearchIndex(builder => ...)` declares the index named `default` at version 1. `EnsureSearchIndex(name, builder => ...)` also uses version 1. `Search(text)` and `Search(query)` use `default`; `SearchIn(name, ...)` selects another index.
 
-Field selectors must follow fixed stored members to a string. Method calls, array/indexer traversal and reference traversal are unsupported. Stored names follow the model's serializer. A missing, null or nontext stored value contributes empty text. Each path can be declared once. Aliases follow SQLite identifier comparison; `rank` and `rowid` are reserved. Weights must be finite and nonnegative; zero is valid.
+Field selectors must follow fixed stored members to a string. Method calls, array/indexer traversal and reference traversal are unsupported. Stored names follow the model's serializer. A missing, null or nontext stored value contributes empty text. Each path can be declared once. Aliases follow SQLite identifier comparison; `rank` and `rowid` are reserved. Weights must be finite and nonnegative; zero is valid. Null required arguments raise `ArgumentNullException`. A nonpositive definition version or snippet token count outside 1–64 raises `ArgumentOutOfRangeException`.
 
 The builder defaults to `SearchTextStorage.Shared` and tokenizer `unicode61`. Set `Storage`, `Tokenizer` and `PrefixLengths` during configuration:
 
@@ -78,7 +80,7 @@ var matches = articles.SearchIn("text",
 
 `SearchHit<Article>` contains the original `Item` and a read-only `Score`. The score is the negation of the configured native BM25 rank. A single search defaults to native rank ascending, then document ID ascending. An explicit `OrderBy` replaces this order; add your own `ThenBy` when you need a tie-breaker.
 
-`Text` returns a declared field's original text. `Snippet` adds the supplied markers around matching text and uses `...` between fragments. Its token count must be from 1 through 64; opening and closing markers cannot be null. Both methods belong inside a database query projection. Calling them on a hit already returned by `ToArray` or `ToList` throws `InvalidOperationException`. Select strings before materializing, as in the first example. Changing `Item` afterward does not save the document; call the collection's update operation.
+`Text` returns a declared field's original text. `Snippet` returns one fragment, adds the supplied markers around matches, and uses `...` at truncated ends. Its token count must be from 1 through 64; opening and closing markers cannot be null. Both methods belong inside a database query projection. Calling them on a hit already returned by `ToArray` or `ToList` throws `InvalidOperationException`. Select strings before materializing, as in the first example. Changing `Item` afterward does not save the document; call the collection's update operation.
 
 Within a SoloDB query, `Union`, `Distinct`, `Intersect` and `Except` compare visible Item and Score using the usual SoloDB equality for the Item. Hidden search context does not affect equality. Union and Distinct keep the first surviving occurrence; Intersect and Except keep a left occurrence. Later Text/Snippet calls use that occurrence's original search text and declaration. Every possible source must declare the requested field and retain its query context. Appending or reconstructing a materialized hit does not restore that context. Bounds inside each arm stay inside that arm.
 
@@ -97,7 +99,7 @@ var second = find("journal", 16).ToArray();
 
 Retain the function. Text, markers and token counts supplied as arguments bind on invocation; enumeration reads current rows. The index name and declaration are fixed when compiling. An ordinary query resolves the current declaration when executed. A retained query never silently switches to a replacement declaration: recompile after replacing or dropping its index. Rebuild keeps the declaration identity.
 
-An undefined or damaged index found during resolution raises `InvalidOperationException`. Native preparation and reprepare failures keep their `NativeSqliteException`, codes and cause unless a known structural preparation failure is tied to a confirmed retired source. A generic SQLite error and a changed catalog do not establish that cause. Other native errors remain unchanged.
+An undefined or damaged index found during resolution raises `InvalidOperationException`. Starting a retained execution against an index retired by replacement or Drop raises `NativeSqliteException`; create a new compiled query against the current declaration. Preparation and reprepare errors preserve their native codes and cause. SoloDB does not infer their cause from a generic SQLite error or a changed catalog, and other native errors remain unchanged.
 
 ## F#
 
@@ -135,20 +137,38 @@ Ensure is explicit administration. Acquiring a collection or running a search do
 ```csharp
 var declarations = articles.ListSearchIndexes();
 var verification = articles.VerifySearchIndex("text");
-if (!verification.IsValid)
+if (verification.Findings.Any(f => f.Kind != SearchVerificationKind.UnownedArtifact))
     articles.RebuildSearchIndex("text");
+foreach (var finding in verification.Findings)
+    Console.Error.WriteLine($"{finding.Kind}: {finding.ObjectName}: {finding.Description}");
 articles.OptimizeSearchIndex("text");
 bool removed = articles.DropSearchIndexIfExists("completion");
 ```
 
-List returns immutable declaration snapshots. Verify reports missing or altered artifacts, rank, integrity, content and ownership findings; genuine native failures remain exceptions. Verification requires a writable connection. Rebuild derives text from the documents and keeps the declaration version and identity. It refuses an unsafe repair or an unowned artifact collision. Optimize is explicit native maintenance. Drop returns false if the declaration is absent. Dropping a collection also removes its owned search indexes.
+List returns immutable declaration snapshots. Verify reports missing or altered artifacts, rank, integrity, content and ownership findings; genuine native failures remain exceptions. Verification requires a writable connection and holds a write transaction while inspecting the corpus, blocking other writers for its duration. Its work grows with the indexed data. Rebuild derives text from the documents and keeps the declaration version and identity. It refuses an unsafe repair; a local artifact creation collision fails and rolls back. Unknown objects elsewhere do not block repair. Optimize is explicit native maintenance. Drop returns false if the declaration is absent. Dropping a collection also removes its owned search indexes.
+
+`UnownedArtifact` findings cover the whole database, so they do not by themselves mean the selected index is damaged. `IsValid` means the complete findings list is empty. Rebuild leaves unknown objects untouched and therefore does not clear those findings. Inspect the exact reported object and its data; restore a consistent database backup if the object still belongs to a declaration whose catalog record was lost. Remove it only after confirming it is unowned and unnecessary.
+
+For that deliberate administration, use the existing public ADO connection. Here `confirmedUnusedTable` is the exact reported name of a table the operator has inspected and chosen to remove; a finding alone does not supply that decision:
+
+```csharp
+static void DropConfirmedUnusedTable(SoloDB db, string confirmedUnusedTable)
+{
+    using var connection = db.Connection.Borrow();
+    using var command = connection.CreateCommand();
+    command.CommandText = "DROP TABLE main.\"" + confirmedUnusedTable.Replace("\"", "\"\"") + "\"";
+    command.ExecuteNonQuery();
+}
+```
+
+Never sweep the reserved prefix or change owned search objects manually. This exact-name removal of a confirmed unnecessary unowned table is an administration exception, not automatic search maintenance. Verify again after the operator action.
 
 Document changes and search maintenance commit or roll back together. Lifecycle operations inside an existing transaction use its savepoint behavior. A running WAL reader can finish its old snapshot while a replacement is committed.
 
-The first successful Ensure advances the database schema from 6 to 7. An ordinary open alone does not adopt search. Coordinate schema administration with older SoloDB writers; do not lower the database version or edit private search objects. An adopted database missing its catalog is damage and is never treated as a fresh adoption.
+The first successful Ensure advances the database schema from 6 to 7. An ordinary open alone does not adopt search. Coordinate schema administration with older SoloDB writers; do not lower the database version or manually edit owned search objects. An adopted database missing its catalog is damage and is never treated as a fresh adoption.
 
 ## Storage and cost
 
-Shared stores the selected text only in the documents and reads it there for text output. Copied stores another copy in FTS, using more storage and write work while allowing text-only output without reading the document payload. Both retain document authority and transactional maintenance.
+Shared stores the selected text only in the documents and reads it there for text output. Copied stores another copy in FTS, increasing the stored text and bytes maintained while allowing text-only output without reading the document payload. Write latency depends on the workload and cache state. Both retain document authority and transactional maintenance.
 
-FTS and ordinary member indexes can cooperate; SQLite chooses their access order. Broad terms still visit many matches. Narrow pages can select identities and order keys before fetching safe output; matching, sorting and deep offsets still cost work. Set deduplication may materialize candidates to retain the correct occurrence. Use `ExplainQueryPlan` on the actual query and measure complete enumeration with representative data. Ordinary translation reads the declaration; retained queries avoid repeating translation.
+FTS and ordinary member indexes can cooperate; SQLite chooses their access order. Broad terms still visit many matches. Narrow pages can select identities and order keys before fetching safe output; matching, sorting and deep offsets still cost work. When hit output needs Score, selection retains its native rank so rowid output probes do not restart BM25 preparation for each row. Default rank ordering and this retained score can rank many candidates before the page is returned. Set deduplication may materialize candidates to retain the correct occurrence. Use `ExplainQueryPlan` on the actual query and measure complete enumeration with representative data. Ordinary translation reads the declaration; retained queries avoid repeating translation.

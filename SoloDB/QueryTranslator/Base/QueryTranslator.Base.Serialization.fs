@@ -17,6 +17,14 @@ module internal QueryTranslatorSerialization =
     let rec internal hasSearchContext (input: QuerySerializationInput) =
         input.SearchOwner.IsSome || (input.Children |> Array.exists hasSearchContext)
 
+    // Complete search occurrences originate in the library's produced hit layout.
+    // Mixed stored/constructed inputs retain the general descriptor checks.
+    let private producedSearchLayout (input: QuerySerializationInput) =
+        (input.SearchOwner |> ValueOption.exists _.Complete) &&
+        (match input.Shape with
+         | ValueSome(JsonSerializator.JsonSerializationShape.DeclaredMembers _) -> true
+         | _ -> false)
+
     let internal isStoredNumericalInput target =
         let target = Utils.optionalPayloadType target
         let target = if target.IsEnum then TypeMetadata.enumUnderlying target else target
@@ -37,17 +45,20 @@ module internal QueryTranslatorSerialization =
     let internal fromDescriptor descriptor (input: QuerySerializationInput) =
         let at path = SqlExpr.FunctionCall("jsonb_extract", [descriptor; SqlExpr.Literal(SqlLiteral.String path)])
         let framed = SqlExpr.Binary(at "$[0]", BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 3L))
+        let field path otherwise =
+            if producedSearchLayout input then at path
+            else SqlExpr.CaseExpr((framed,at path),[],Some otherwise)
         let owner position (original: QueryPhysicalOwner voption) = original |> ValueOption.map (fun owner ->
-            { owner with Descriptor = SqlExpr.CaseExpr((framed, at ("$[" + string position + "]")), [], Some(SqlExpr.Literal SqlLiteral.Null)) })
-        { input with Operand = ValueSome { Descriptor = SqlExpr.CaseExpr((framed, at "$[1]"), [], Some descriptor); Accesses = Array.empty }
+            { owner with Descriptor = field ("$[" + string position + "]") (SqlExpr.Literal SqlLiteral.Null) })
+        { input with Operand = ValueSome { Descriptor = field "$[1]" descriptor; Accesses = Array.empty }
                      OriginalComparisonOperand = input.OriginalComparisonOperand |> ValueOption.map (fun original ->
                          let field path = SqlExpr.CaseExpr((framed, at path), [], Some(SqlExpr.Literal SqlLiteral.Null))
                          original.WithSource(lazy (field "$[4][0]"), field "$[4][1]"))
                      PhysicalOwner = owner 2 input.PhysicalOwner
                      ReferenceOwner = input.ReferenceOwner |> ValueOption.map (fun original ->
-                         { original with Descriptor = SqlExpr.CaseExpr((framed, at "$[3]"), [], Some(SqlExpr.Literal SqlLiteral.Null)) })
+                         { original with Descriptor = field "$[3]" (SqlExpr.Literal SqlLiteral.Null) })
                      SearchOwner = input.SearchOwner |> ValueOption.map(fun search ->
-                         { search with Descriptor = SqlExpr.CaseExpr((framed,at "$[5]"),[],Some(SqlExpr.Literal SqlLiteral.Null)); Direct = ValueNone }) }
+                         { search with Descriptor = field "$[5]" (SqlExpr.Literal SqlLiteral.Null); Direct = ValueNone }) }
 
     /// Equivalent authored layouts retain each selected child's known source alternatives.
     let rec internal mergeInputs target (inputs: QuerySerializationInput array) =
@@ -213,6 +224,10 @@ module internal QueryTranslatorSerialization =
                                             JsonSerializator.JsonEqualitySupport.Index producedChildPosition.Value])
                 let origin = serializationOperand operand
                 let complete = SqlExpr.FunctionCall("jsonb_extract", [origin; SqlExpr.Literal(SqlLiteral.String path)])
+                if producedSearchLayout parent then
+                    match access with ClrMember(_,target) -> TypeMetadata.registerType target | _ -> ()
+                    ValueSome {Descriptor = complete; Accesses = Array.empty}
+                else
                 let actual = source |> ValueOption.map writerHeader |> ValueOption.defaultValue absentWriterHeader
                 let inherited = serializationOperand { operand with Accesses = Array.append operand.Accesses [|serializationStep access actual|] }
                 let produced = SqlExpr.Binary(SqlExpr.FunctionCall("jsonb_extract", [origin; SqlExpr.Literal(SqlLiteral.String "$[0]")]), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L))
