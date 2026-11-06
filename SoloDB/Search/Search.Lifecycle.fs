@@ -104,11 +104,18 @@ module internal SearchLifecycle =
         if not current then
             source.CheckWritable()
             source.WithTransaction(fun connection -> ensureLocked connection collection name version definition)
-    let drop connection collection name =
+    let drop (source: NativeConnection) collection name =
+        source.CheckAccess()
         SearchCatalog.validateName name
-        match SearchCatalog.tryFind connection collection name with
-        | ValueSome index -> remove connection index; true
-        | ValueNone -> false
+        if source.IsReadOnly then
+            use connection = source.Get()
+            StorageValidation.writable (SearchCatalog.tryFind connection collection name).IsSome
+            false
+        else
+            source.WithTransaction(fun connection ->
+                match SearchCatalog.tryFind connection collection name with
+                | ValueSome index -> remove connection index; true
+                | ValueNone -> false)
     let dropCollection connection collection =
         SearchSchema.dropCollection connection collection
     let rebuild connection collection name =

@@ -35,7 +35,7 @@ module internal CollectionSurfaceOps =
         let indexSQL = $"DROP INDEX IF EXISTS \"{indexName}\""
 
         use connection = getConnection()
-        StorageValidation.writable connection.DatabaseOwner.IsStorageReadOnly
+        HelperSchema.checkIndexDrop connection indexName
         let result =
             let mutable statement = connection.OpenStatement(indexSQL)
             try

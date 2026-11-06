@@ -337,11 +337,13 @@ module Connections =
             | NativeGuarded(guard, inner) -> guard(); inner.CheckAccess()
             | _ -> ()
 
-        member internal this.CheckWritable() =
+        member internal this.IsReadOnly =
             match this with
-            | NativePooled pool -> StorageValidation.writable pool.IsReadOnly
-            | NativeTransactional connection -> StorageValidation.writable connection.DatabaseOwner.IsStorageReadOnly
-            | NativeGuarded(guard, inner) -> guard(); inner.CheckWritable()
+            | NativePooled pool -> pool.IsReadOnly
+            | NativeTransactional connection -> connection.DatabaseOwner.IsStorageReadOnly
+            | NativeGuarded(guard, inner) -> guard(); inner.IsReadOnly
+
+        member internal this.CheckWritable() = StorageValidation.writable this.IsReadOnly
 
         member this.Get() : NativeSqliteConnection =
             match this with

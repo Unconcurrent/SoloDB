@@ -179,7 +179,7 @@ Use `VacuumTo(path)` to export to an ordinary native file. Do not assume a trans
 
 For `ReadOnly`, supply a complete supported SoloDB main image. Finish WAL checkpointing or export a complete image first, and leave its bytes unchanged while it is open. SoloDB retains its usual read functions and metadata, but does not migrate schema, add indexes or create missing collections.
 
-Write-only administration, such as `Optimize`, `Vacuum`, index changes and search-index maintenance, throws `InvalidOperationException` on `ReadOnly` storage. An `EnsureIndex` or `EnsureSearchIndex` call that finds its existing index unchanged can succeed without writing. Raw write SQL instead keeps SQLite's READONLY error; it is not converted into an administration error.
+Write-only administration, such as `Optimize`, `Vacuum`, index changes and search-index maintenance, throws `InvalidOperationException` on `ReadOnly` storage. An `EnsureIndex` or `EnsureSearchIndex` call that finds its existing index unchanged can succeed without writing. `DropIndexIfExists` and `DropSearchIndexIfExists` also succeed when their target is absent; they still refuse to remove an existing index. Raw write SQL instead keeps SQLite's READONLY error; it is not converted into an administration error.
 
 ## Native access and extension users
 

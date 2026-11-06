@@ -303,7 +303,7 @@ type internal Collection<'T>(connection: NativeConnection, name: string, connect
     member this.RebuildSearchIndex(name: string) =
         this.AdministerSearch(name, fun native -> SearchLifecycle.rebuild native this.Name name)
     member this.DropSearchIndexIfExists(name: string) =
-        this.AdministerSearch(name, fun native -> SearchLifecycle.drop native this.Name name)
+        SearchLifecycle.drop connection this.Name name
     member this.ListSearchIndexes() =
         use native = connection.Get()
         SearchLifecycle.list native this.Name
