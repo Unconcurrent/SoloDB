@@ -18,20 +18,23 @@ module NativeSQLiteTools =
     /// <param name="connectionStr">The connection string.</param>
     /// <param name="onDispose">A callback function to execute on disposal.</param>
     /// <param name="config">The database configuration.</param>
-    type [<Sealed>] NativeCachingDbConnection internal (connectionStr: string, onDispose, config: Types.SoloDBConfiguration, onEnterEventHandlerScope: unit -> unit, onExitEventHandlerScope: unit -> unit) as this =
-        inherit NativeSqliteConnection(connectionStr)
+    type [<Sealed>] NativeCachingDbConnection internal (connectionStr: string, onDispose, config: Types.SoloDBConfiguration, onEnterEventHandlerScope: unit -> unit, onExitEventHandlerScope: unit -> unit, storage: SqliteStorage option) as this =
+        inherit NativeSqliteConnection(connectionStr, storage)
         let mutable callbackResources: IFileSystemCallbackResources = Unchecked.defaultof<_>
         let callbackResourceDepth () =
             if isNull (box callbackResources) then 0 else callbackResources.Depth
         let restoreCallbackResources depth =
             if not (isNull (box callbackResources)) then callbackResources.Restore(depth)
 
-        do base.StatementCache.UseConfiguration(config)
+        do
+            base.StatementCache.UseConfiguration(config)
+            if base.DatabaseOwner.IsStorage then base.SetStorageRetirement(Action(fun () -> this.DisposeReal()))
 
         // Per-connection event-handler depth counter for savepoint suppression.
         // Tracks how many nested handler invocations are active on THIS connection.
         // Strict Enter/Exit balance — no negative clamping (negative depth = bug signal).
         let mutable acquisition = 0L
+        let mutable storageCleanupRegistered = 0
         let mutable eventHandlerDepth = 0
         let mutable eventHandlerInvocationVersion = 0L
         let eventDispatchState = EventDispatch.EventDispatchState()
@@ -43,6 +46,9 @@ module NativeSQLiteTools =
                     member _.Checkpoint() = callbackResourceDepth()
                     member _.Restore(depth) = restoreCallbackResources depth }
     
+        internal new(connectionStr: string, onDispose, config: Types.SoloDBConfiguration, onEnterEventHandlerScope: unit -> unit, onExitEventHandlerScope: unit -> unit) =
+            new NativeCachingDbConnection(connectionStr, onDispose, config, onEnterEventHandlerScope, onExitEventHandlerScope, None)
+
         /// <summary>The underlying NativeSqliteConnection.</summary>
         member internal _.Acquisition = acquisition
         member internal _.RenewAcquisition() = acquisition <- acquisition + 1L
@@ -137,10 +143,15 @@ module NativeSQLiteTools =
         /// Performs the actual disposal of the base connection.
         /// </summary>
         member this.DisposeReal() =
-            let mutable failure: exn = null
-            try this.ResetEventDispatchState() with error -> failure <- error
-            try base.Dispose(true) with error -> if isNull failure then failure <- error
-            if not (isNull failure) then System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw()
+            if base.DatabaseOwner.IsStorage then
+                if Threading.Interlocked.Exchange(&storageCleanupRegistered, 1) = 0 then
+                    base.DatabaseOwner.AfterStorageClose(Action(fun () -> this.ResetEventDispatchState()))
+                base.Dispose(true)
+            else
+                let mutable failure: exn = null
+                try this.ResetEventDispatchState() with error -> failure <- error
+                try base.Dispose(true) with error -> if isNull failure then failure <- error
+                if not(isNull failure) then System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw()
     
         // Override Dispose(bool) to ensure TakeBack is always called on disposal,
         // regardless of whether Dispose() is called via IDisposable or base class dispatch.

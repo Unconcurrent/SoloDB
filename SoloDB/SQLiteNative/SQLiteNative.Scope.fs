@@ -22,13 +22,20 @@ type private NativeStatementAdmission =
     val Generation: int64
     val mutable Checkpoint: int
     val mutable Admitted: bool
-    new(cache: NativeStatementCache, checkReader, generation) =
+    val Lifetime: NativeLifetimeUse
+    val AllowRetired: bool
+    new(cache: NativeStatementCache, checkReader, generation, allowRetired) =
         { Cache = cache; CheckReader = checkReader; Observer = cache.Database.Observer
-          Generation = generation; Checkpoint = 0; Admitted = false }
-    new(cache: NativeStatementCache, checkReader) = NativeStatementAdmission(cache, checkReader, cache.Database.Generation)
+          Generation = generation; Checkpoint = 0; Admitted = false
+          Lifetime = (if allowRetired then cache.Database.RetainUse() else cache.Database.AdmitUse())
+          AllowRetired = allowRetired }
+    new(cache: NativeStatementCache, checkReader, generation) = NativeStatementAdmission(cache, checkReader, generation, false)
+    new(cache: NativeStatementCache, checkReader) = NativeStatementAdmission(cache, checkReader, cache.Database.Generation, false)
     member this.Check() =
         let database = this.Cache.Database
         database.EnsureGeneration(this.Generation)
+        if not this.Admitted && not this.AllowRetired && database.IsRetiring then
+            raise(ObjectDisposedException("NativeSqliteConnection"))
         if this.CheckReader && database.ReaderActive then
             raise (InvalidOperationException("A raw SQL reader is already active on this connection."))
     member this.Enter() =
@@ -36,13 +43,15 @@ type private NativeStatementAdmission =
         this.Checkpoint <- if isNull this.Observer then 0 else this.Observer.Checkpoint()
         this.Admitted <- true
     member this.Fail(error: exn, owned: NativePreparedStatement) =
-        let database = this.Cache.Database
-        if database.IsOpen && database.Generation = this.Generation && not (isNull this.Observer) then
-            try this.Observer.Failed(error) with _ -> ()
-            if this.Admitted then
-                try this.Observer.Restore(this.Checkpoint) with _ -> ()
-        if not (isNull (box owned)) then
-            try this.Cache.Release(owned, owned.Borrow) with _ -> ()
+        try
+            let database = this.Cache.Database
+            if database.IsOpen && database.Generation = this.Generation && not (isNull this.Observer) then
+                try this.Observer.Failed(error) with _ -> ()
+                if this.Admitted then
+                    try this.Observer.Restore(this.Checkpoint) with _ -> ()
+            if not (isNull (box owned)) then
+                try this.Cache.Release(owned, owned.Borrow) with _ -> ()
+        finally if not(isNull this.Lifetime) then this.Lifetime.Dispose()
 
 /// Only the current native attempt is carried through a lock wait.
 [<Struct>]
@@ -63,16 +72,18 @@ type internal NativeStatementScope =
     val private generation: int64
     val private borrow: int64
     val private checkpoint: int
+    val private lifetime: NativeLifetimeUse
     val mutable private budget: NativeExecutionBudget
     val mutable private result: int
     val mutable private affected: int
     val mutable private closed: bool
     private new(cache: NativeStatementCache, statement: NativePreparedStatement, admission: NativeStatementAdmission, budget: NativeExecutionBudget) =
         { cache = cache; statement = statement; observer = admission.Observer; generation = admission.Generation
-          borrow = statement.Borrow; checkpoint = admission.Checkpoint; budget = budget; result = 0; affected = -1
+          borrow = statement.Borrow; checkpoint = admission.Checkpoint; lifetime = admission.Lifetime
+          budget = budget; result = 0; affected = -1
           closed = false }
-    new(cache: NativeStatementCache, source: NativeStatementSource, offset: int, budget: NativeExecutionBudget, checkReader: bool) =
-        let mutable admission = NativeStatementAdmission(cache, checkReader)
+    new(cache: NativeStatementCache, source: NativeStatementSource, offset: int, budget: NativeExecutionBudget, checkReader: bool, allowRetired: bool) =
+        let mutable admission = NativeStatementAdmission(cache, checkReader, cache.Database.Generation, allowRetired)
         let mutable owned = Unchecked.defaultof<NativePreparedStatement>
         let mutable budget = budget
         let statement =
@@ -82,6 +93,8 @@ type internal NativeStatementScope =
                 owned
             with error -> admission.Fail(error, owned); reraise()
         new NativeStatementScope(cache, statement, admission, budget)
+    new(cache: NativeStatementCache, source: NativeStatementSource, offset: int, budget: NativeExecutionBudget, checkReader: bool) =
+        new NativeStatementScope(cache, source, offset, budget, checkReader, false)
     static member private WaitForPreparationAsync(cache: NativeStatementCache, initialAdmission: NativeStatementAdmission, pending: ValueTask<struct (NativePreparedStatement * NativeExecutionBudget)>) = task {
         let mutable admission = initialAdmission
         let mutable owned = Unchecked.defaultof<NativePreparedStatement>
@@ -173,10 +186,15 @@ type internal NativeStatementScope =
         this.CheckStatement()
         this.statement.Bind(arguments)
     member private this.StepNative(attempt: byref<NativeStatementStepAttempt>) =
+        this.cache.Database.BeginStorageOperation()
         attempt.Result <- raw.sqlite3_step(this.statement.Handle)
         this.Check()
         let database = this.cache.Database
         if database.CallbackEpoch <> attempt.Callbacks then database.RaiseCallbackFailure()
+        try database.CheckStorageOperation()
+        with error ->
+            error.Data.["Statement"] <- this.statement.Description
+            reraise()
     member private this.StartStep(mode: NativeStatementStepMode) =
         this.Check()
         if not this.statement.HasStatement then ValueNone else
@@ -193,7 +211,7 @@ type internal NativeStatementScope =
         this.budget.CanRetry(attempt.Started)
     [<System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)>]
     member private this.RaiseStepError(result: int) : unit =
-        let error = NativeSqliteException.FromResult(this.cache.Database.Handle, result)
+        let error = this.cache.Database.Error(result)
         error.Data.["Statement"] <- this.statement.Description
         raise error
     member private this.CompleteStep(attempt: byref<NativeStatementStepAttempt>) =
@@ -255,6 +273,7 @@ type internal NativeStatementScope =
         this.Check()
         if this.statement.HasStatement then
             this.statement.AdvanceRow()
+            this.cache.Database.BeginStorageOperation()
             let result = raw.sqlite3_reset(this.statement.Handle)
             this.cache.Database.ObserveStatementCompletion()
             this.cache.Database.Check(result)
@@ -263,32 +282,35 @@ type internal NativeStatementScope =
         this.result <- 0
     member private this.Finish(primary: exn, notifyAfter: bool, suppressPrimary: bool) =
         if this.Owns then
-            this.closed <- true
-            let database = this.cache.Database
-            let current = database.IsOpen && database.Generation = this.generation
-            let mutable failure = if suppressPrimary then null else primary
-            if current && not (isNull primary) && not (isNull this.observer) then
-                try this.observer.Failed(primary) with _ -> ()
-            if this.statement.HasStatement then
-                this.statement.AdvanceRow()
-                try
-                    let result = raw.sqlite3_reset(this.statement.Handle)
-                    if current then
-                        database.ObserveStatementCompletion()
-                        if isNull primary && isNull failure then database.Check(result)
-                with error -> if isNull failure then failure <- error
-                try
-                    let result = this.statement.ClearBindings()
-                    if current && isNull failure then database.Check(result)
-                with error -> if isNull failure then failure <- error
-            if current && not (isNull this.observer) then
-                if notifyAfter && isNull failure then
-                    try this.observer.After() with error -> failure <- error
-                try this.observer.Restore(this.checkpoint) with error -> if isNull failure then failure <- error
-            try this.cache.Release(this.statement, this.borrow) with error -> if isNull failure then failure <- error
-            if current && not (isNull failure) && (isNull primary || suppressPrimary) && not (isNull this.observer) then
-                try this.observer.Failed(failure) with _ -> ()
-            if not (isNull failure) then ExceptionDispatchInfo.Capture(failure).Throw()
+            try
+                this.closed <- true
+                let database = this.cache.Database
+                let current = database.IsOpen && database.Generation = this.generation
+                let mutable failure = if suppressPrimary then null else primary
+                if current && not (isNull primary) && not (isNull this.observer) then
+                    try this.observer.Failed(primary) with _ -> ()
+                if this.statement.HasStatement then
+                    this.statement.AdvanceRow()
+                    try
+                        this.cache.Database.BeginStorageOperation()
+                        let result = raw.sqlite3_reset(this.statement.Handle)
+                        if current then
+                            database.ObserveStatementCompletion()
+                            if isNull primary && isNull failure then database.Check(result)
+                    with error -> if isNull failure then failure <- error
+                    try
+                        let result = this.statement.ClearBindings()
+                        if current && isNull failure then database.Check(result)
+                    with error -> if isNull failure then failure <- error
+                if current && not (isNull this.observer) then
+                    if notifyAfter && isNull failure then
+                        try this.observer.After() with error -> failure <- error
+                    try this.observer.Restore(this.checkpoint) with error -> if isNull failure then failure <- error
+                try this.cache.Release(this.statement, this.borrow) with error -> if isNull failure then failure <- error
+                if current && not (isNull failure) && (isNull primary || suppressPrimary) && not (isNull this.observer) then
+                    try this.observer.Failed(failure) with _ -> ()
+                if not (isNull failure) then ExceptionDispatchInfo.Capture(failure).Throw()
+            finally if not(isNull this.lifetime) then this.lifetime.Dispose()
     member this.Finish(primary: exn, notifyAfter: bool) = this.Finish(primary, notifyAfter, false)
     member this.FinishFailedTail(error: exn) = this.Finish(error, false, true)
     member this.Abort(error: exn) =

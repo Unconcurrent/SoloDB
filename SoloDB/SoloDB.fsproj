@@ -173,6 +173,12 @@
     <Compile Include="Json/JsonStoredNumericRuntime.fs" />
     <Compile Include="Metadata/JsonOperations.fs" />
     <Compile Include="Metadata/RelationAccessors.fs" />
+    <Compile Include="Storage/Storage.Types.fs" />
+    <Compile Include="Storage/Storage.Stream.fs" />
+    <Compile Include="Storage/Storage.Native.fs" />
+    <Compile Include="Storage/Storage.Files.fs" />
+    <Compile Include="Storage/Storage.Vfs.fs" />
+    <Compile Include="Storage/Storage.Source.fs" />
     <Compile Include="SQLiteNative/SQLiteNative.Engine.fs" />
     <Compile Include="Events/CallbackSlots.fs" />
     <Compile Include="SQLiteNative/SQLiteNative.TextEncoding.fs" />

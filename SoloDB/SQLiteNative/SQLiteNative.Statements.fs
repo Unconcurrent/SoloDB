@@ -62,6 +62,7 @@ type internal NativeColumnLayout(names: string[]) =
 
 [<Sealed>]
 type internal NativePreparedStatement(database: NativeDatabase, handle: sqlite3_stmt, text: string, bytes: byte[], startOffset: int, endOffset: int, cacheEligible: bool) =
+    let lifetime = database.RetainStatementUse()
     let mutable names: string[] = null
     let mutable unprefixedNames: string[] = null
     let mutable slots: Dictionary<string, int> = null
@@ -202,9 +203,12 @@ type internal NativePreparedStatement(database: NativeDatabase, handle: sqlite3_
             bindingTarget.Finish()
         finally bindingTarget.End()
     member _.Dispose() =
-        rowVersion <- rowVersion + 1L
-        if not (isNull handle) && not handle.IsClosed && not handle.IsInvalid then
-            let result = raw.sqlite3_finalize(handle)
-            if database.IsOpen && database.Generation = generation then database.Check(result)
-            elif result <> raw.SQLITE_OK then raise (NativeSqliteException.FromResult(null, result))
+        try
+            rowVersion <- rowVersion + 1L
+            if not(isNull handle) && not handle.IsClosed && not handle.IsInvalid then
+                database.BeginStorageOperation()
+                let result = raw.sqlite3_finalize(handle)
+                if database.IsOpen && database.Generation = generation then database.Check(result)
+                elif result <> raw.SQLITE_OK then raise(NativeSqliteException.FromResult(null, result))
+        finally if not(isNull lifetime) then lifetime.Dispose()
     interface IDisposable with member this.Dispose() = this.Dispose()

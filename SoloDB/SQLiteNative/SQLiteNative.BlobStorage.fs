@@ -12,6 +12,7 @@ type internal NativeBlobState =
     { Database: NativeDatabase
       Generation: int64
       Handle: sqlite3_blob
+      Lifetime: NativeLifetimeUse
       Length: int64
       ReadOnly: bool
       mutable Position: int64
@@ -19,15 +20,20 @@ type internal NativeBlobState =
 
 module internal NativeBlobAccess =
     let openBlob (database: NativeDatabase) (databaseName: string) (tableName: string) (columnName: string) (rowid: int64) (readOnly: bool) =
+        let lifetime = database.RetainUse()
         let mutable handle: sqlite3_blob = null
-        let result = raw.sqlite3_blob_open(database.Handle, databaseName, tableName, columnName, rowid, (if readOnly then 0 else 1), &handle)
-        if result <> raw.SQLITE_OK then
-            let failure = NativeSqliteException.FromResult(database.Handle, result)
-            if not (isNull handle) then handle.Dispose()
-            raise failure
-        { Database = database; Generation = database.Generation; Handle = handle
-          Length = int64 (raw.sqlite3_blob_bytes handle); ReadOnly = readOnly
-          Position = 0L; Disposed = false }
+        try
+            database.BeginStorageOperation()
+            let result = raw.sqlite3_blob_open(database.Handle, databaseName, tableName, columnName, rowid, (if readOnly then 0 else 1), &handle)
+            if result <> raw.SQLITE_OK then raise(database.Error(result))
+            database.CheckStorageOperation()
+            { Database = database; Generation = database.Generation; Handle = handle; Lifetime = lifetime
+              Length = int64(raw.sqlite3_blob_bytes handle); ReadOnly = readOnly
+              Position = 0L; Disposed = false }
+        with _ ->
+            try if not(isNull handle) then handle.Dispose()
+            finally if not(isNull lifetime) then lifetime.Dispose()
+            reraise()
     let check (state: inref<NativeBlobState>) =
         if state.Disposed then raise (ObjectDisposedException("NativeSqliteBlob"))
         state.Database.EnsureGeneration(state.Generation)
@@ -35,6 +41,7 @@ module internal NativeBlobAccess =
         check &state
         let count = int (max 0L (min (int64 buffer.Length) (state.Length - state.Position)))
         if count > 0 then
+            state.Database.BeginStorageOperation()
             state.Database.Check(raw.sqlite3_blob_read(state.Handle, buffer.Slice(0, count), int state.Position))
             state.Position <- state.Position + int64 count
         count
@@ -42,6 +49,7 @@ module internal NativeBlobAccess =
         check &state
         if state.ReadOnly then raise (NotSupportedException("The blob is read-only."))
         if int64 buffer.Length > state.Length - state.Position then raise (NotSupportedException("SQLite blobs cannot be resized."))
+        state.Database.BeginStorageOperation()
         state.Database.Check(raw.sqlite3_blob_write(state.Handle, buffer, int state.Position))
         state.Position <- state.Position + int64 buffer.Length
     let position (state: byref<NativeBlobState>, value: int64) =
@@ -62,11 +70,14 @@ module internal NativeBlobAccess =
     let close (state: byref<NativeBlobState>, disposing: bool) =
         if not state.Disposed then
             state.Disposed <- true
-            let result = raw.sqlite3_blob_close state.Handle
-            if state.Database.IsOpen && state.Database.Generation = state.Generation then state.Database.ObserveStatementCompletion()
-            if disposing && result <> raw.SQLITE_OK then
-                if state.Database.IsOpen && state.Database.Generation = state.Generation then state.Database.Check result
-                else raise (NativeSqliteException.FromResult(null, result))
+            try
+                state.Database.BeginStorageOperation()
+                let result = raw.sqlite3_blob_close state.Handle
+                if state.Database.IsOpen && state.Database.Generation = state.Generation then state.Database.ObserveStatementCompletion()
+                if disposing then
+                    if state.Database.IsOpen && state.Database.Generation = state.Generation then state.Database.Check result
+                    elif result <> raw.SQLITE_OK then raise(NativeSqliteException.FromResult(null, result))
+            finally if not(isNull state.Lifetime) then state.Lifetime.Dispose()
 
 
 /// The physical stream owns one incremental handle and its generation.

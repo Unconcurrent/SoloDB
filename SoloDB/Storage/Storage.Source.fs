@@ -1,0 +1,307 @@
+namespace SoloDatabase
+
+open System
+open System.Collections.Generic
+open System.Diagnostics
+open System.IO
+open System.Threading
+
+/// A physical open's explicit first-fault channel. Backup may install a shared
+/// operation sink on both endpoints; no ambient or process-wide last error exists.
+[<Sealed>]
+type internal StorageFaultChannel() =
+    let gate = obj()
+    let mutable first: struct (int * exn) voption = ValueNone
+    let mutable sink: Action<int,exn> = null
+    member _.Record(code, cause) =
+        let target =
+            lock gate (fun () ->
+                if isNull sink && first.IsNone then first <- ValueSome(struct (code, cause))
+                sink)
+        if not(isNull target) then target.Invoke(code, cause)
+    member _.Take() = lock gate (fun () -> let value = first in first <- ValueNone; value)
+    member _.Clear() = lock gate (fun () -> first <- ValueNone)
+    member _.UseSink(target: Action<int,exn>) =
+        let previous = lock gate (fun () -> let previous = sink in sink <- target; previous)
+        let mutable active = 1
+        { new IDisposable with
+            member _.Dispose() =
+                if Interlocked.Exchange(&active, 0) = 1 then lock gate (fun () -> sink <- previous) }
+
+/// Released only by the physical native owner after successful native close.
+[<Sealed>]
+type internal SqliteStorageLease(name: string, filename: string, profile: SqliteStorageProfile, native: bool,
+                                vfs: IDisposable, faults: StorageFaultChannel,
+                                report: exn -> unit, release: unit -> unit) =
+    let gate = obj()
+    let mutable close: Action = null
+    let mutable pending = false
+    let mutable completed = false
+    member _.Name = name
+    member _.Filename = filename
+    member _.Profile = profile
+    member _.IsNative = native
+    member _.Faults = faults
+    member _.Report(error) = report error
+    member _.RequestClose() =
+        let action = lock gate (fun () -> pending <- true; if completed then null else close)
+        if not(isNull action) then action.Invoke()
+    member _.SetCloseRequest(action: Action) =
+        let requested = lock gate (fun () -> close <- action; pending && not completed)
+        if requested then action.Invoke()
+    member _.Complete() =
+        let claimed =
+            lock gate (fun () ->
+                if completed then false
+                else completed <- true; close <- null; true)
+        if claimed then
+            try
+                if not(isNull vfs) then
+                    try vfs.Dispose() with error -> report error
+            finally release()
+
+module private StorageInput =
+    let distinct profile (files: ISqliteStorageFile[]) =
+        for i = 0 to files.Length - 1 do
+            if isNull (box files.[i]) then nullArg (if i = 0 then "main" elif profile = SqliteStorageProfile.Simple then "journal" else "log")
+            for j = 0 to i - 1 do
+                let identical =
+                    Object.ReferenceEquals(files.[i], files.[j]) ||
+                    match files.[i], files.[j] with
+                    | (:? StreamStorageFile as a), (:? StreamStorageFile as b) -> Object.ReferenceEquals(a.StreamIdentity, b.StreamIdentity)
+                    | _ -> false
+                if identical then invalidArg "files" "Each logical role requires an independent file view."
+    let stream name writable (file: Stream) =
+        if isNull file then nullArg name
+        if not file.CanSeek || not file.CanRead || (writable && not file.CanWrite) then
+            invalidArg name "Storage requires a readable, seekable Stream and write access for a writable profile."
+    let adapters profile writable leaveOpen (streams: Stream[]) =
+        for i = 0 to streams.Length - 1 do
+            stream (if i = 0 then "main" elif profile = SqliteStorageProfile.Simple then "journal" else "log") writable streams.[i]
+            for j = 0 to i - 1 do
+                if Object.ReferenceEquals(streams.[i], streams.[j]) then
+                    invalidArg "streams" "Each logical role requires an independent Stream cursor."
+        let acquired = ResizeArray<StreamStorageFile>()
+        try
+            for stream in streams do acquired.Add(new StreamStorageFile(stream, leaveOpen, writable))
+            acquired.ToArray()
+        with _ ->
+            for adapter in acquired do try (adapter :> IDisposable).Dispose() with _ -> ()
+            reraise()
+    let seed () =
+        // SQLite fileformat.html sections 1.2 and 1.6: one empty leaf table page.
+        let page = Array.zeroCreate<byte> 4096
+        Text.Encoding.ASCII.GetBytes("SQLite format 3\000").CopyTo(page, 0)
+        page.[16] <- 0x10uy
+        page.[18] <- 2uy
+        page.[19] <- 2uy
+        page.[21] <- 64uy
+        page.[22] <- 32uy
+        page.[23] <- 32uy
+        page.[27] <- 1uy
+        page.[31] <- 1uy
+        page.[95] <- 1uy
+        let version = StorageNative.sqlite3_libversion_number()
+        for i = 0 to 3 do page.[96 + i] <- byte(version >>> (24 - i * 8))
+        page.[100] <- 0x0Duy
+        page.[105] <- 0x10uy
+        page
+
+/// A single-use storage input. Dispose deterministically; abandoned native callback
+/// cycles may retain all resources. Positional files and Native registrations are borrowed.
+[<Sealed>]
+type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorageFile[], owned: IDisposable[],
+                            coordination: SqliteStorageCoordination, sectorSize: int,
+                            native: (string * string) option) =
+    let gate = obj()
+    let mutable nodes = files |> Array.map StorageNode
+    let mutable ownedResources = owned
+    let identity = "solodb-storage-" + Guid.NewGuid().ToString("N")
+    let leases = HashSet<SqliteStorageLease>()
+    let mutable used = false
+    let mutable retired = false
+    let mutable references = 0
+    let mutable cleanupState = 0
+    let mutable rootClose: Action = null
+    let mutable closingFailure: exn = null
+    let report error = lock gate (fun () -> if isNull closingFailure then closingFailure <- error)
+    let cleanup () =
+        let resources =
+            lock gate (fun () ->
+                if retired && references = 0 && cleanupState = 0 then
+                    cleanupState <- 1
+                    let resources = ownedResources
+                    ownedResources <- Array.empty
+                    nodes <- Array.empty
+                    ValueSome resources
+                else ValueNone)
+        match resources with
+        | ValueNone -> ()
+        | ValueSome resources ->
+            try
+                for resource in resources do
+                    try resource.Dispose() with error -> report error
+            finally lock gate (fun () -> cleanupState <- 2)
+    let retire () =
+        let pending =
+            lock gate (fun () ->
+                retired <- true
+                rootClose <- null
+                leases |> Seq.toArray)
+        for lease in pending do
+            try lease.RequestClose() with error -> report error
+        cleanup()
+    let inspect () =
+        lock nodes.[0].Gate (fun () ->
+            let mainLength = StorageFiles.length nodes.[0]
+            let logLength = if profile = SqliteStorageProfile.Wal then lock nodes.[1].Gate (fun () -> StorageFiles.length nodes.[1]) else 0L
+            struct (mainLength, logLength))
+    let validateHeader () =
+        lock nodes.[0].Gate (fun () ->
+            if StorageFiles.length nodes.[0] >= 100L then
+                let header = Array.zeroCreate<byte> 100
+                let read = StorageFiles.read nodes.[0] 0L (Span<byte>(header))
+                let signature = Text.Encoding.ASCII.GetBytes("SQLite format 3\000")
+                if read = 100 && header.AsSpan(0, 16).SequenceEqual(ReadOnlySpan<byte>(signature)) then
+                    if profile = SqliteStorageProfile.Wal &&
+                       (header.[16] <> 0x10uy || header.[17] <> 0uy || header.[18] <> 2uy || header.[19] <> 2uy) then
+                        raise(StorageConfigurationError("WAL storage requires an existing 4096-byte WAL image. Import another image through BackupTo."))
+                    if profile = SqliteStorageProfile.Simple && (header.[18] = 2uy || header.[19] = 2uy) then
+                        raise(StorageConfigurationError("Simple storage requires a rollback-journal image. Import a WAL image through BackupTo.")))
+    let initialize timeout (state: StorageHandle) =
+        if profile = SqliteStorageProfile.ReadOnly then 0 else
+        let timer = Stopwatch.StartNew()
+        let limit = if timeout > 0 then timeout else 30
+        let mutable result = 5
+        let mutable finished = false
+        while not finished do
+            result <- StorageFiles.lockFile state 1
+            try
+                if result = 0 then
+                    let struct (main, log) = inspect()
+                    if profile = SqliteStorageProfile.Wal && main = 0L && log = 0L then
+                        result <- StorageFiles.lockFile state 4
+                        if result = 0 then
+                            let struct (main, log) = inspect()
+                            if main = 0L && log = 0L then
+                                let page = StorageInput.seed()
+                                lock nodes.[0].Gate (fun () ->
+                                    nodes.[0].File.WriteAt(0L, ReadOnlySpan<byte>(page)) |> StorageFiles.check
+                                    nodes.[0].File.Flush() |> StorageFiles.check)
+                            else validateHeader()
+                    else validateHeader()
+            finally
+                // In particular, release our own SHARED/PENDING grants before a
+                // bounded upgrade retry; two empty openers cannot block each other.
+                let unlocked = StorageFiles.unlock state 0
+                if result = 0 then result <- unlocked
+            finished <- result <> 5 || timer.Elapsed.TotalSeconds >= float limit
+            if not finished then Thread.Sleep(1)
+        result
+    do
+        StorageValidation.profile profile
+        StorageValidation.sectorSize sectorSize
+        StorageInput.distinct profile files
+    member _.Profile = profile
+    member _.ClosingFailure = lock gate (fun () -> closingFailure)
+    member _.IsClosed = lock gate (fun () -> retired && references = 0 && cleanupState = 2)
+    member internal _.IsNative = native.IsSome
+    member internal _.ReportClosingFailure(error: exn) = report error
+    member internal _.Identity = identity
+    member internal _.IsRetired = lock gate (fun () -> retired)
+    member internal _.Attach() =
+        lock gate (fun () ->
+            if retired then raise(ObjectDisposedException("SqliteStorage"))
+            if used then invalidOp "A SqliteStorage input can be attached only once."
+            used <- true)
+        let mutable active = 1
+        { new IDisposable with
+            member _.Dispose() = if Interlocked.Exchange(&active, 0) = 1 then retire() }
+    member internal _.BindRootClose(action: Action) =
+        let closing =
+            lock gate (fun () ->
+                if not retired then rootClose <- action
+                retired)
+        if closing then action.Invoke()
+    member internal _.Acquire(timeout: int) =
+        lock gate (fun () ->
+            if retired || not used then raise(ObjectDisposedException("SqliteStorage"))
+            references <- references + 1)
+        let faults = StorageFaultChannel()
+        let mutable registration: IDisposable = null
+        let mutable lease: SqliteStorageLease = Unchecked.defaultof<_>
+        let release () =
+            lock gate (fun () ->
+                if not(isNull (box lease)) then leases.Remove(lease) |> ignore
+                references <- references - 1)
+            cleanup()
+        try
+            StorageNative.verifyProvider()
+            let name, filename =
+                match native with
+                | Some(filename, name) ->
+                    StorageNativeVfs(name) |> ignore
+                    name, filename
+                | None ->
+                    let name = identity + "-" + Guid.NewGuid().ToString("N")
+                    let vfs = new ManagedStorageVfs(name, identity, nodes, profile, sectorSize, coordination,
+                                                    Action<int,exn>(fun code cause -> faults.Record(code, cause)), initialize timeout)
+                    registration <- vfs
+                    name, (if profile = SqliteStorageProfile.ReadOnly then "file:" + identity + "?immutable=1" else identity)
+            lease <- SqliteStorageLease(name, filename, profile, native.IsSome, registration, faults, report, release)
+            let closing = lock gate (fun () -> leases.Add(lease) |> ignore; retired)
+            if closing then lease.RequestClose()
+            lease
+        with _ ->
+            if not(isNull registration) then try registration.Dispose() with error -> report error
+            release()
+            reraise()
+    member _.Dispose() =
+        let action = lock gate (fun () -> rootClose)
+        if not(isNull action) then
+            try action.Invoke() with error -> report error
+            if not(lock gate (fun () -> retired)) then retire() else cleanup()
+        else retire()
+    interface IDisposable with member this.Dispose() = this.Dispose()
+    static member private Managed(profile, files, owned, coordination, sectorSize) =
+        new SqliteStorage(profile, files, owned, coordination, sectorSize, None)
+    static member private Streams(profile, streams, leaveOpen, coordination, sectorSize) =
+        StorageValidation.sectorSize sectorSize
+        let adapters = StorageInput.adapters profile (profile <> SqliteStorageProfile.ReadOnly) leaveOpen streams
+        try SqliteStorage.Managed(profile, adapters |> Array.map (fun f -> f :> ISqliteStorageFile),
+                                  adapters |> Array.map (fun f -> f :> IDisposable), coordination, sectorSize)
+        with _ ->
+            for adapter in adapters do try (adapter :> IDisposable).Dispose() with _ -> ()
+            reraise()
+    static member Native(filename: string, registeredVfs: string, profile: SqliteStorageProfile) =
+        StorageValidation.filename "filename" filename
+        StorageValidation.filename "registeredVfs" registeredVfs
+        new SqliteStorage(profile, Array.empty, Array.empty, null, 4096, Some(filename, registeredVfs))
+    static member Simple(main: ISqliteStorageFile, journal: ISqliteStorageFile) =
+        SqliteStorage.Simple(main, journal, null, 4096)
+    static member Simple(main: ISqliteStorageFile, journal: ISqliteStorageFile, coordination: SqliteStorageCoordination) =
+        SqliteStorage.Simple(main, journal, coordination, 4096)
+    static member Simple(main: ISqliteStorageFile, journal: ISqliteStorageFile, coordination: SqliteStorageCoordination, sectorSize: int) =
+        SqliteStorage.Managed(SqliteStorageProfile.Simple, [|main; journal|], Array.empty, coordination, sectorSize)
+    static member Wal(main: ISqliteStorageFile, log: ISqliteStorageFile) =
+        SqliteStorage.Wal(main, log, null, 4096)
+    static member Wal(main: ISqliteStorageFile, log: ISqliteStorageFile, coordination: SqliteStorageCoordination) =
+        SqliteStorage.Wal(main, log, coordination, 4096)
+    static member Wal(main: ISqliteStorageFile, log: ISqliteStorageFile, coordination: SqliteStorageCoordination, sectorSize: int) =
+        SqliteStorage.Managed(SqliteStorageProfile.Wal, [|main; log|], Array.empty, coordination, sectorSize)
+    static member ReadOnly(main: ISqliteStorageFile) =
+        SqliteStorage.Managed(SqliteStorageProfile.ReadOnly, [|main|], Array.empty, null, 4096)
+    static member Simple(main: Stream, journal: Stream, leaveOpen: bool) =
+        SqliteStorage.Simple(main, journal, leaveOpen, null, 4096)
+    static member Simple(main: Stream, journal: Stream, leaveOpen: bool, coordination: SqliteStorageCoordination) =
+        SqliteStorage.Simple(main, journal, leaveOpen, coordination, 4096)
+    static member Simple(main: Stream, journal: Stream, leaveOpen: bool, coordination: SqliteStorageCoordination, sectorSize: int) =
+        SqliteStorage.Streams(SqliteStorageProfile.Simple, [|main; journal|], leaveOpen, coordination, sectorSize)
+    static member Wal(main: Stream, log: Stream, leaveOpen: bool) =
+        SqliteStorage.Wal(main, log, leaveOpen, null, 4096)
+    static member Wal(main: Stream, log: Stream, leaveOpen: bool, coordination: SqliteStorageCoordination) =
+        SqliteStorage.Wal(main, log, leaveOpen, coordination, 4096)
+    static member Wal(main: Stream, log: Stream, leaveOpen: bool, coordination: SqliteStorageCoordination, sectorSize: int) =
+        SqliteStorage.Streams(SqliteStorageProfile.Wal, [|main; log|], leaveOpen, coordination, sectorSize)
+    static member ReadOnly(main: Stream, leaveOpen: bool) =
+        SqliteStorage.Streams(SqliteStorageProfile.ReadOnly, [|main|], leaveOpen, null, 4096)

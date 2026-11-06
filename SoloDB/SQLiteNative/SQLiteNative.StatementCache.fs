@@ -77,13 +77,14 @@ type private NativePreparation =
 
 /// Fixed statements and script segments share one cache and one native preparation path.
 [<Sealed>]
-type internal NativeStatementCache(database: NativeDatabase) =
+type internal NativeStatementCache(database: NativeDatabase) as this =
     let entries = Dictionary<struct (string * int), NativePreparedStatement>()
     let gate = obj()
     let mutable created = 0
     let mutable disposed = 0
     let mutable configuration: Types.SoloDBConfiguration = { CachingEnabled = true }
     let mutable activeBorrows = 0
+    let mutable closing = false
     let mutable schemaProbeCount = 0
     let mutable schemaProbeBorrows = 0L
     let dispose (statement: NativePreparedStatement) =
@@ -92,7 +93,9 @@ type internal NativeStatementCache(database: NativeDatabase) =
     let retire (statement: NativePreparedStatement) =
         statement.Retired <- true
         if not statement.InUse then dispose statement
+    do database.SetStatementRetirement(Action(fun () -> this.Retire()))
     member _.Database = database
+    member _.Reopen() = lock gate (fun () -> closing <- false)
     member _.BeginSchemaProbe() = lock gate (fun () -> schemaProbeCount <- schemaProbeCount + 1; schemaProbeBorrows)
     member _.EndSchemaProbe() = lock gate (fun () -> schemaProbeCount <- schemaProbeCount - 1)
     member _.SchemaProbeBorrows = lock gate (fun () -> schemaProbeBorrows)
@@ -124,15 +127,17 @@ type internal NativeStatementCache(database: NativeDatabase) =
             if not preparation.Preparing then
                 preparation.Started <- Stopwatch.GetTimestamp()
                 preparation.Preparing <- true
+            database.BeginStorageOperation()
             let result = raw.sqlite3_prepare_v2(database.Handle, remaining, &preparation.Handle, &tail)
+            database.CheckStorageOperation()
             database.EnsureGeneration(preparation.Generation)
             if NativeExecution.isLocked result then
                 if not (budget.CanRetry(preparation.Started)) then
-                    raise (NativeSqliteException.FromResult(database.Handle, result))
+                    raise(database.Error(result))
                 preparation.Dispose()
                 blocked <- true
             elif result <> raw.SQLITE_OK then
-                raise (NativeSqliteException.FromResult(database.Handle, result))
+                raise(database.Error(result))
             else
                 let pointer = Unsafe.AsPointer(&Unsafe.AsRef(&tail.GetPinnableReference())) |> NativePtr.ofVoidPtr<byte> |> NativePtr.toNativeInt
                 let consumed = int (pointer - NativePtr.toNativeInt pinned) - position
@@ -141,7 +146,7 @@ type internal NativeStatementCache(database: NativeDatabase) =
         if blocked then ValueNone else
         let entry = new NativePreparedStatement(database, preparation.Handle, preparation.Sql, preparation.Bytes, preparation.Offset, preparation.Position, preparation.Eligible)
         let key = struct (preparation.Sql, preparation.Offset)
-        if preparation.Cacheable && not (entries.ContainsKey(key)) then
+        if preparation.Cacheable && not database.IsRetiring && not closing && not (entries.ContainsKey(key)) then
             if entries.Count >= 1000 then
                 let oldest = entries |> Seq.toArray
                 Array.sortInPlaceBy (fun (pair: KeyValuePair<struct (string * int), NativePreparedStatement>) -> pair.Value.Calls) oldest
@@ -164,7 +169,7 @@ type internal NativeStatementCache(database: NativeDatabase) =
         preparation.Sql <- sql
         preparation.Retained <- preparation.Source.RetainedHandle
         preparation.Eligible <- preparation.Source.CacheEligible
-        preparation.Cacheable <- Volatile.Read(&configuration.CachingEnabled) && preparation.Eligible
+        preparation.Cacheable <- not closing && not database.IsRetiring && Volatile.Read(&configuration.CachingEnabled) && preparation.Eligible
         let key = struct (sql, preparation.Offset)
         preparation.Remembered <-
             match preparation.Retained with
@@ -262,3 +267,8 @@ type internal NativeStatementCache(database: NativeDatabase) =
             for statement in previous do
                 try retire statement with error -> if isNull failure then failure <- error
             if not (isNull failure) then Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw())
+
+    member this.Retire() =
+        lock gate (fun () ->
+            closing <- true
+            this.Clear())
