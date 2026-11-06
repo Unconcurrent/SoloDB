@@ -110,7 +110,7 @@ using var db = new SoloDB(storage);
 
 This uses native operating-system locks and shared memory on one host. It does not make arbitrary remote storage safe to share, and the generic FileStream flush in this example does not prove power-loss durability.
 
-While two database instances are open:
+When another `SqliteStorage` object has not finished with the files (`IsClosed` is false):
 
 - Open a separate Stream or `ISqliteStorageFile` object for each instance. Do not share the same object or hide it behind different wrappers.
 - Point every main stream at the same main bytes, and every log stream at the same log bytes.
