@@ -41,7 +41,7 @@ public sealed class Article
 
 `EnsureSearchIndex(builder => ...)` declares the index named `default` at version 1. `EnsureSearchIndex(name, builder => ...)` also uses version 1. `Search(text)` and `Search(query)` use `default`; `SearchIn(name, ...)` selects another index.
 
-Field selectors must follow fixed stored members to a string. Method calls, array/indexer traversal and reference traversal are unsupported. Stored names follow the model's serializer. A missing, null or nontext stored value contributes empty text. A stored path can have several distinct aliases and weights. Aliases follow SQLite identifier comparison; `rank` and `rowid` are reserved. Weights must be finite; negative and zero weights are valid. Null required arguments raise `ArgumentNullException`. Definition versions are signed integer labels; a larger version advances a declaration. Index names are stored as text, including empty names or names containing NUL.
+Field selectors must follow fixed stored members to a string. Method calls, array/indexer traversal and reference traversal are unsupported. To search computed text or tags, store the intended searchable text in a string member and update it with the document. Stored names follow the model's serializer. A missing, null or nontext stored value contributes empty text. A stored path can have several distinct aliases and weights. Aliases follow SQLite identifier comparison; `rank` and `rowid` are reserved. Weights must be finite; negative and zero weights are valid. Null required arguments raise `ArgumentNullException`. Definition versions are signed integer labels; a larger version advances a declaration. Index names are stored as text, including empty names or names containing NUL.
 
 The builder defaults to `SearchTextStorage.Shared` and tokenizer `unicode61`. Set `Storage`, `Tokenizer` and `PrefixLengths` during configuration:
 
@@ -69,7 +69,7 @@ Prefix lengths are positive, copied, sorted and deduplicated. Tokenizer text is 
 | `TypeAhead(text)` | Require all chunks; prefix the last nonempty chunk, including after trailing whitespace. |
 | `Fts5Syntax(text)` | Use SQLite's FTS5 grammar directly. |
 
-Literal factories escape quotes and do not interpret Boolean operators from the input. Empty literal searches return no hits. Null text is rejected. Factories other than `AllWords` and `TypeAhead` reject NUL. Raw syntax retains SQLite's parsing and errors:
+Literal factories escape quotes and do not interpret Boolean operators from the input. Empty literal searches return no hits. Null text is rejected. Factories other than `AllWords` and `TypeAhead` reject NUL. Use `AllWords` or `TypeAhead` when NUL should separate literal chunks. Raw syntax retains SQLite's parsing and errors:
 
 ```csharp
 var matches = articles.SearchIn("text",
@@ -96,6 +96,8 @@ var find = articles.Compile((IQueryable<Article> source, string text, int tokens
 var first = find("sqlite", 24).ToArray();
 var second = find("journal", 16).ToArray();
 ```
+
+All Search sources in one compiled query must belong to the same database. Search separate databases independently and combine their materialized results in application code; select any needed Text/Snippet strings before materializing.
 
 Retain the function. Text, markers and token counts supplied as arguments bind on invocation; enumeration reads current rows. A transactional collection can compile and execute within its transaction callback; finish every enumeration before that callback returns. The index name and declaration are fixed when compiling. An ordinary query resolves the current declaration when executed. A retained query never silently switches to a replacement declaration: recompile after replacing or dropping its index. Rebuild keeps the declaration identity.
 
