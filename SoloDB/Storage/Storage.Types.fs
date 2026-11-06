@@ -11,6 +11,8 @@ type internal StorageObjectState() =
     member val References = 0 with get,set
     member val CloseRequested = false with get,set
     member val Closing = false with get,set
+    // Storage.Files supplies the domain after its native handle types are defined.
+    member val PrivateDomain: obj = null with get,set
 
 module internal StorageObjects =
     let private states = ConditionalWeakTable<obj, StorageObjectState>()
@@ -96,7 +98,7 @@ type StorageIOException(kind: StorageFailureKind, message: string, cause: exn) =
     member _.Kind = kind
 
 /// Reusable same-host coordination configuration. Each physical open acquires its own session.
-/// Participants use independent coherent byte views and the same dedicated identity, which
+/// Participants expose coherent bytes and use the same dedicated identity, which
 /// must not be independently closed, unlinked or replaced while participation continues.
 [<Sealed; AllowNullLiteral>]
 type SqliteStorageCoordination private (filename: string, registeredVfs: string) =

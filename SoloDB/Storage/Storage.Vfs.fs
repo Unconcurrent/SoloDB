@@ -9,7 +9,7 @@ open StorageNative
 #nowarn "9"
 
 /// One native registration per physical connection; byte views/private locks belong
-/// to the description. Disposal is permitted only after actual native close returns.
+/// to actual supplied objects. Dispose only after actual native close returns.
 [<Sealed>]
 type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNode[], profile: SqliteStorageProfile,
                               coordination: SqliteStorageCoordination,
@@ -152,7 +152,7 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                                 let mutable attached = false
                                 let mutable root = Unchecked.defaultof<GCHandle>
                                 try
-                                    lock node.Gate (fun () -> node.Handles.Add(state))
+                                    StorageFiles.attach state
                                     attached <- true
                                     let result = if logical = 0 then initialize state else 0
                                     if result <> 0 then
@@ -167,9 +167,12 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                                         if output <> 0n then
                                             Marshal.WriteInt32(output, flags)
                                         0
-                                with _ ->
+                                with error ->
                                     if root.IsAllocated then root.Free()
-                                    if attached then StorageFiles.close state |> ignore
+                                    try
+                                        if attached then StorageFiles.close state |> ignore
+                                        else native |> Option.iter (fun file -> file.Close() |> ignore)
+                                    with cleanup -> error.Data.["SoloDB.OpenCleanupException"] <- cleanup
                                     reraise())))
             set 4 (Path(fun _ path sync -> protect 2570 (fun () ->
                 let logical = role(text path)

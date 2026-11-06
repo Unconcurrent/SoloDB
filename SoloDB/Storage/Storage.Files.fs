@@ -10,17 +10,28 @@ type internal StorageFileError(failure: StorageFailure) =
     inherit IO.IOException("The storage operation failed.", failure.Cause)
     member _.Failure = failure
 
-/// A coherent byte view and its private SQLite coordination domain.
-type internal StorageNode(file: ISqliteStorageFile) =
-    member _.File = file
-    member val Gate =
-        match file with
-        | :? StreamStorageFile as stream -> stream.Gate
-        | _ when isNull (box file) -> obj() // The input validates its named role.
-        | _ -> (StorageObjects.get file).Gate
+/// Shared SQLite lock and WAL-index ownership for one actual supplied byte object.
+type internal StorageDomain() =
     member val Handles = ResizeArray<StorageHandle>()
     member val Regions = ResizeArray<nativeint>()
     member val RegionSize = 0 with get,set
+and internal StorageNode(file: ISqliteStorageFile) =
+    let identity =
+        match file with
+        | :? StreamStorageFile as stream -> stream.StreamIdentity :> obj
+        | _ -> box file
+    let state =
+        if isNull identity then StorageObjectState() // The input validates its named role.
+        else StorageObjects.get identity
+    let domain =
+        lock state.Gate (fun () ->
+            if isNull state.PrivateDomain then state.PrivateDomain <- StorageDomain()
+            state.PrivateDomain :?> StorageDomain)
+    member _.File = file
+    member _.Gate = state.Gate
+    member _.Handles = domain.Handles
+    member _.Regions = domain.Regions
+    member _.RegionSize with get() = domain.RegionSize and set value = domain.RegionSize <- value
 and internal StorageHandle(node: StorageNode, flags: int, coordination: StorageNativeFile option) =
     member _.Node = node
     member _.Flags = flags
@@ -57,6 +68,16 @@ module internal StorageFiles =
             if not(Object.ReferenceEquals(peer, state)) && predicate peer then found <- true
             i <- i + 1
         found
+    let attach (state: StorageHandle) =
+        lock state.Node.Gate (fun () ->
+            for peer in state.Node.Handles do
+                let main = state.Flags &&& 0x100 <> 0
+                let peerMain = peer.Flags &&& 0x100 <> 0
+                if main <> peerMain then
+                    raise(StorageConfigurationError("One live backing cannot be both the database and its journal or log."))
+                if main && state.Coordination.IsSome <> peer.Coordination.IsSome then
+                    raise(StorageConfigurationError("Participants sharing one live backing must use the same private or File coordination."))
+            state.Node.Handles.Add(state))
     let lockFile (state: StorageHandle) level =
         match state.Coordination with
         | Some native -> native.Lock(level)

@@ -24,7 +24,7 @@ open System.Collections.Concurrent
 /// The main database class, representing a single SQLite database file or in-memory instance.
 /// Provides access to collections and file system storage.
 /// </summary>
-type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration, eventSystem: EventSystem, storage: SqliteStorage option, attachment: StorageRootLease) =
+type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration, eventSystem: EventSystem, attachment: StorageRootLease) =
     let mutable disposed = false
     // Serializes DDL operations (InitializeCollection, DropCollectionIfExists) to prevent
     // collection initialization and removal from observing incomplete schema changes.
@@ -61,7 +61,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     error.Data.["SoloDB.InitializationCleanupException"] <- cleanup
                 reraise ()
 
-        new SoloDB(manager, connectionString, location, defaultConfig, eventSystem, None, null)
+        new SoloDB(manager, connectionString, location, defaultConfig, eventSystem, null)
 
     /// Opens a shared storage input. Dispose the database and every borrowed
     /// reader, transaction and stream deterministically.
@@ -88,7 +88,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     try (manager :> IDisposable).Dispose() with cleanup -> error.Data.["SoloDB.InitializationCleanupException"] <- cleanup
                     reraise()
             with _ -> attachment.Dispose(); reraise()
-        new SoloDB(manager, connectionString, location, config, eventSystem, Some storage, attachment)
+        new SoloDB(manager, connectionString, location, config, eventSystem, attachment)
         then storage.BindRootClose(attachment, Action(fun () -> this.Dispose()))
 
     /// <summary>
