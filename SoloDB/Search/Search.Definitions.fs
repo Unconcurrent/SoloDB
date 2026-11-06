@@ -25,8 +25,8 @@ type SearchIndexBuilder<'T>() =
             prefixLengths <- Array.copy value
     member private this.Add(selector: LambdaExpression, weight, alias) =
         if isNull selector then nullArg "selector"
-        if Double.IsNaN weight || Double.IsInfinity weight || weight < 0.0 then
-            invalidArg "weight" "A search field weight must be finite and nonnegative."
+        if Double.IsNaN weight || Double.IsInfinity weight then
+            invalidArg "weight" "A search field weight must be finite."
         fields.Add({ Selector = selector; Alias = alias; Weight = weight })
         this
     member this.Field<'Field>(selector: Expression<Func<'T,'Field>>, weight: double, name: string) =

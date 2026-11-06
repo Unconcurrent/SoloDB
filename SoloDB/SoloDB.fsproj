@@ -424,7 +424,6 @@
     <Compile Include="SoloDBCore/SoloDB.SchemaMigration.fs" />
     <Compile Include="Events/FileSystemEvents.Schema.fs" />
     <Compile Include="SoloDBCore/SoloDB.NumericalFunctions.fs" />
-    <Compile Include="Search/Search.Functions.fs" />
     <Compile Include="SoloDBCore/SoloDB.Bootstrap.fs" />
     <Compile Include="SoloDBCore/SoloDB.QueryUtils.fs" />
     <Compile Include="SoloDBCore/SoloDB.NumericMigrationPlan.fs" />

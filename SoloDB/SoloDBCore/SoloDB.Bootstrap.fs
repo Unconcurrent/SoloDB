@@ -55,7 +55,6 @@ module internal Bootstrap =
         let usCultureInfo = CultureInfo.GetCultureInfo("en-us")
         let lower (value: string) = value.ToLower(usCultureInfo)
         let register (connection: NativeSqliteConnection) =
-            SearchFunctions.register connection
             NumericalFunctions.register connection
             QueryTranslatorCharacters.register lower connection
             connection.CreateFunction("ENUM_TO_STRING", Func<string, string, string>(fun typeName value ->

@@ -7,17 +7,20 @@ open SearchDefinition
 module internal SearchSchema =
     // FTS5 rank arguments accept decimal literals, but not exponent notation.
     let private rankLiteral (value: double) =
-        let text = value.ToString("R",Globalization.CultureInfo.InvariantCulture)
+        let sign = if value < 0.0 then "-" else ""
+        let text = (Math.Abs value).ToString("R",Globalization.CultureInfo.InvariantCulture)
         let exponent = text.IndexOf('E')
-        if exponent < 0 then text else
-        let mantissa = text.Substring(0,exponent)
-        let point = mantissa.IndexOf('.')
-        let digits = mantissa.Replace(".","")
-        let position = (if point < 0 then mantissa.Length else point) +
-                       Int32.Parse(text.Substring(exponent+1),Globalization.CultureInfo.InvariantCulture)
-        if position <= 0 then "0." + String('0',-position) + digits
-        elif position >= digits.Length then digits + String('0',position-digits.Length)
-        else digits.Insert(position,".")
+        let magnitude =
+            if exponent < 0 then text else
+            let mantissa = text.Substring(0,exponent)
+            let point = mantissa.IndexOf('.')
+            let digits = mantissa.Replace(".","")
+            let position = (if point < 0 then mantissa.Length else point) +
+                           Int32.Parse(text.Substring(exponent+1),Globalization.CultureInfo.InvariantCulture)
+            if position <= 0 then "0." + String('0',-position) + digits
+            elif position >= digits.Length then digits + String('0',position-digits.Length)
+            else digits.Insert(position,".")
+        sign + magnitude
 
     let execute (connection: NativeSqliteConnection) sql =
         let mutable statement = connection.AcquireScript(NativeStatementSource.Text sql,null)

@@ -23,19 +23,9 @@ module internal QuerySearchAuxiliary =
         let produced = visitProduced call.Object builder
         let markers =
             if call.Method.Name <> "Snippet" then Array.empty else
-            let validate position methodName (arguments: Expression[]) nativeName =
-                let argument = call.Arguments.[position]
-                let invariant =
-                    match builder.SourceContext.BindQueryValue with
-                    | ValueSome binder -> binder.IsValue argument || QueryTranslatorBaseHelpers.isFullyConstant argument
-                    | _ -> QueryTranslatorBaseHelpers.isFullyConstant argument
-                if invariant then
-                    let flags = Reflection.BindingFlags.Static ||| Reflection.BindingFlags.Public ||| Reflection.BindingFlags.NonPublic
-                    visitDu (Expression.Call(typeof<SearchLiteral>.GetMethod(methodName,flags),arguments)) builder
-                else FunctionCall(nativeName,arguments |> Array.map(fun argument -> visitDu argument builder) |> Array.toList)
-            [|validate 1 "Marker" [|call.Arguments.[1];Expression.Constant("opening") :> Expression|] "SoloDB_SearchMarker"
-              validate 2 "Marker" [|call.Arguments.[2];Expression.Constant("closing") :> Expression|] "SoloDB_SearchMarker"
-              validate 3 "Tokens" [|call.Arguments.[3]|] "SoloDB_SearchTokens"|]
+            [|visitDu call.Arguments.[1] builder
+              visitDu call.Arguments.[2] builder
+              visitDu call.Arguments.[3] builder|]
         QueryProduced.consume builder.SourceContext.NextAlias (fun _ input ->
             let owner = input.SearchOwner |> ValueOption.defaultWith(fun () ->
                 invalidOp "Text and Snippet require a row from Search, inside a query projection.")

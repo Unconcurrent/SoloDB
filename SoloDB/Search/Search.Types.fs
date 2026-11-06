@@ -43,18 +43,8 @@ type internal SearchLiteral =
         QueryValueMetadata.RegisterCall<string>(typeof<SearchLiteral>, "AllWords", [||], [|typeof<string>|],
             Func<obj,obj[],string>(fun _ values -> SearchLiteral.AllWords(unbox values.[0])))
         QueryValueMetadata.RegisterCall<string>(typeof<SearchLiteral>, "Format", [||], [|typeof<SearchQuery>|],
-            Func<obj,obj[],string>(fun _ values -> SearchLiteral.Format(unbox values.[0])))
-        QueryValueMetadata.RegisterCall<string>(typeof<SearchLiteral>, "Marker", [||], [|typeof<string>;typeof<string>|],
-            Func<obj,obj[],string>(fun _ values -> SearchLiteral.Marker(unbox values.[0],unbox values.[1])))
-        QueryValueMetadata.RegisterCall<int>(typeof<SearchLiteral>, "Tokens", [||], [|typeof<int>|],
-            Func<obj,obj[],int>(fun _ values -> SearchLiteral.Tokens(unbox values.[0]))))
+            Func<obj,obj[],string>(fun _ values -> SearchLiteral.Format(unbox values.[0]))))
     static member EnsureMetadata() = metadata.Force()
-    static member Marker(value: string, name: string) =
-        if isNull value then nullArg name
-        value
-    static member Tokens(value: int) =
-        if value < 1 || value > 64 then raise(ArgumentOutOfRangeException("tokens", "Snippet token counts must be between 1 and 64."))
-        value
     static member AllWords(text: string) =
         if isNull text then nullArg "text"
         let chunks = text.Replace('\000',' ').Split((null: char[]), StringSplitOptions.RemoveEmptyEntries)
