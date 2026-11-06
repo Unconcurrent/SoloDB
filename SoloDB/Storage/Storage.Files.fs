@@ -75,8 +75,13 @@ module internal StorageFiles =
                 let peerMain = peer.Flags &&& 0x100 <> 0
                 if main <> peerMain then
                     raise(StorageConfigurationError("One live backing cannot be both the database and its journal or log."))
-                if main && state.Coordination.IsSome <> peer.Coordination.IsSome then
-                    raise(StorageConfigurationError("Participants sharing one live backing must use the same private or File coordination."))
+                let sameCoordination =
+                    match state.Coordination, peer.Coordination with
+                    | None, None -> true
+                    | Some current, Some previous -> current.Identity = previous.Identity
+                    | _ -> false
+                if main && not sameCoordination then
+                    raise(StorageConfigurationError("Participants sharing one live backing must use the same coordination file and native VFS, or all use private coordination."))
             state.Node.Handles.Add(state))
     let lockFile (state: StorageHandle) level =
         match state.Coordination with

@@ -184,6 +184,7 @@ type internal StorageNativeVfs(name: string) =
     let setSystem = StorageNative.bindAt<StorageNative.SetSystemCall> version address StorageNative.vfsFields 16 3
     let getSystem = StorageNative.bindAt<StorageNative.DlOpen> version address StorageNative.vfsFields 17 3
     let nextSystem = StorageNative.bindAt<StorageNative.DlOpen> version address StorageNative.vfsFields 18 3
+    member _.Identity = address
     member _.Name = StorageNative.text(StorageNative.field address StorageNative.vfsFields 1)
     member _.FileSize = Marshal.ReadInt32(address, 4)
     member _.MaxPath = Marshal.ReadInt32(address, 8)
@@ -224,6 +225,7 @@ type internal StorageNativeVfs(name: string) =
 type internal StorageNativeFile(parent: StorageNativeVfs, name: string, wal: bool) =
     let mutable file = StorageNative.alloc parent.FileSize
     let mutable filename = 0n
+    let mutable identity = struct (0n, "")
     let mutable methods: StorageNativeMethods = Unchecked.defaultof<_>
     do
         try
@@ -232,7 +234,9 @@ type internal StorageNativeFile(parent: StorageNativeVfs, name: string, wal: boo
             try
                 let result = parent.FullPath(path, parent.MaxPath + 1, output)
                 if result <> 0 then raise(StorageNativeError(result, "The coordination path could not be resolved."))
-                filename <- StorageNative.filename(StorageNative.text output)
+                let resolved = StorageNative.text output
+                filename <- StorageNative.filename resolved
+                identity <- struct (parent.Identity, resolved)
             finally
                 Marshal.FreeHGlobal(output)
                 Marshal.FreeHGlobal(path)
@@ -255,6 +259,7 @@ type internal StorageNativeFile(parent: StorageNativeVfs, name: string, wal: boo
             file <- 0n
             filename <- 0n
             reraise()
+    member _.Identity = identity
     member _.Lock(level) = methods.Lock(file, level)
     member _.Unlock(level) = methods.Unlock(file, level)
     member _.Reserved(output) = methods.Reserved(file, output)

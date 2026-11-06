@@ -92,7 +92,7 @@ Generated and NativeAOT applications still need their [normal metadata registrat
 
 ## Share a database between instances or processes
 
-Several `SoloDB` instances using the same `SqliteStorage` share its database locks and can safely use its files without a coordination option. Separate storage objects using the same actual main Stream or `ISqliteStorageFile` object also share private database locks and WAL memory automatically. For independently opened views or separate processes accessing the same database bytes, use `SqliteStorageCoordination.File` with the same separate coordination path in every participant. Do not mix private and File coordination over one live shared object; finish its current users before changing coordination.
+Several `SoloDB` instances using the same `SqliteStorage` share its database locks and can safely use its files without a coordination option. Separate storage objects using the same actual main Stream or `ISqliteStorageFile` object also share private database locks and WAL memory automatically. For independently opened views or separate processes accessing the same database bytes, use `SqliteStorageCoordination.File` with the same separate coordination path in every participant. Use one coordination choice for every live participant on that object: either private coordination, or the same File path and native VFS. Finish its current users before changing that choice.
 
 Each participant opens its own streams:
 
