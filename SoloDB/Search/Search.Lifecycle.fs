@@ -51,7 +51,7 @@ module internal SearchLifecycle =
             true
         | _ -> false
     let private readSnapshot (connection: NativeSqliteConnection) read =
-        if raw.sqlite3_get_autocommit connection.Handle = 0 then read() else
+        if raw.sqlite3_get_autocommit connection.InternalHandle = 0 then read() else
         SearchSchema.execute connection "BEGIN DEFERRED"
         try
             let result = read()

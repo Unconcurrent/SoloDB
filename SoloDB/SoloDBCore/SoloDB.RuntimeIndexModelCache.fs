@@ -66,7 +66,7 @@ module internal RuntimeIndexModelCache =
     let private inTransaction (connection: NativeSqliteConnection) =
         match connection with
         | :? NativeCachingDbConnection as cached when cached.InsideTransaction -> true
-        | _ -> SQLitePCL.raw.sqlite3_get_autocommit(connection.Handle) = 0
+        | _ -> SQLitePCL.raw.sqlite3_get_autocommit(connection.InternalHandle) = 0
 
     let invalidate connectionString collectionName =
         lock gate (fun () ->

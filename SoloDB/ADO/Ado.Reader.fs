@@ -70,7 +70,10 @@ type SqliteDataReader internal (session: AdoSession, rows: SqlRows, admission: N
         if offset < 0L then raise (ArgumentOutOfRangeException("dataOffset"))
         if bufferOffset < 0 || bufferOffset > bufferLength then raise (ArgumentOutOfRangeException("bufferOffset"))
         if length < 0 || length > bufferLength - bufferOffset then raise (ArgumentOutOfRangeException("length"))
-    member _.Handle = if closed then null else AdoReaderAccess.guard session version closed (fun () -> rows.StatementHandle)
+    member _.Handle =
+        if session.IsManagedStorage then
+            raise (NotSupportedException("Managed storage does not expose native handles. Use borrowed Native storage for raw access."))
+        if closed then null else AdoReaderAccess.guard session version closed (fun () -> rows.StatementHandle)
     override _.Depth = 0
     override _.IsClosed = closed
     override _.HasRows = AdoReaderAccess.guard session version closed (fun () -> hasRows)

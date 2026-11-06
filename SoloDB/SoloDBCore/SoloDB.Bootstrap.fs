@@ -47,6 +47,11 @@ module internal Bootstrap =
             match location with
             | SoloDBLocation.Memory _ -> "PRAGMA temp_store = MEMORY; " + setupSql
             | SoloDBLocation.File _ -> setupSql
+            | SoloDBLocation.Storage input ->
+                match input.Profile with
+                | SqliteStorageProfile.ReadOnly -> ""
+                | SqliteStorageProfile.Simple -> setupSql + " PRAGMA journal_mode=PERSIST; PRAGMA synchronous=FULL;"
+                | _ -> setupSql + " PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;"
         let usCultureInfo = CultureInfo.GetCultureInfo("en-us")
         let lower (value: string) = value.ToLower(usCultureInfo)
         let regexpTimeout = TimeSpan.FromMilliseconds(100)
@@ -336,10 +341,14 @@ module internal Bootstrap =
         if dbSchemaVersion > currentSupportedSchemaVersion then
             raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
+        let readOnly = dbConnection.DatabaseOwner.IsStorageReadOnly
+        if readOnly && dbSchemaVersion < 6 then
+            raise (NotSupportedException("ReadOnly storage requires a current SoloDB image. Upgrade a writable copy before opening it as immutable storage."))
+
         // Schema creation: version 0 -> 1
         if dbSchemaVersion = 0 then
             SchemaMigration.run dbConnection
-                { Label = "v0->v1"; Setup = initialSchemaSetup; Body = initialSchema; FromVersion = 0; TargetVersion = 1; SupportedCeiling = currentSupportedSchemaVersion
+                { Label = "v0->v1"; Setup = (if dbConnection.DatabaseOwner.IsStorage then "" else initialSchemaSetup); Body = initialSchema; FromVersion = 0; TargetVersion = 1; SupportedCeiling = currentSupportedSchemaVersion
                   LegacyTextPolicy = SchemaMigration.Strict }
             dbSchemaVersion <- SchemaMigration.readVersion dbConnection
             match SchemaMigration.classifyVersion dbSchemaVersion 1 currentSupportedSchemaVersion with
@@ -454,7 +463,7 @@ module internal Bootstrap =
                 | SchemaMigration.BeyondSupported ->
                     raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
-        let fileSystemEvents = FileSystemEventSchema.forExistingTables dbConnection
+        let fileSystemEvents = if readOnly then "" else FileSystemEventSchema.forExistingTables dbConnection
         if dbSchemaVersion = 5 || fileSystemEvents.Length <> 0 then
             let targetVersion = max 6 dbSchemaVersion
             let label = if dbSchemaVersion = 5 then "v5->v6" else "filesystem event initialization"
@@ -472,8 +481,9 @@ module internal Bootstrap =
             | SchemaMigration.BeyondSupported -> raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
         // https://www.sqlite.org/pragma.html#pragma_optimize
-        let mutable statement = dbConnection.OpenStatement("PRAGMA optimize=0x10002;")
-        try
-            while statement.Step() do ()
-            statement.Dispose()
-        with error -> statement.Abort(error); reraise()
+        if not readOnly then
+            let mutable statement = dbConnection.OpenStatement("PRAGMA optimize=0x10002;")
+            try
+                while statement.Step() do ()
+                statement.Dispose()
+            with error -> statement.Abort(error); reraise()

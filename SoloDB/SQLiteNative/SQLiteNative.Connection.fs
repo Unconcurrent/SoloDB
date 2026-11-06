@@ -72,8 +72,9 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
     let mutable extensions: HashSet<struct (string * string)> = null
     let mutable extensionsEnabled = false
     let mutable storageRetirement: Action = null
+    let mutable storageReopen: Action = null
     let checkRegistration () =
-        if database.IsRetiring then raise(ObjectDisposedException("NativeSqliteConnection"))
+        if not database.CanRegister then raise(ObjectDisposedException("NativeSqliteConnection"))
     let checkExtensions () =
         checkRegistration()
         if database.IsManagedStorage then
@@ -164,6 +165,7 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
             if not (isNull extensions) then
                 for struct (file, procedure) in extensions do loadExtension file procedure
     member internal _.SetStorageRetirement(action: Action) = storageRetirement <- action
+    member internal _.SetStorageReopen(action: Action) = storageReopen <- action
     member internal _.DatabaseOwner = database
     member internal _.StatementCache = statements
     member internal _.CheckNoActiveReader() =
@@ -300,6 +302,7 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
                 if extensionsEnabled then database.Check(raw.sqlite3_enable_load_extension(database.Handle, 1))
                 if not (isNull extensions) then
                     for struct (file, procedure) in extensions do loadExtension file procedure
+                if database.Generation > 1L && not(isNull storageReopen) then storageReopen.Invoke()
                 database.EnsureOpen()
             with _ -> database.Close(); reraise()
     member _.Close() =
@@ -348,34 +351,68 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
         if isNull destination then nullArg "destination"
         if isNull destinationName then nullArg "destinationName"
         if isNull sourceName then nullArg "sourceName"
+        use sourceUse = database.AdmitUse()
         database.EnsureOpen()
         let target = destination.DatabaseOwner
         if Object.ReferenceEquals(database, target) then invalidArg "destination" "The backup destination must be a different connection."
         let closeDestination = not target.IsOpen
-        if closeDestination then destination.Open()
+        let mutable targetUse: NativeLifetimeUse = null
+        let mutable sourceSink: IDisposable = null
+        let mutable targetSink: IDisposable = null
+        let faults = StorageFaultChannel()
+        let sink = Action<int,exn>(fun code cause -> faults.Record(code, cause))
+        let backupError (owner: NativeDatabase) result =
+            match faults.Take() with
+            | ValueSome(struct (code, cause)) ->
+                let text = raw.sqlite3_errstr(code).utf8_to_string()
+                NativeSqliteException($"SQLite Error {code &&& 255}: '{text}'.", code &&& 255, code, cause) :> exn
+            | ValueNone -> owner.Error(result)
+        let checkFault () =
+            match faults.Take() with
+            | ValueNone -> ()
+            | ValueSome(struct (code, cause)) ->
+                let text = raw.sqlite3_errstr(code).utf8_to_string()
+                raise(NativeSqliteException($"SQLite Error {code &&& 255}: '{text}'.", code &&& 255, code, cause))
         let mutable backup: sqlite3_backup = null
         let mutable failure: exn = null
+        let cleanup action =
+            try action() with error ->
+                if isNull failure then failure <- error
+                else failure.Data.["SoloDB.CleanupException"] <- error
         try
             try
+                if closeDestination then destination.Open()
+                targetUse <- target.AdmitUse()
+                database.BeginStorageOperation()
+                target.BeginStorageOperation()
+                match database.StorageFaults with Some channel -> sourceSink <- channel.UseSink(sink) | None -> ()
+                match target.StorageFaults with Some channel -> targetSink <- channel.UseSink(sink) | None -> ()
                 backup <- raw.sqlite3_backup_init(target.Handle, destinationName, database.Handle, sourceName)
-                if isNull backup || backup.IsInvalid then raise (NativeSqliteException.FromResult(target.Handle, raw.sqlite3_errcode(target.Handle)))
+                if isNull backup || backup.IsInvalid then raise(backupError target (raw.sqlite3_errcode(target.Handle)))
+                checkFault()
                 let mutable budget = NativeExecutionBudget(target.DefaultTimeout)
                 let started = Diagnostics.Stopwatch.GetTimestamp()
                 let mutable result = raw.sqlite3_backup_step(backup, -1)
+                checkFault()
                 while NativeExecution.isLocked result && budget.CanRetry(started) do
                     NativeExecution.wait()
                     result <- raw.sqlite3_backup_step(backup, -1)
-                if result <> raw.SQLITE_DONE then raise (NativeSqliteException.FromResult(target.Handle, result))
+                    checkFault()
+                if result <> raw.SQLITE_DONE then raise(backupError target result)
             with error -> failure <- error
         finally
-            if not (isNull backup) && not backup.IsInvalid then
-                try
+            if not(isNull backup) && not backup.IsInvalid then
+                cleanup (fun () ->
                     let result = raw.sqlite3_backup_finish(backup)
-                    if result <> raw.SQLITE_OK && isNull failure then failure <- NativeSqliteException.FromResult(target.Handle, result)
-                with error -> if isNull failure then failure <- error
-            if closeDestination then
-                try destination.Close() with error -> if isNull failure then failure <- error
-        if not (isNull failure) then Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw()
+                    if result <> raw.SQLITE_OK then raise(backupError target result)
+                    checkFault())
+            // Both real endpoint owners and the shared first-fault sink survive
+            // through backup_finish, including rollback and its final callbacks.
+            if not(isNull targetSink) then cleanup targetSink.Dispose
+            if not(isNull sourceSink) then cleanup sourceSink.Dispose
+            if closeDestination then cleanup destination.Close
+            if not(isNull targetUse) then cleanup targetUse.Dispose
+        if not(isNull failure) then Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw()
 
     member _.CreateFunction<'R>(name: string, functionValue: Func<'R>, [<Optional; DefaultParameterValue(false)>] isDeterministic: bool) =
         if isNull functionValue then registerScalar name 0 null SqliteFunctionFlags.None else

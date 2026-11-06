@@ -34,7 +34,7 @@ module Connections =
     /// <param name="connectionStr">The database connection string.</param>
     /// <param name="setup">An action to perform initial setup on a newly created connection.</param>
     /// <param name="config">The database configuration settings.</param>
-    type ConnectionManager internal (connectionStr: string, setup: NativeSqliteConnection -> unit, config: Types.SoloDBConfiguration, releaseIndexOwner: unit -> unit, beginIndexTransaction: unit -> IDisposable, setupAsync: NativeSqliteConnection -> Task<unit>) =
+    type ConnectionManager internal (connectionStr: string, setup: NativeSqliteConnection -> unit, config: Types.SoloDBConfiguration, releaseIndexOwner: unit -> unit, beginIndexTransaction: unit -> IDisposable, setupAsync: NativeSqliteConnection -> Task<unit>, storage: SqliteStorage option) =
         /// <summary>A collection of all connections ever created by this manager, for disposal purposes.</summary>
         let all = ConcurrentStack<NativeCachingDbConnection>()
         /// <summary>The pool of available, ready-to-use connections.</summary>
@@ -51,6 +51,8 @@ module Connections =
         let checkDisposed () =
             if Volatile.Read(&disposed) then raise (ObjectDisposedException(nameof(ConnectionManager)))
 
+        internal new(connectionStr: string, setup: NativeSqliteConnection -> unit, config: Types.SoloDBConfiguration, releaseIndexOwner: unit -> unit, beginIndexTransaction: unit -> IDisposable, setupAsync: NativeSqliteConnection -> Task<unit>) =
+            new ConnectionManager(connectionStr, setup, config, releaseIndexOwner, beginIndexTransaction, setupAsync, None)
         internal new(connectionStr: string, setup: NativeSqliteConnection -> unit, config: Types.SoloDBConfiguration, releaseIndexOwner: unit -> unit, beginIndexTransaction: unit -> IDisposable) =
             new ConnectionManager(connectionStr, setup, config, releaseIndexOwner, beginIndexTransaction,
                 fun connection -> setup connection; Task.FromResult(()))
@@ -64,10 +66,14 @@ module Connections =
         /// <param name="pooledConn">The connection to return to the pool.</param>
         /// <exception cref="InvalidOperationException">Thrown if the connection is still inside a transaction.</exception>
         member internal this.TakeBack(pooledConn: NativeCachingDbConnection) =
+            try this.ReturnConnection(pooledConn)
+            finally pooledConn.ReleaseAcquisition()
+
+        member private _.ReturnConnection(pooledConn: NativeCachingDbConnection) =
             // A connection already known to be unfit is disposed without being probed. Probing it
             // would raise, and this runs from Dispose, so that exception would replace whatever
             // failure made the connection unusable in the first place.
-            if pooledConn.Unusable then
+            if pooledConn.Unusable || Volatile.Read(&disposed) then
                 try pooledConn.DisposeReal() with _ -> ()
             else
 
@@ -79,7 +85,7 @@ module Connections =
                     // Explicit transaction ownership rolls back on disposal. Raw BEGIN
                     // has no managed owner and must still be completed by its caller.
                     try pooledConn.DisposeReal() with _ -> ()
-                elif SQLitePCL.raw.sqlite3_get_autocommit(pooledConn.Handle) = 0 then
+                elif SQLitePCL.raw.sqlite3_get_autocommit(pooledConn.InternalHandle) = 0 then
                     raise (InvalidOperationException(
                         "Error: Connection returned to pool while a transaction is still active.\nReason: The transaction must be finished before returning the connection.\nFix: Commit or rollback the transaction before returning the connection."))
                 else
@@ -103,10 +109,13 @@ module Connections =
             | false, _ -> ValueNone
         member private this.NewConnection(pooled: bool) =
             checkDisposed()
-            new NativeCachingDbConnection(connectionStr, (if pooled then this.TakeBack else ignore), config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
+            let connection = new NativeCachingDbConnection(connectionStr, (if pooled then this.TakeBack else ignore), config, this.EnterEventHandlerScope, this.ExitEventHandlerScope, storage)
+            if storage.IsSome then connection.SetStorageReopen(Action(fun () -> setup connection.Inner))
+            connection
         member private _.CreationFailed(connection: NativeCachingDbConnection, error: exn) =
             let mutable cleanup = None
             try connection.DisposeReal() with failure -> cleanup <- Some failure
+            try connection.ReleaseAcquisition() with failure -> if cleanup.IsNone then cleanup <- Some failure
             match resolveTxOutcome (Some error) cleanup with
             | Some failure -> reraiseAnywhere failure
             | None -> raise (InvalidOperationException("Connection setup failed."))
@@ -114,7 +123,9 @@ module Connections =
             let connection = this.NewConnection(pooled)
             try
                 connection.Inner.Open()
+                connection.RenewAcquisition()
                 setup connection.Inner
+                checkDisposed()
                 if pooled then all.Push connection
                 connection
             with error -> this.CreationFailed(connection, error)
@@ -122,7 +133,9 @@ module Connections =
             let connection = this.NewConnection(pooled)
             try
                 connection.Inner.Open()
+                connection.RenewAcquisition()
                 do! setupAsync connection.Inner
+                checkDisposed()
                 if pooled then
                     checkDisposed()
                     all.Push connection
@@ -142,6 +155,10 @@ module Connections =
         /// Used for final disposal.
         /// </summary>
         member internal this.All = all
+        member internal _.IsReadOnly =
+            match storage with
+            | Some input -> input.Profile = SqliteStorageProfile.ReadOnly
+            | None -> false
 
         member this.Borrow() = new SQLiteTools.CachingDbConnection(this.BorrowNative(), false, ignore)
 

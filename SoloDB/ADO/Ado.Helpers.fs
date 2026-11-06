@@ -69,7 +69,10 @@ module SQLiteTools =
             with get() = PublicSqlExecution.guard this (fun () -> (native :?> NativeSQLiteTools.NativeCachingDbConnection).Unusable)
             and set value = PublicSqlExecution.guard this (fun () -> (native :?> NativeSQLiteTools.NativeCachingDbConnection).Unusable <- value)
         member _.ClearCache() = PublicSqlExecution.guard this (fun () -> native.StatementCache.Clear())
-        member _.DisposeReal() = PublicSqlExecution.guard this (fun () -> (native :?> NativeSQLiteTools.NativeCachingDbConnection).DisposeReal())
+        member _.DisposeReal() = PublicSqlExecution.guard this (fun () ->
+            let cached = native :?> NativeSQLiteTools.NativeCachingDbConnection
+            try cached.DisposeReal()
+            finally cached.ReleaseAcquisition())
         member _.Execute(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.execute this sql parameters
         member _.Query<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.query<'T> this sql parameters
         member _.QueryFirst<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = PublicSqlExecution.first<'T> this sql parameters

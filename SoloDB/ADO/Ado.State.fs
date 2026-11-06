@@ -20,6 +20,7 @@ type internal AdoSession(initial: NativeSqliteConnection, leaveOpen: bool, stand
     let mutable generation = initial.DatabaseOwner.Generation
     let mutable resources: Collections.Generic.HashSet<IDisposable> = null
     let mutable releaseWatch: Action<NativeTransactionWatch> = null
+    let mutable suspendedAcquisition = false
     let register resource =
         if isNull resources then resources <- Collections.Generic.HashSet<IDisposable>()
         resources.Add(resource) |> ignore
@@ -73,7 +74,15 @@ type internal AdoSession(initial: NativeSqliteConnection, leaveOpen: bool, stand
             try clearResources() with error -> failure <- error
             try
                 if physicalClose && currentOwner() then
-                    if standalone then returnStandalone() else native.Close()
+                    if standalone then returnStandalone()
+                    else
+                        try native.Close()
+                        finally
+                            match native with
+                            | :? NativeSQLiteTools.NativeCachingDbConnection as cached when cached.DatabaseOwner.IsStorage ->
+                                cached.ReleaseAcquisition()
+                                suspendedAcquisition <- true
+                            | _ -> ()
             with error -> if isNull failure then failure <- error
             if not (isNull failure) then Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw()
     member this.WatchTransaction() =
@@ -88,6 +97,7 @@ type internal AdoSession(initial: NativeSqliteConnection, leaveOpen: bool, stand
     member _.Native =
         if not disposed then acquire()
         native
+    member _.IsManagedStorage = native.DatabaseOwner.IsManagedStorage
     member _.ConnectionString = connectionString
     member _.DataSource = dataSource
     member _.DefaultTimeout
@@ -109,17 +119,25 @@ type internal AdoSession(initial: NativeSqliteConnection, leaveOpen: bool, stand
         sourceGuard()
         if disposed then raise (ObjectDisposedException("SqliteConnection"))
         if expected <> version || not active then raise (InvalidOperationException("The ADO connection presentation is closed or has expired."))
+        if native.DatabaseOwner.IsStorage && native.DatabaseOwner.IsRetiring then raise (ObjectDisposedException("SqliteConnection"))
         native.DatabaseOwner.EnsureGeneration(generation)
     member this.Check() = this.Check(version)
+    member internal this.CheckCompletion(expected: int64) =
+        if not native.DatabaseOwner.IsStorage then this.Check(expected)
+        else
+            if disposed then raise (ObjectDisposedException("SqliteConnection"))
+            if expected <> version || not active then raise (InvalidOperationException("The ADO connection presentation is closed or has expired."))
+            native.DatabaseOwner.EnsureGeneration(generation)
     member internal _.AdmitOperation(acquireOwner: bool) =
         sourceGuard()
         if disposed then raise (ObjectDisposedException("SqliteConnection"))
+        if active && native.DatabaseOwner.IsStorage && native.DatabaseOwner.IsRetiring then raise (ObjectDisposedException("SqliteConnection"))
         if active then native.DatabaseOwner.EnsureGeneration(generation)
         if acquireOwner then acquire()
         struct (native, native.DatabaseOwner.Generation, version)
     member internal _.IsOperationCurrent(struct (admitted: NativeSqliteConnection, admittedGeneration, admittedVersion)) =
         not returned && version = admittedVersion && Object.ReferenceEquals(native, admitted) && admitted.DatabaseOwner.Generation = admittedGeneration
-        && (try sourceGuard(); true with _ -> false)
+        && (if admitted.DatabaseOwner.IsStorage then admitted.DatabaseOwner.IsOpen else (try sourceGuard(); true with _ -> false))
     member internal this.CompleteOperation(admitted) =
         if this.IsOperationCurrent(admitted) then
             let struct (owner, _, _) = admitted
@@ -137,6 +155,14 @@ type internal AdoSession(initial: NativeSqliteConnection, leaveOpen: bool, stand
         with error -> this.RecordOperationFault(admitted, error); reraise()
     member this.Guard(action: unit -> 'T) : 'T = this.Guard(action, true)
     member this.GuardPresentation(action: unit -> 'T) : 'T = this.Guard(action, false)
+    member internal this.GuardCompletion(expected: int64, action: unit -> 'T) : 'T =
+        this.CheckCompletion(expected)
+        let admitted = struct (native, generation, version)
+        try
+            let result = AdoErrors.convert action
+            this.CompleteOperation(admitted)
+            result
+        with error -> this.RecordOperationFault(admitted, error); reraise()
     member this.Open() =
         sourceGuard()
         if disposed then raise (ObjectDisposedException("SqliteConnection"))
@@ -171,6 +197,9 @@ type internal AdoSession(initial: NativeSqliteConnection, leaveOpen: bool, stand
                     reraise()
             else
                 native.Open()
+                if suspendedAcquisition then
+                    (native :?> NativeSQLiteTools.NativeCachingDbConnection).ResumeAcquisition()
+                    suspendedAcquisition <- false
             generation <- native.DatabaseOwner.Generation
             active <- true
     // Close ends the physical connection; disposing a borrowed presentation leaves its owner open.

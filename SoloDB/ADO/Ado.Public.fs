@@ -16,24 +16,24 @@ type SqliteTransaction internal (connection: DbConnection, session: AdoSession, 
     let watch = session.WatchTransaction()
     let mutable disposed = false
     let mutable finished = false
-    let check () =
+    let check completing =
         if disposed || finished then raise (InvalidOperationException("The transaction has completed."))
-        session.Check(version)
+        if completing && owned then session.CheckCompletion(version) else session.Check(version)
         if session.Native.DatabaseOwner.TransactionEpoch <> watch.Epoch then
             raise (InvalidOperationException("The native transaction has completed."))
         match transaction with
         | ValueSome transaction when not transaction.IsActive || not (Object.ReferenceEquals(transaction, session.Native.CurrentTransaction)) ->
             raise (InvalidOperationException("The native transaction has completed."))
-        | ValueNone when SQLitePCL.raw.sqlite3_get_autocommit(session.Native.Handle) <> 0 ->
+        | ValueNone when SQLitePCL.raw.sqlite3_get_autocommit(session.Native.InternalHandle) <> 0 ->
             raise (InvalidOperationException("The native transaction has completed."))
         | _ -> ()
-    let owner () =
-        check()
+    let owner completing =
+        check completing
         if not owned then raise (InvalidOperationException("This transaction belongs to its existing scope owner."))
         match transaction with ValueSome transaction -> transaction | _ -> raise (InvalidOperationException("There is no owned native transaction."))
     do session.Register(this)
     member internal _.CheckFor(native: NativeSqliteConnection) =
-        check()
+        check false
         if not (Object.ReferenceEquals(native, session.Native)) then
             raise (InvalidOperationException("The transaction belongs to a different connection."))
     member internal _.IsActive =
@@ -49,26 +49,26 @@ type SqliteTransaction internal (connection: DbConnection, session: AdoSession, 
     override _.IsolationLevel =
         match transaction with ValueSome transaction -> transaction.IsolationLevel | _ -> IsolationLevel.Serializable
     override _.DbConnection = if disposed || finished then null else connection
-    override _.Commit() = check(); session.Guard(fun () ->
-        let native = owner()
+    override _.Commit() = check true; session.GuardCompletion(version, fun () ->
+        let native = owner true
         native.Commit()
         finished <- true
         watch.Dispose()
         session.Unregister(this))
-    override _.Rollback() = check(); session.Guard(fun () ->
-        let native = owner()
+    override _.Rollback() = check true; session.GuardCompletion(version, fun () ->
+        let native = owner true
         native.Rollback()
         finished <- true
         watch.Dispose()
         session.Unregister(this))
 #if NET5_0_OR_GREATER
-    override _.Save(savepointName: string) = check(); session.Guard(fun () -> (owner()).Save(savepointName))
-    override _.Release(savepointName: string) = check(); session.Guard(fun () -> (owner()).Release(savepointName))
-    override _.Rollback(savepointName: string) = check(); session.Guard(fun () -> (owner()).Rollback(savepointName))
+    override _.Save(savepointName: string) = check false; session.Guard(fun () -> (owner false).Save(savepointName))
+    override _.Release(savepointName: string) = check false; session.Guard(fun () -> (owner false).Release(savepointName))
+    override _.Rollback(savepointName: string) = check false; session.Guard(fun () -> (owner false).Rollback(savepointName))
 #else
-    member _.Save(savepointName: string) = check(); session.Guard(fun () -> (owner()).Save(savepointName))
-    member _.Release(savepointName: string) = check(); session.Guard(fun () -> (owner()).Release(savepointName))
-    member _.Rollback(savepointName: string) = check(); session.Guard(fun () -> (owner()).Rollback(savepointName))
+    member _.Save(savepointName: string) = check false; session.Guard(fun () -> (owner false).Save(savepointName))
+    member _.Release(savepointName: string) = check false; session.Guard(fun () -> (owner false).Release(savepointName))
+    member _.Rollback(savepointName: string) = check false; session.Guard(fun () -> (owner false).Rollback(savepointName))
 #endif
     override _.Dispose(disposing) =
         if disposing && not disposed then
@@ -230,7 +230,10 @@ and [<AllowNullLiteral>] SqliteConnection private (session: AdoSession) as this 
         if isNull connection then nullArg "connection"
         connection.Session.CheckSource()
         AdoConnectionPools.clear connection.Session.ConnectionString
-    member _.Handle = if session.State = ConnectionState.Open then session.Native.Handle else null
+    member _.Handle =
+        if session.IsManagedStorage then
+            raise (NotSupportedException("Managed storage does not expose native handles. Use borrowed Native storage for raw access."))
+        if session.State = ConnectionState.Open then session.Native.Handle else null
     member _.CreateFunction<'R>(name: string, ``function``: Func<'R>, [<System.Runtime.InteropServices.Optional; System.Runtime.InteropServices.DefaultParameterValue(false)>] isDeterministic: bool) =
         session.Guard(fun () -> session.Native.CreateFunction(name, ``function``, isDeterministic))
     member _.CreateFunction<'A, 'R>(name: string, ``function``: Func<'A, 'R>, [<System.Runtime.InteropServices.Optional; System.Runtime.InteropServices.DefaultParameterValue(false)>] isDeterministic: bool) =
@@ -489,7 +492,7 @@ and [<AllowNullLiteral>] SqliteConnection private (session: AdoSession) as this 
             session.Check()
             let native = session.Native
             let epoch = native.DatabaseOwner.TransactionEpoch
-            if SQLitePCL.raw.sqlite3_get_autocommit(native.Handle) <> 0 then
+            if SQLitePCL.raw.sqlite3_get_autocommit(native.InternalHandle) <> 0 then
                 if not (isNull borrowed) then borrowed.Dispose(); borrowed <- null
                 null
             else

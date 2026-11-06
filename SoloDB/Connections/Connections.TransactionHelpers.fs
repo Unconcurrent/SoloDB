@@ -29,15 +29,18 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
             Some commitEx
         | None -> None
 
-    let private executeBoundaryWithNotification notifyAfter (connection: NativeSqliteConnection) sql =
-        let mutable statement = connection.OpenStatement(sql)
+    let private executeBoundaryWithNotification notifyAfter completing (connection: NativeSqliteConnection) sql =
+        let mutable statement =
+            if completing then connection.OpenTransactionStatement(sql)
+            else connection.OpenStatement(sql)
         try
             statement.StepTransactionBoundary() |> ignore
             statement.Finish(null, notifyAfter)
         with error -> statement.Abort(error); reraise()
 
-    let private executeBoundary connection sql = executeBoundaryWithNotification true connection sql
-    let private executeCleanupBoundary connection sql = executeBoundaryWithNotification false connection sql
+    let private executeBoundary connection sql = executeBoundaryWithNotification true false connection sql
+    let private executeCompletionBoundary connection sql = executeBoundaryWithNotification true true connection sql
+    let private executeCleanupBoundary connection sql = executeBoundaryWithNotification false true connection sql
 
     let cleanupSavepointRollback (conn: NativeSqliteConnection) (sp: string) (ex: exn) =
         let faultDepth = tryGetRecordedHandlerFaultDepth conn ex
@@ -71,7 +74,7 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
     let commitOrRollbackBorrowedTransaction (conn: NativeCachingDbConnection) (primaryEx: exn option ref) (cleanupEx: exn option ref) =
         match takeHandlerFaultCommitException conn with
         | Some ex -> rollbackBorrowedTransaction conn primaryEx cleanupEx ex
-        | None -> executeBoundary conn "COMMIT;"
+        | None -> executeCompletionBoundary conn "COMMIT;"
 
     let cleanupBorrowedTransaction (conn: NativeCachingDbConnection) (cleanupEx: exn option ref) =
         conn.InsideTransaction <- false
@@ -87,7 +90,10 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
     let cleanupDedicatedTransaction (conn: NativeCachingDbConnection) (cleanupEx: exn option ref) =
         conn.InsideTransaction <- false
         clearHandlerFault conn
-        try conn.DisposeReal() with ex ->
+        try
+            try conn.DisposeReal()
+            finally conn.ReleaseAcquisition()
+        with ex ->
             match !cleanupEx with
             | None -> cleanupEx := Some ex
             | Some _ -> ()
@@ -103,7 +109,7 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
         try
             let ret = f conn
             raiseIfHandlerFaultRecorded conn
-            executeBoundary conn (sprintf "RELEASE \"%s\";" sp)
+            executeCompletionBoundary conn (sprintf "RELEASE \"%s\";" sp)
             ret
         with ex ->
             cleanupSavepointRollback conn sp ex
@@ -115,7 +121,7 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
         try
             let! ret = f conn
             raiseIfHandlerFaultRecorded conn
-            executeBoundary conn (sprintf "RELEASE \"%s\";" sp)
+            executeCompletionBoundary conn (sprintf "RELEASE \"%s\";" sp)
             return ret
         with ex ->
             cleanupSavepointRollback conn sp ex

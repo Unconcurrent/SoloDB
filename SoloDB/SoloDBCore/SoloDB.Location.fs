@@ -9,3 +9,5 @@ type internal SoloDBLocation =
 | File of filePath: string
 /// <summary>The database is stored in-memory.</summary>
 | Memory of name: string
+/// <summary>The database uses an explicitly owned storage input.</summary>
+| Storage of input: SqliteStorage

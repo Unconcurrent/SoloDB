@@ -208,6 +208,21 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
     member internal _.IsNative = native.IsSome
     member internal _.ReportClosingFailure(error: exn) = report error
     member internal _.Identity = identity
+    member internal _.ConnectionString =
+        let builder = Data.Common.DbConnectionStringBuilder()
+        match native with
+        | Some(filename, name) ->
+            builder.["Data Source"] <- filename
+            builder.["Storage Vfs"] <- name
+        | None when not(isNull coordination) ->
+            builder.["Data Source"] <- "custom-storage"
+            builder.["Storage Coordination"] <- coordination.Filename
+            builder.["Storage Vfs"] <-
+                if isNull coordination.RegisteredVfs then
+                    if Runtime.InteropServices.RuntimeInformation.IsOSPlatform(Runtime.InteropServices.OSPlatform.Windows) then "win32" else "unix"
+                else coordination.RegisteredVfs
+        | None -> builder.["Data Source"] <- identity
+        builder.ConnectionString
     member internal _.IsRetired = lock gate (fun () -> retired)
     member internal _.Attach() =
         lock gate (fun () ->

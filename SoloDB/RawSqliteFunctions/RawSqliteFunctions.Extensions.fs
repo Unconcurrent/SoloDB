@@ -51,4 +51,4 @@ type internal SqliteConnectionRawExtensions =
 
     [<Extension>]
     static member RemoveRawFunction(connection: NativeSqliteConnection, name: string, argCount: int) =
-        RawFunctionRegistration.remove connection.Handle name argCount
+        RawFunctionRegistration.remove connection.InternalHandle name argCount

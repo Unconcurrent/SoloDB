@@ -34,6 +34,7 @@ module NativeSQLiteTools =
         // Tracks how many nested handler invocations are active on THIS connection.
         // Strict Enter/Exit balance — no negative clamping (negative depth = bug signal).
         let mutable acquisition = 0L
+        let mutable acquisitionUse: NativeLifetimeUse = null
         let mutable storageCleanupRegistered = 0
         let mutable eventHandlerDepth = 0
         let mutable eventHandlerInvocationVersion = 0L
@@ -51,7 +52,19 @@ module NativeSQLiteTools =
 
         /// <summary>The underlying NativeSqliteConnection.</summary>
         member internal _.Acquisition = acquisition
-        member internal _.RenewAcquisition() = acquisition <- acquisition + 1L
+        member internal _.ResumeAcquisition() =
+            let lifetime = base.DatabaseOwner.AdmitUse()
+            if not (isNull acquisitionUse) then
+                if not (isNull lifetime) then lifetime.Dispose()
+                raise (InvalidOperationException("The connection is already borrowed."))
+            acquisitionUse <- lifetime
+        member internal this.RenewAcquisition() =
+            this.ResumeAcquisition()
+            acquisition <- acquisition + 1L
+        member internal _.ReleaseAcquisition() =
+            let lifetime = acquisitionUse
+            acquisitionUse <- null
+            if not (isNull lifetime) then lifetime.Dispose()
         member internal this.Inner = this :> NativeSqliteConnection
         member internal _.PreparedCacheSnapshot =
             base.StatementCache.Snapshot

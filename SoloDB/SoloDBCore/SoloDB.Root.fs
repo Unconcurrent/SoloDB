@@ -24,7 +24,7 @@ open System.Collections.Concurrent
 /// The main database class, representing a single SQLite database file or in-memory instance.
 /// Provides access to collections and file system storage.
 /// </summary>
-type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration, eventSystem: EventSystem) =
+type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration, eventSystem: EventSystem, storage: SqliteStorage option, attachment: IDisposable) =
     let mutable disposed = false
     // Serializes DDL operations (InitializeCollection, DropCollectionIfExists) to prevent
     // collection initialization and removal from observing incomplete schema changes.
@@ -61,7 +61,35 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     error.Data.["SoloDB.InitializationCleanupException"] <- cleanup
                 reraise ()
 
-        new SoloDB(manager, connectionString, location, defaultConfig, eventSystem)
+        new SoloDB(manager, connectionString, location, defaultConfig, eventSystem, None, null)
+
+    /// Opens a single-use storage input. Dispose the database and every borrowed
+    /// reader, transaction and stream deterministically.
+    new(storage: SqliteStorage) as this =
+        if isNull (box storage) then nullArg "storage"
+        let attachment = storage.Attach()
+        let connectionString = storage.ConnectionString
+        let location = SoloDBLocation.Storage storage
+        let eventSystem = EventSystem()
+        let config: SoloDBConfiguration = { CachingEnabled = true }
+        let manager =
+            try
+                let struct (setup, setupAsync) = Bootstrap.createSetups location eventSystem
+                let struct (release, beginTransaction) = RuntimeIndexModelCache.acquireOwner connectionString
+                let manager =
+                    try new ConnectionManager(connectionString, setup, config, release, beginTransaction, setupAsync, Some storage)
+                    with _ -> release(); reraise()
+                try
+                    manager.SetHandlerDispatchGuard(fun () -> eventSystem.GlobalLock.IsHeldByCurrentThread)
+                    use connection = manager.BorrowNative()
+                    Bootstrap.initializeSchema connection
+                    manager
+                with error ->
+                    try (manager :> IDisposable).Dispose() with cleanup -> error.Data.["SoloDB.InitializationCleanupException"] <- cleanup
+                    reraise()
+            with _ -> attachment.Dispose(); reraise()
+        new SoloDB(manager, connectionString, location, config, eventSystem, Some storage, attachment)
+        then storage.BindRootClose(Action(fun () -> this.Dispose()))
 
     /// <summary>
     /// Gets the underlying connection manager for the database.
@@ -94,6 +122,8 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member private this.CheckDisposed() =
         if System.Threading.Volatile.Read(&disposed) then
             raise (ObjectDisposedException(nameof(SoloDB)))
+    member private _.CheckWritable() =
+        if connectionManager.IsReadOnly then raise (NotSupportedException("ReadOnly storage cannot modify the database."))
         
     member private this.InitializeCollection<'T> (name: string) =
         SoloDBRootOps.initializeCollection<'T>
@@ -144,6 +174,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <remarks>Collection acquisition does not inspect or migrate numerical values.</remarks>
     member this.MigrateDecimal<'T>(name: string) =
         this.CheckDisposed()
+        this.CheckWritable()
         let name = Helper.validateUserCollectionName name
         lock ddlLock (fun () ->
             connectionManager.WithTransaction(fun connection -> NumericMigration.run connection name typeof<'T>))
@@ -180,6 +211,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <returns>True if the collection was dropped, false if it did not exist.</returns>
     member this.DropCollectionIfExists name =
         this.CheckDisposed()
+        this.CheckWritable()
         let name = Helper.validateUserCollectionName name
 
         lock ddlLock (fun () ->
@@ -270,6 +302,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <exception cref="InvalidOperationException">Thrown if the database is in-memory.</exception>
     member this.Vacuum() =
         this.CheckDisposed()
+        this.CheckWritable()
         match this.DataLocation with
         | Memory _ -> (raise << InvalidOperationException) "Cannot vacuum memory databases."
         | other ->
@@ -331,6 +364,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// </summary>
     member this.Optimize() =
         this.CheckDisposed()
+        this.CheckWritable()
         use dbConnection = connectionManager.BorrowNative()
         let mutable statement = dbConnection.OpenStatement("PRAGMA optimize;")
         try
@@ -364,7 +398,10 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// </summary>
     member this.Dispose() =
         System.Threading.Volatile.Write(&disposed, true)
-        (connectionManager :> IDisposable).Dispose()
+        try (connectionManager :> IDisposable).Dispose()
+        finally
+            if not(isNull attachment) then attachment.Dispose()
+            match storage with Some input -> input.Dispose() | None -> ()
 
     interface IDisposable with
         member this.Dispose() = this.Dispose()

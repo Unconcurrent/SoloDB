@@ -92,7 +92,7 @@ module internal SchemaMigration =
 
     /// <summary>Is the connection free of an open transaction?</summary>
     let private inAutocommit (connection: NativeSqliteConnection) =
-        match connection.Handle with
+        match connection.InternalHandle with
         | null -> true
         | handle -> raw.sqlite3_get_autocommit handle <> 0
 
@@ -223,7 +223,7 @@ module internal SchemaMigration =
     let internal run (pooled: NativeCachingDbConnection) (plan: Plan) =
         let connection = pooled.Inner
         let handle =
-            match connection.Handle with
+            match connection.InternalHandle with
             | null -> raise (InvalidOperationException $"Error: the connection for migration {plan.Label} exposes no handle.\nReason: schema migration requires a live connection.\nFix: open the connection before migrating.")
             | h -> h
 

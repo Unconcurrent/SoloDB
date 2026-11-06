@@ -22,7 +22,10 @@ module internal SoloDBRootOps =
             use connection = connectionManager.BorrowNative()
             Helper.existsCollection name connection
 
-        if existsAlready then
+        if connectionManager.IsReadOnly && not existsAlready then
+            raise (InvalidOperationException("ReadOnly storage cannot create a missing collection."))
+
+        if existsAlready && not connectionManager.IsReadOnly then
             let needsIndexes =
                 use connection=connectionManager.BorrowNative()
                 HelperSchema.unsignedIndexesRequireEnsure<'T> name connection
@@ -56,7 +59,7 @@ module internal SoloDBRootOps =
                         RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
                 )
             )
-        elif hasRelations then
+        elif hasRelations && not connectionManager.IsReadOnly then
             let needsEnsure =
                 use conn = connectionManager.BorrowNative()
                 RelationsSchemaLinkTableDDL.relationSchemaRequiresEnsure conn name typeof<'T>
