@@ -64,6 +64,10 @@ module internal CodecDescription =
     let private array (values: string[]) = "[" + String.Join(",",values) + "]"
     let private objectValue values =
         "{" + (values |> Array.map(fun (name,value) -> quote name + ":" + value) |> fun fields -> String.Join(",",fields)) + "}"
+    let private namedValues label values =
+        let names = HashSet<string>(StringComparer.Ordinal)
+        if values |> Array.forall(fun (name,_) -> names.Add name) then objectValue values
+        else values |> Array.map(fun (name,value) -> objectValue [|"Name",quote name;label,value|]) |> array
     let private flag value = if value then "true" else "false"
 
     let private encoding definition =
@@ -147,14 +151,14 @@ module internal CodecDescription =
                             if position >= 0 && position < f.Arguments.Length then node f.Arguments[position]
                             else objectValue [|"Type",quote "Dynamic"|]
                         let fields members =
-                            members |> Array.map(fun struct(name,child) -> name,node child) |> objectValue
+                            members |> Array.map(fun struct(name,child) -> name,node child) |> namedValues "Shape"
                         match d.Shape with
                         | _ when f.ByteSequence && CodecPreparation.writer(f.Definition,d,true,f.Abstract,f.ByteSequence,f.NonGenericSequence) = RawRootOperation.Scalar ->
                             values.Add("Shape",quote "base64 string")
                         | TypeShape.Scalar ->
                             values.Add("Shape",quote(if f.ByteSequence then "base64 string" else encoding f.Definition))
                         | TypeShape.Enum ->
-                            values.Add("Shape",objectValue(f.Enum |> Array.map(fun struct(name,value) -> name,quote value)))
+                            values.Add("Shape",f.Enum |> Array.map(fun struct(name,value) -> name,quote value) |> namedValues "Value")
                             values.Add("Flags",flag f.Flags)
                             values.Add("OpenValues","true")
                             match f.EnumUnderlying with Some child -> values.Add("Underlying",node child) | None -> ()
@@ -192,16 +196,16 @@ module internal CodecDescription =
                             else values.Add("Shape",array [|element|])
                         | _ ->
                             let stored = f.Members |> Array.choose(fun struct(name,child,many) -> if many then None else Some(struct(name,child)))
-                            values.Add("Shape",fields stored)
                             let names = HashSet<string>(StringComparer.Ordinal)
                             if stored |> Array.exists(fun struct(name,_) -> not(names.Add name)) then
-                                values.Add("Members",f.Members |> Array.mapi(fun index struct(name,child,many) ->
+                                values.Add("Shape",f.Members |> Array.mapi(fun index struct(name,child,many) ->
                                     if many then None else
                                     let memberValue = ResizeArray<string * string>()
                                     memberValue.Add("Name",quote name)
                                     memberValue.Add("Shape",node child)
                                     if index < f.Templates.Length then memberValue.Add("Signature",signature (let struct(_,value) = f.Templates[index] in value))
                                     Some(objectValue(memberValue.ToArray()))) |> Array.choose id |> array)
+                            else values.Add("Shape",fields stored)
                         if d.Shape = TypeShape.Grouping || d.Shape = TypeShape.GroupingImplementation then
                             values.Add("KeyType",argument 0)
                             values.Add("KeyStored","false")

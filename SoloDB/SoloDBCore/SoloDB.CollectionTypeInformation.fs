@@ -128,9 +128,7 @@ module internal CollectionTypeInformation =
         result["Labels"] <- Object labels
         Object result
 
-    /// Returns whether metadata may have changed, for invocation-local reuse.
-    let recordChanged (connection: NativeSqliteConnection) name (description: CollectionTypeDescription) =
-        if connection.IsReadOnly then false else
+    let private merge (connection: NativeSqliteConnection) name (description: CollectionTypeDescription) =
         let history = read connection name
         let proposed = JsonValue.Parse description.History
         let meaning = shape proposed
@@ -173,10 +171,15 @@ module internal CollectionTypeInformation =
                 true
             with error -> statement.Abort(error); reraise()
 
+    /// Every acquisition entrance checks presence before a transactional merge.
+    /// The result invalidates invocation-local reuse only when metadata changed.
+    let recordChanged (connection: NativeSqliteConnection) name description =
+        if connection.IsReadOnly then false else
+        let struct(_,recorded) = lookup connection name description
+        not recorded && merge connection name description
+
     let record (connection: NativeSqliteConnection) name description =
-        if not connection.IsReadOnly then
-            let struct(_,recorded) = lookup connection name description
-            if not recorded then recordChanged connection name description |> ignore
+        recordChanged connection name description |> ignore
 
     let tryRead (connection: NativeSqliteConnection) name =
         if not(hasColumn connection) then ValueNone

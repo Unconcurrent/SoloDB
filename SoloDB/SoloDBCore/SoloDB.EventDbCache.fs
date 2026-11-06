@@ -47,14 +47,16 @@ type internal EventDbCache(connectionString: string, directConnection: NativeSql
     member private _.IsCachedName(collectionName: string) =
         cacheStore.IsCachedName(collectionName)
 
-    member private _.EnsureExists<'U>(collectionName: string) =
-        if Some collectionName = knownCollectionName then
-            if not knownCollectionExists then
-                if not (Helper.existsCollection collectionName directConnection) then
-                    Helper.createTableInner<'U> collectionName directConnection
-                knownCollectionExists <- true
-        else if not (Helper.existsCollection collectionName directConnection) then
+    member private this.EnsureExists<'U>(collectionName: string, description: CollectionTypeDescription voption) =
+        let struct(exists,recorded) =
+            match description with
+            | ValueSome description when not directConnection.IsReadOnly -> CollectionTypeInformation.lookup directConnection collectionName description
+            | _ ->
+                struct((Some collectionName = knownCollectionName && knownCollectionExists) || this.IsCachedName(collectionName) ||
+                       Helper.existsCollection collectionName directConnection,true)
+        if not exists then
             Helper.createTableInner<'U> collectionName directConnection
+        if Some collectionName = knownCollectionName then knownCollectionExists <- true
 
         Helper.registerTypeCollection<'U> collectionName directConnection
 
@@ -69,6 +71,7 @@ type internal EventDbCache(connectionString: string, directConnection: NativeSql
                 CollectionFactory = None
             }
             RelationsCore.ensureSchemaForOwnerType relationTx typeof<'U>
+        recorded
 
     member this.FileSystem : IFileSystem =
         if isNull cachedFileSystem then
@@ -81,31 +84,37 @@ type internal EventDbCache(connectionString: string, directConnection: NativeSql
         if collectionName.StartsWith "SoloDB" then
             raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
-        let collection =
+        let initialEpoch = directConnection.DatabaseOwner.CallbackEpoch
+        if initialEpoch <> callbacks then descriptions.Clear(); callbacks <- initialEpoch
+        let key = struct(collectionName,typeof<'U>)
+        let initialDescription = TypeDescriptions.Get typeof<'U>
+        let alreadyRecorded =
+            match descriptions.TryGetValue key with
+            | true,saved -> obj.ReferenceEquals(saved,initialDescription)
+            | _ -> false
+        let struct(collection,recorded,constructed) =
             match this.TryGetCached<'U>(collectionName) with
-            | Some cached -> cached
+            | Some cached -> struct(cached,alreadyRecorded,false)
             | None ->
-                this.EnsureExists<'U>(collectionName)
+                let description = if alreadyRecorded then ValueNone else ValueSome initialDescription
+                let recorded = this.EnsureExists<'U>(collectionName,description)
                 let collection = collectionFactory.CreateCollection<'U>(collectionName)
                 this.TryStoreCached<'U>(collectionName) collection |> ignore
-                collection
+                struct(collection,recorded,true)
         let epoch = directConnection.DatabaseOwner.CallbackEpoch
         if epoch <> callbacks then descriptions.Clear(); callbacks <- epoch
-        let key = struct(collectionName,typeof<'U>)
-        let description = TypeDescriptions.Get typeof<'U>
-        match descriptions.TryGetValue key with
-        | true,saved when obj.ReferenceEquals(saved,description) -> ()
-        | _ ->
-            let changed = CollectionTypeInformation.recordChanged directConnection collectionName description
-            let completed = directConnection.DatabaseOwner.CallbackEpoch
-            if completed <> epoch then
-                descriptions.Clear()
-                callbacks <- completed
-            else
-                if changed then
-                    for candidate in descriptions.Keys |> Seq.filter(fun struct(name,_) -> name = collectionName) |> Seq.toArray do
-                        descriptions.Remove candidate |> ignore
-                descriptions[key] <- description
+        let description = if constructed then TypeDescriptions.Get typeof<'U> else initialDescription
+        let unchanged = recorded && initialEpoch = epoch && obj.ReferenceEquals(initialDescription,description)
+        let changed = not unchanged && CollectionTypeInformation.recordChanged directConnection collectionName description
+        let completed = directConnection.DatabaseOwner.CallbackEpoch
+        if completed <> epoch then
+            descriptions.Clear()
+            callbacks <- completed
+        else
+            if changed then
+                for candidate in descriptions.Keys |> Seq.filter(fun struct(name,_) -> name = collectionName) |> Seq.toArray do
+                    descriptions.Remove candidate |> ignore
+            descriptions[key] <- description
         collection
 
     member this.CollectionExists(collectionName: string) =
