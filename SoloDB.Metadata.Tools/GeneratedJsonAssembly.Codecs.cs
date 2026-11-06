@@ -222,7 +222,7 @@ public static partial class GeneratedJsonAssembly
         if (element != null) { api.TypeToken(il,type); api.TypeToken(il,element); il.Emit(OpCodes.Call,api.ModelRegistration("RegisterSequence")); }
     }
 
-    private static void MemberTemplates(ILProcessor il, GeneratedModel model, Api api)
+    internal static void TypeTemplate(ILProcessor il, TypeReference value, Api api)
     {
         var template = api.ModelRegistration("TemplateParameter").ReturnType;
         void Original(TypeReference value)
@@ -247,13 +247,19 @@ public static partial class GeneratedJsonAssembly
                 il.Emit(OpCodes.Call,api.ModelRegistration("TemplateNamed"));
             }
         }
+        Original(value);
+    }
+
+    private static void MemberTemplates(ILProcessor il, GeneratedModel model, Api api)
+    {
+        var template = api.ModelRegistration("TemplateParameter").ReturnType;
         il.Emit(OpCodes.Ldc_I4,model.Members.Length); il.Emit(OpCodes.Newarr,template);
         for (var index = 0; index < model.Members.Length; index++)
         {
             var member = model.Members[index];
             var original = member.Getter?.ReturnType ?? member.Field?.FieldType ?? member.Setter?.Parameters.Last().ParameterType;
             il.Emit(OpCodes.Dup); il.Emit(OpCodes.Ldc_I4,index);
-            if (original == null) il.Emit(OpCodes.Call,api.ModelRegistration("TemplateUnavailable")); else Original(original);
+            if (original == null) il.Emit(OpCodes.Call,api.ModelRegistration("TemplateUnavailable")); else TypeTemplate(il,original,api);
             il.Emit(OpCodes.Stelem_Ref);
         }
     }

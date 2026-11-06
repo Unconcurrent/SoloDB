@@ -8,6 +8,7 @@
     <Compile Include="../SoloDB/Metadata/TypeSupport.fs" Link="TypeSupport.fs" />
     <Compile Include="../SoloDB/Metadata/CodecPreparation.fs" Link="CodecPreparation.fs" />
     <Compile Include="../SoloDB/Metadata/CodecNumericPreparation.fs" Link="CodecNumericPreparation.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecDescription.fs" Link="CodecDescription.fs" />
     <Compile Include="../SoloDB/Metadata/QueryOperationEmitter.fs" Link="QueryOperationEmitter.fs" />
     <Compile Include="../SoloDB/Metadata/SqlArgumentEmitter.fs" Link="SqlArgumentEmitter.fs" />
     <Compile Include="../SoloDB/Metadata/CodecEmitter.fs" Link="CodecEmitter.fs" />

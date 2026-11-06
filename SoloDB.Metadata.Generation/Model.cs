@@ -47,6 +47,9 @@ public sealed class Model
         Members = members;
     }
     public string[] AssignableTo { get; set; } = System.Array.Empty<string>();
+    public string[] EnumNames { get; set; } = System.Array.Empty<string>();
+    public string[] EnumValues { get; set; } = System.Array.Empty<string>();
+    public bool EnumFlags { get; set; }
     public bool HelperOnly { get; set; }
     public IReadOnlyDictionary<string,string> TypeIdentities { get; set; } = new Dictionary<string,string>();
     public string[] CollectionArguments { get; set; } = System.Array.Empty<string>();

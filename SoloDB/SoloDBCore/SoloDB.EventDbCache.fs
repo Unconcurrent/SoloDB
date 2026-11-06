@@ -75,13 +75,16 @@ type internal EventDbCache(connectionString: string, directConnection: NativeSql
         if collectionName.StartsWith "SoloDB" then
             raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
-        match this.TryGetCached<'U>(collectionName) with
-        | Some cached -> cached
-        | None ->
-            this.EnsureExists<'U>(collectionName)
-            let collection = collectionFactory.CreateCollection<'U>(collectionName)
-            this.TryStoreCached<'U>(collectionName) collection |> ignore
-            collection
+        let collection =
+            match this.TryGetCached<'U>(collectionName) with
+            | Some cached -> cached
+            | None ->
+                this.EnsureExists<'U>(collectionName)
+                let collection = collectionFactory.CreateCollection<'U>(collectionName)
+                this.TryStoreCached<'U>(collectionName) collection |> ignore
+                collection
+        CollectionTypeInformation.record directConnection collectionName (TypeDescriptions.Get typeof<'U>)
+        collection
 
     member this.CollectionExists(collectionName: string) =
         let collectionName = Helper.formatName collectionName

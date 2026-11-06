@@ -650,6 +650,10 @@ module internal ModelDiscovery =
                         |> Option.iter(fun contract -> generated.SequenceElement <- reference contract.GenericArguments[0])
                     for assembly in access do generated.AccessAssemblies.Add(assembly) |> ignore
                     if shape = TypeShape.Enum then
+                        let constants = entity.FSharpFields |> Seq.choose(fun field -> field.LiteralValue |> Option.map(fun value -> field.Name,value)) |> Seq.toArray
+                        model.EnumNames <- constants |> Array.map fst
+                        model.EnumValues <- constants |> Array.map(fun (_,value) -> Convert.ToString(value,Globalization.CultureInfo.InvariantCulture))
+                        model.EnumFlags <- hasAttribute "System.FlagsAttribute" entity.Attributes
                         let width =
                             match entity.FSharpFields |> Seq.tryPick(fun field -> field.LiteralValue) with
                             | Some (:? sbyte) -> moduleDefinition.TypeSystem.SByte
@@ -669,6 +673,11 @@ module internal ModelDiscovery =
                                         invalidOp ("The enum input does not match its compiler identity: " + fullName)
                                     let definition = input.MainModule.GetType(actual.FullName)
                                     if isNull definition || not definition.IsEnum then invalidOp ("The enum input has no original definition: " + fullName)
+                                    if constants.Length = 0 then
+                                        let originalConstants = definition.Fields |> Seq.filter(fun field -> field.IsLiteral && field.HasConstant) |> Seq.toArray
+                                        model.EnumNames <- originalConstants |> Array.map _.Name
+                                        model.EnumValues <- originalConstants |> Array.map(fun field -> Convert.ToString(field.Constant,Globalization.CultureInfo.InvariantCulture))
+                                        model.EnumFlags <- definition.CustomAttributes |> Seq.exists(fun attribute -> attribute.AttributeType.FullName = "System.FlagsAttribute")
                                     let backing = definition.Fields |> Seq.find(fun field -> field.Name = "value__")
                                     match backing.FieldType.MetadataType with
                                     | MetadataType.SByte -> moduleDefinition.TypeSystem.SByte

@@ -54,8 +54,10 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         do
             try
                 manager.SetHandlerDispatchGuard(fun () -> eventSystem.GlobalLock.IsHeldByCurrentThread)
-                use dbConnection = manager.BorrowNative()
-                Bootstrap.initializeSchema dbConnection
+                do
+                    use dbConnection = manager.BorrowNative()
+                    Bootstrap.initializeSchema dbConnection
+                CollectionTypeInformation.ensureColumn (NativePooled manager)
             with error ->
                 try (manager :> IDisposable).Dispose() with cleanup ->
                     error.Data.["SoloDB.InitializationCleanupException"] <- cleanup
@@ -81,8 +83,10 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     with _ -> release(); reraise()
                 try
                     manager.SetHandlerDispatchGuard(fun () -> eventSystem.GlobalLock.IsHeldByCurrentThread)
-                    use connection = manager.BorrowNative()
-                    Bootstrap.initializeSchema connection
+                    do
+                        use connection = manager.BorrowNative()
+                        Bootstrap.initializeSchema connection
+                    CollectionTypeInformation.ensureColumn (NativePooled manager)
                     manager
                 with error ->
                     try (manager :> IDisposable).Dispose() with cleanup -> error.Data.["SoloDB.InitializationCleanupException"] <- cleanup

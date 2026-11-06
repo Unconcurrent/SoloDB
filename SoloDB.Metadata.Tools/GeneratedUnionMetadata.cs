@@ -55,7 +55,7 @@ public static class GeneratedUnionMetadata
             var factory = factories.SingleOrDefault(method => Convert.ToInt32(Mapping(method)!.ConstructorArguments[1].Value) == item.tag);
             MethodReference? reference = factory == null ? null : module.ImportReference(factory);
             if (reference != null) reference.DeclaringType = actual;
-            return new GeneratedUnionCase(item.name,item.tag,reference,fields.Select(field => field.Name).ToArray(),fields.Select(field => Closed(field.PropertyType)).ToArray());
+            return new GeneratedUnionCase(item.name,item.tag,reference,fields.Select(field => field.Name).ToArray(),fields.Select(field => Closed(field.PropertyType)).ToArray()) { FieldSignatures = fields.Select(field => field.PropertyType).ToArray() };
         }).ToArray();
         var hosted = hostedReferences ?? ContainsReferences(source,new HashSet<string>(StringComparer.Ordinal));
         var models = new List<GeneratedModel>();

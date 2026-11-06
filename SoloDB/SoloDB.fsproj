@@ -47,6 +47,7 @@
     <Compile Include="Metadata/TypeSupport.fs" />
     <Compile Include="Metadata/CodecPreparation.fs" />
     <Compile Include="Metadata/CodecNumericPreparation.fs" />
+    <Compile Include="Metadata/CodecDescription.fs" />
     <Compile Include="Metadata/QueryStorage.fs" />
     <Compile Include="Metadata/TypeCache.fs" />
     <Compile Include="Metadata/ReferenceTypes.fs" />
@@ -172,6 +173,7 @@
     <Compile Include="Numerics/DecimalMath.fs" />
     <Compile Include="Json/JsonStoredNumericRuntime.fs" />
     <Compile Include="Metadata/JsonOperations.fs" />
+    <Compile Include="Metadata/TypeDescriptions.fs" />
     <Compile Include="Metadata/RelationAccessors.fs" />
     <Compile Include="Storage/Storage.Types.fs" />
     <Compile Include="Storage/Storage.Stream.fs" />
@@ -422,6 +424,7 @@
 	    <Compile Include="SoloDBCore/SoloDB.Location.fs" />
     <Compile Include="SoloDBCore/SoloDB.ToCollectionData.fs" />
     <Compile Include="SoloDBCore/SoloDB.SchemaMigration.fs" />
+    <Compile Include="SoloDBCore/SoloDB.CollectionTypeInformation.fs" />
     <Compile Include="Events/FileSystemEvents.Schema.fs" />
     <Compile Include="SoloDBCore/SoloDB.NumericalFunctions.fs" />
     <Compile Include="SoloDBCore/SoloDB.Bootstrap.fs" />

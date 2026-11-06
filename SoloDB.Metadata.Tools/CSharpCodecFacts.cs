@@ -171,6 +171,13 @@ internal static class CSharpCodecFacts
                     IndexedRead = attribute.Properties.FirstOrDefault(property => property.Name == "IndexedRead").Argument.Value as string,
                     IndexedWrite = attribute.Properties.FirstOrDefault(property => property.Name == "IndexedWrite").Argument.Value as string };
             TypeReference? OptionalType(string name) => Text(name) is string identity ? ImportType(SourceTypeIdentity.Resolve(consumer.MainModule,identity)) : null;
+            if (definition.IsEnum)
+            {
+                var constants = definition.Fields.Where(field => field.IsLiteral && field.HasConstant).ToArray();
+                policy.EnumNames = constants.Select(field => field.Name).ToArray();
+                policy.EnumValues = constants.Select(field => Convert.ToString(field.Constant,System.Globalization.CultureInfo.InvariantCulture)!).ToArray();
+                policy.EnumFlags = definition.CustomAttributes.Any(attribute => attribute.AttributeType.FullName == "System.FlagsAttribute");
+            }
             var defaultConstructor = sourceType is ArrayType ? null : definition.Methods.FirstOrDefault(method => method.IsConstructor && !method.IsStatic && method.IsPublic && method.Parameters.Count == 0);
             MethodReference? defaultReference = null;
             if (defaultConstructor != null) { defaultReference = module.ImportReference(defaultConstructor); defaultReference.DeclaringType = type; }

@@ -117,6 +117,7 @@ public static partial class GeneratedJsonAssembly
         AssemblyDefinition product, GeneratedModel[] models, int startIndex = 0)
     {
         var api = new Api(module,product);
+        foreach(var model in models) GeneratedTypeDescriptions.Register(module,il,product,model,models);
         if(models.Any(model=>TypeSupport.SequenceBytes(model.Type is ArrayType,model.SequenceElement?.FullName ?? "")))
             GeneratedOutputCodec.RegisterSequenceBytes(definitions,module,owner,il,product);
         var finite = models.Select(model => TypeSupport.FiniteCaptureRoles(model.Facts.Shape)).ToArray();

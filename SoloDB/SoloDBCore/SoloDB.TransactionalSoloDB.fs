@@ -77,6 +77,7 @@ type TransactionalSoloDB internal (connection: NativeCachingDbConnection, parent
             HelperSchema.ensureUnsignedIndexes<'T> name connection
 
         Helper.registerTypeCollection<'T> name connection
+        CollectionTypeInformation.record connection name (TypeDescriptions.Get typeof<'T>)
 
         // Validate relation topology after table creation.
         let hasRelations = RelationsSchemaValidator.hasReferenceProperties typeof<'T>

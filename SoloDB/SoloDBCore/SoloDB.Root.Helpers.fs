@@ -18,9 +18,12 @@ module internal SoloDBRootOps =
         checkDisposed()
         if name.StartsWith "SoloDB" then raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
-        let existsAlready =
+        let description = if connectionManager.IsReadOnly then ValueNone else ValueSome(TypeDescriptions.Get typeof<'T>)
+        let struct(existsAlready,recorded) =
             use connection = connectionManager.BorrowNative()
-            Helper.existsCollection name connection
+            match description with
+            | ValueSome(struct(_,meaning)) -> CollectionTypeInformation.lookup connection name meaning
+            | ValueNone -> struct(Helper.existsCollection name connection,true)
 
         if connectionManager.IsReadOnly && not existsAlready then
             raise (InvalidOperationException("ReadOnly storage cannot create a missing collection."))
@@ -46,6 +49,7 @@ module internal SoloDBRootOps =
                         HelperSchema.ensureUnsignedIndexes<'T> name connection
 
                     Helper.registerTypeCollection<'T> name connection
+                    match description with ValueSome description -> CollectionTypeInformation.record connection name description | ValueNone -> ()
 
                     if hasRelations then
                         let relationTx: RelationsTypes.RelationTxContext = {
@@ -79,6 +83,12 @@ module internal SoloDBRootOps =
                         RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
                     )
                 )
+
+        if existsAlready && not recorded then
+            match description with
+            | ValueSome description ->
+                connectionManager.WithTransaction(fun connection -> CollectionTypeInformation.record connection name description)
+            | ValueNone -> ()
 
         let collection = Collection<'T>(NativePooled connectionManager, name, connectionString, { ClearCacheFunction = clearCache; EventSystem = events })
 

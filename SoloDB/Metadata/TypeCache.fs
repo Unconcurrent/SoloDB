@@ -169,13 +169,6 @@ type internal RelationHydrationDescriptor(singles: RelationMember[], manyRelatio
 [<Struct>]
 type internal MetadataValue<'T> = { Generated: bool; Value: 'T }
 
-/// Original member signatures retain formal slots independently of closed argument values.
-type internal ModelTypeTemplate =
-    | UnavailableType
-    | FormalType of int
-    | NamedType of Type * ModelTypeTemplate[]
-    | ElementType of int * ModelTypeTemplate
-
 /// Compiler-supplied delegates remain callable facts until ordinary dynamic preparation needs an operand.
 type internal JsonDefaultMethod =
     | EmittedMethod of MethodBase
@@ -189,6 +182,11 @@ type internal JsonDefaultMethod =
 /// One concrete record of facts and functions for a closed CLR type.
 type internal TypeMetadataRecord = {
     TypeFacts: MetadataValue<ModelTypeFacts> voption
+    TypeDescription: MetadataValue<struct(string * string)> voption
+    TypeDescriptionFacts: MetadataValue<CodecDescriptionFacts<Type>> voption
+    DescriptionDependencies: Type[]
+    DescriptionBases: Type[]
+    DescriptionKnown: bool
     NullableUnderlying: MetadataValue<Type> voption
     EnumUnderlying: MetadataValue<Type> voption
     MemberTypes: MetadataValue<struct(string * Type * bool)[]> voption
@@ -281,6 +279,9 @@ type internal TypeMetadataCache private () =
     static let names = Dictionary<string, TypeNameEntry>(StringComparer.Ordinal)
     static let empty = {
         TypeFacts = ValueNone; NullableUnderlying = ValueNone; EnumUnderlying = ValueNone
+        TypeDescription = ValueNone
+        TypeDescriptionFacts = ValueNone
+        DescriptionDependencies = [||]; DescriptionBases = [||]; DescriptionKnown = false
         MemberTypes = ValueNone; MemberTemplates = None; DefinitionRepresentative = ValueNone
         StringIndexer = ValueNone; SequenceElement = ValueNone; EqualityComparer = ValueNone
         ObjectModel = ValueNone; JsonDefaultMethods = None; JsonUtf8Read = ValueNone; JsonUtf16Read = ValueNone; JsonWrites = None; PhysicalIdentity = ValueNone
@@ -338,17 +339,49 @@ type internal TypeMetadataCache private () =
     }
     static let get modelType =
         match entries.TryGetValue modelType with true, metadata -> metadata | _ -> empty
+    static let known metadata = metadata.DescriptionKnown || metadata.TypeDescriptionFacts.IsSome || metadata.ObjectModel.IsSome
+    static let publishRecord modelType metadata =
+        let previous = get modelType
+        let changed =
+            match previous.TypeDescriptionFacts,metadata.TypeDescriptionFacts with
+            | ValueNone,ValueNone -> false
+            | ValueSome before,ValueSome after -> not(obj.ReferenceEquals(before.Value,after.Value))
+            | _ -> true
+        if (known metadata && not(known previous)) || changed then
+            for target in entries.Keys |> Seq.toArray do
+                let current = entries[target]
+                if current.TypeDescription.IsSome &&
+                   ((changed && Array.contains modelType current.DescriptionDependencies) ||
+                    (current.DescriptionBases |> Array.exists(fun dependency -> dependency.IsAssignableFrom modelType))) then
+                    entries[target] <- { current with TypeDescription = ValueNone }
+        entries[modelType] <- metadata
     static member Get(modelType: Type) =
         gate.EnterReadLock()
         try get modelType
         finally gate.ExitReadLock()
+    static member DescribedTypes() =
+        gate.EnterReadLock()
+        try entries |> Seq.choose(fun (KeyValue(target,metadata)) -> if known metadata then Some target else None) |> Seq.toArray
+        finally gate.ExitReadLock()
+    static member StoreDescription(modelType: Type, candidates: Type[], dependencies: Type[], bases: Type[], description: struct(string * string)) =
+        gate.EnterWriteLock()
+        try
+            let added = entries |> Seq.exists(fun (KeyValue(target,metadata)) ->
+                known metadata && not(Array.contains target candidates) &&
+                (bases |> Array.exists(fun dependency -> dependency.IsAssignableFrom target)))
+            if added then false
+            else
+                let metadata = get modelType
+                entries[modelType] <- { metadata with TypeDescription = ValueSome { Generated = false; Value = description }; DescriptionDependencies = dependencies; DescriptionBases = bases }
+                true
+        finally gate.ExitWriteLock()
     static member Read(modelType: Type, select: TypeMetadataRecord -> 'T) =
         gate.EnterReadLock()
         try select (get modelType)
         finally gate.ExitReadLock()
     static member Register(modelType: Type, update: TypeMetadataRecord -> TypeMetadataRecord) =
         gate.EnterWriteLock()
-        try entries.[modelType] <- update (get modelType)
+        try publishRecord modelType (update (get modelType))
         finally gate.ExitWriteLock()
     static member RegisterName(modelType: Type) =
         gate.EnterWriteLock()
@@ -424,7 +457,7 @@ type internal TypeMetadataCache private () =
                 | ValueSome current when expected |> ValueOption.forall(fun original -> not(obj.ReferenceEquals(original.Value,current.Value))) -> current
                 | _ ->
                     let completed = { Generated = generated; Value = discovered }
-                    entries.[modelType] <- store completed metadata
+                    publishRecord modelType (store completed metadata)
                     completed
             finally gate.ExitWriteLock()
         let rec acquire current =

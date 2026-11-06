@@ -142,7 +142,7 @@ module internal Bootstrap =
     /// owner, so they are not repeated here.
     let [<Literal>] initialSchema = "
 
-                CREATE TABLE SoloDBCollections (Name TEXT NOT NULL) STRICT;
+                CREATE TABLE SoloDBCollections (Name TEXT NOT NULL, TypeInformation BLOB) STRICT;
 
 
                 CREATE TABLE SoloDBDirectoryHeader (

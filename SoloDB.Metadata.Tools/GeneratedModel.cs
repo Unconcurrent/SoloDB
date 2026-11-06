@@ -40,6 +40,7 @@ public sealed class GeneratedUnionCase
     public MethodReference? Factory { get; }
     public string[] FieldNames { get; }
     public TypeReference[] FieldTypes { get; }
+    public TypeReference[]? FieldSignatures { get; set; }
 }
 
 public sealed class GeneratedMember

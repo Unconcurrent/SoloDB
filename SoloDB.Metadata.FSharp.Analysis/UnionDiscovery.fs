@@ -47,7 +47,9 @@ module internal UnionDiscovery =
                 let factory = MethodReference((if item.Fields.Count = 0 then "get_" else "New") + item.CompiledName, returnSignature, actual)
                 let fieldTypes = item.Fields |> Seq.map(fun field -> memberType field.FieldType) |> Seq.toArray
                 for field in item.Fields do factory.Parameters.Add(ParameterDefinition(signature field.FieldType))
-                GeneratedUnionCase(item.Name,tag,(if helpers && publicRepresentation then factory else null),item.Fields |> Seq.map _.Name |> Seq.toArray,fieldTypes))
+                let result = GeneratedUnionCase(item.Name,tag,(if helpers && publicRepresentation then factory else null),item.Fields |> Seq.map _.Name |> Seq.toArray,fieldTypes)
+                result.FieldSignatures <- item.Fields |> Seq.map(fun field -> signature field.FieldType) |> Seq.toArray
+                result)
         let rootFacts = ResizeArray<Member>()
         let rootMembers = ResizeArray<GeneratedMember>()
         let property (facts: ResizeArray<Member>) (members: ResizeArray<GeneratedMember>) (owner: TypeReference) name (valueType: TypeReference) result ignored =
