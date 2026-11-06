@@ -102,6 +102,8 @@ Failed parameter capture, row mapping or required-row checks abort unread statem
 
 Native engine errors use `SoloDatabase.NativeSqliteException`, derived from `System.Data.Common.DbException`. Catch the standard base for database failures or the native type to inspect `SqliteErrorCode` and `SqliteExtendedErrorCode`, which expose the primary and extended SQLite result codes. Connection state uses `SqliteConnectionState`.
 
+SoloDB registers `REGEXP` with a 100 millisecond match timeout. A timeout fails the SQL operation; it does not return a nonmatch or a partial result. SQL NULL inputs remain nonmatches.
+
 <a id="standard-adonet-access"></a>
 
 ## ADO.NET emulation

@@ -54,6 +54,7 @@ module internal Bootstrap =
                 | _ -> setupSql + " PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;"
         let usCultureInfo = CultureInfo.GetCultureInfo("en-us")
         let lower (value: string) = value.ToLower(usCultureInfo)
+        let regexpTimeout = TimeSpan.FromMilliseconds(100)
         let register (connection: NativeSqliteConnection) =
             NumericalFunctions.register connection
             QueryTranslatorCharacters.register lower connection
@@ -90,7 +91,7 @@ module internal Bootstrap =
                 if isNull pattern || isNull input then
                     false
                 else
-                    System.Text.RegularExpressions.Regex.IsMatch(input, pattern, System.Text.RegularExpressions.RegexOptions.None)), true)
+                    System.Text.RegularExpressions.Regex.IsMatch(input, pattern, System.Text.RegularExpressions.RegexOptions.None, regexpTimeout)), true)
             eventSystem.CreateFunctions(connection)
             connection.CreateFunction("base64", Func<obj, obj>(Utils.sqlBase64), true) // https://www.sqlite.org/base64.html
         // Lock waiting belongs to each native command budget, including cold setup.
