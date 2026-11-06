@@ -142,11 +142,11 @@ module internal SearchCatalog =
             let mutable statement = connection.OpenStatement($"SELECT Id,Definition FROM {table}")
             try
                 while statement.Step() do
-                    let name = "SoloDB.Search_" + string(statement.Row.GetInt64(0))
+                    let definition = SearchDefinition.decode(statement.Row.GetString(1))
+                    let name = SearchArtifactNames.table (statement.Row.GetInt64(0)) definition.Fields
                     owned.Add(name) |> ignore
                     for suffix in [|"_source";"_insert";"_delete";"_update";"_config";"_data";"_idx";"_docsize"|] do
                         owned.Add(name+suffix) |> ignore
-                    let definition = SearchDefinition.decode(statement.Row.GetString(1))
                     if definition.Storage = SearchTextStorage.Copied then owned.Add(name+"_content") |> ignore
                 statement.Dispose()
             with error -> statement.Abort(error); reraise()

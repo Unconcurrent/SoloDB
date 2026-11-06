@@ -43,9 +43,17 @@ type internal SearchResolvedField =
 type internal SearchResolvedDefinition =
     { Fields: SearchResolvedField[]; Storage: SearchTextStorage; Tokenizer: string; Prefix: int[] }
 
+module internal SearchArtifactNames =
+    let table id (fields: SearchResolvedField[]) =
+        let mutable name = "SoloDB.Search_" + string id
+        // FTS5 also exposes a hidden control column named after its table.
+        while fields |> Array.exists(fun field -> String.Equals(field.Alias,name,StringComparison.OrdinalIgnoreCase)) do
+            name <- name + "_"
+        name
+
 type internal SearchIndexDescriptor =
     { Id: int64; Collection: string; Name: string; Version: int; Definition: SearchResolvedDefinition; Objects: string }
-    member this.Table = "SoloDB.Search_" + string this.Id
+    member this.Table = SearchArtifactNames.table this.Id this.Definition.Fields
     member this.View = this.Table + "_source"
 
 /// A stored field and its native search column.

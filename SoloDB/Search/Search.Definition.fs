@@ -9,14 +9,12 @@ module internal SearchDefinitionResolution =
         QuerySearchFields.path selector
     let resolve collection (builder: SearchIndexBuilder<'T>) =
         let aliases = HashSet<string>(StringComparer.Ordinal)
-        let paths = HashSet<string>(StringComparer.Ordinal)
         let fields = builder.Fields |> Array.map (fun field ->
             let path, leaf = fieldPath collection field.Selector
-            if not(paths.Add path) then invalidArg "selector" "Search field paths must be distinct."
             let alias = if isNull field.Alias then leaf else field.Alias
-            if String.IsNullOrWhiteSpace alias || alias.IndexOf('\000') >= 0 ||
+            if alias.IndexOf('\000') >= 0 ||
                SearchDefinition.identifier alias = "rank" || SearchDefinition.identifier alias = "rowid" then
-                invalidArg "name" "A search alias must be nonempty and cannot be rank, rowid or contain NUL."
+                invalidArg "name" "A search alias cannot be rank, rowid or contain NUL."
             if not(aliases.Add(SearchDefinition.identifier alias)) then invalidArg "name" "Search aliases must be distinct native identifiers."
             { Path = path; Alias = alias; Weight = field.Weight })
         if fields.Length = 0 then invalidArg "configure" "Declare at least one search field."

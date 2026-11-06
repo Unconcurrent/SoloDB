@@ -30,8 +30,6 @@ module internal SearchSchema =
         let definition = index.Definition
         let table, view = quote index.Table, quote index.View
         let fields = definition.Fields
-        if fields |> Array.exists(fun field -> identifier field.Alias = identifier index.Table) then
-            invalidArg "name" "A search alias cannot equal its physical FTS table name."
         let names = fields |> Array.map(fun field -> quote field.Alias) |> String.concat ","
         let values owner = fields |> Array.map(fun field -> projection owner field.Path) |> String.concat ","
         let columns = fields |> Array.map(fun field -> projection "" field.Path + " AS " + quote field.Alias) |> String.concat ","
@@ -84,7 +82,7 @@ module internal SearchSchema =
             with error -> statement.Abort(error); reraise()
         if missingConfig then
             let findings = SearchCatalog.inspectObjects connection index
-            if findings |> Array.exists(fun finding -> finding.Kind = SearchVerificationKind.AlteredArtifact) then
+            if findings |> Array.exists(fun finding -> finding.Kind = SearchVerificationKind.AlteredArtifact && finding.ObjectName = index.Table) then
                 invalidOp "The damaged search table differs from its published definition; bootstrap repair is unsafe."
             let template = "SoloDB.SearchRepair_" + string index.Id
             let config = quote(index.Table+"_config")
