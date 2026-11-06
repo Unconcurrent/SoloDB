@@ -30,7 +30,7 @@ type internal StorageFaultChannel() =
 
 /// Released only by the physical native owner after successful native close.
 [<Sealed>]
-type internal SqliteStorageLease(name: string, filename: string, profile: SqliteStorageProfile, native: bool,
+type internal SqliteStorageLease(name: string, filename: string, profile: SqliteStorageProfile,
                                 vfs: IDisposable, faults: StorageFaultChannel,
                                 report: exn -> unit, release: unit -> unit) =
     let gate = obj()
@@ -40,7 +40,6 @@ type internal SqliteStorageLease(name: string, filename: string, profile: Sqlite
     member _.Name = name
     member _.Filename = filename
     member _.Profile = profile
-    member _.IsNative = native
     member _.Faults = faults
     member _.Report(error) = report error
     member _.RequestClose() =
@@ -108,11 +107,10 @@ module private StorageInput =
         page
 
 /// A single-use storage input. Dispose deterministically; abandoned native callback
-/// cycles may retain all resources. Positional files and Native registrations are borrowed.
+/// cycles may retain all resources. Positional files are borrowed.
 [<Sealed>]
 type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorageFile[], owned: IDisposable[],
-                            coordination: SqliteStorageCoordination, sectorSize: int,
-                            native: (string * string) option) =
+                            coordination: SqliteStorageCoordination) =
     let gate = obj()
     let mutable nodes = files |> Array.map StorageNode
     let mutable ownedResources = owned
@@ -204,26 +202,20 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
         result
     do
         StorageValidation.profile profile
-        StorageValidation.sectorSize sectorSize
         StorageInput.distinct profile files
     member _.Profile = profile
     member _.ClosingFailure = lock gate (fun () -> closingFailure)
     member _.IsClosed = lock gate (fun () -> retired && references = 0 && cleanupState = 2)
-    member internal _.IsNative = native.IsSome
     member internal _.ReportClosingFailure(error: exn) = report error
     member internal _.Identity = identity
     member internal _.ConnectionString =
         let builder = Data.Common.DbConnectionStringBuilder()
-        match native with
-        | Some(filename, name) ->
-            builder.["Data Source"] <- filename
-            builder.["Storage Vfs"] <- name
-        | None when not(isNull coordination) ->
+        if not(isNull coordination) then
             builder.["Data Source"] <- "custom-storage"
             builder.["Storage Coordination"] <- coordination.Filename
             if not(isNull coordination.RegisteredVfs) then
                 builder.["Storage Vfs"] <- coordination.RegisteredVfs
-        | None -> builder.["Data Source"] <- identity
+        else builder.["Data Source"] <- identity
         builder.ConnectionString
     member internal _.IsRetired = lock gate (fun () -> retired)
     member internal _.Attach() =
@@ -254,18 +246,12 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
             cleanup()
         try
             StorageNative.verifyProvider()
-            let name, filename =
-                match native with
-                | Some(filename, name) ->
-                    StorageNativeVfs(name) |> ignore
-                    name, filename
-                | None ->
-                    let name = identity + "-" + Guid.NewGuid().ToString("N")
-                    let vfs = new ManagedStorageVfs(name, identity, nodes, profile, sectorSize, coordination,
-                                                    Action<int,exn>(fun code cause -> faults.Record(code, cause)), initialize timeout)
-                    registration <- vfs
-                    name, (if profile = SqliteStorageProfile.ReadOnly then "file:" + identity + "?immutable=1" else identity)
-            lease <- SqliteStorageLease(name, filename, profile, native.IsSome, registration, faults, report, release)
+            let name = identity + "-" + Guid.NewGuid().ToString("N")
+            let vfs = new ManagedStorageVfs(name, identity, nodes, profile, coordination,
+                                            Action<int,exn>(fun code cause -> faults.Record(code, cause)), initialize timeout)
+            registration <- vfs
+            let filename = if profile = SqliteStorageProfile.ReadOnly then "file:" + identity + "?immutable=1" else identity
+            lease <- SqliteStorageLease(name, filename, profile, registration, faults, report, release)
             let closing = lock gate (fun () -> leases.Add(lease) |> ignore; retired)
             if closing then lease.RequestClose()
             lease
@@ -280,45 +266,32 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
             if not(lock gate (fun () -> retired)) then retire() else cleanup()
         else retire()
     interface IDisposable with member this.Dispose() = this.Dispose()
-    static member private Managed(profile, files, owned, coordination, sectorSize) =
-        new SqliteStorage(profile, files, owned, coordination, sectorSize, None)
-    static member private Streams(profile, streams, leaveOpen, coordination, sectorSize) =
-        StorageValidation.sectorSize sectorSize
+    static member private Managed(profile, files, owned, coordination) =
+        new SqliteStorage(profile, files, owned, coordination)
+    static member private Streams(profile, streams, leaveOpen, coordination) =
         let adapters = StorageInput.adapters profile (profile <> SqliteStorageProfile.ReadOnly) leaveOpen streams
         try SqliteStorage.Managed(profile, adapters |> Array.map (fun f -> f :> ISqliteStorageFile),
-                                  adapters |> Array.map (fun f -> f :> IDisposable), coordination, sectorSize)
+                                  adapters |> Array.map (fun f -> f :> IDisposable), coordination)
         with _ ->
             for adapter in adapters do try (adapter :> IDisposable).Dispose() with _ -> ()
             reraise()
-    static member Native(filename: string, registeredVfs: string, profile: SqliteStorageProfile) =
-        StorageValidation.filename "filename" filename
-        StorageValidation.filename "registeredVfs" registeredVfs
-        new SqliteStorage(profile, Array.empty, Array.empty, null, 4096, Some(filename, registeredVfs))
     static member Simple(main: ISqliteStorageFile, journal: ISqliteStorageFile) =
-        SqliteStorage.Simple(main, journal, null, 4096)
+        SqliteStorage.Simple(main, journal, null)
     static member Simple(main: ISqliteStorageFile, journal: ISqliteStorageFile, coordination: SqliteStorageCoordination) =
-        SqliteStorage.Simple(main, journal, coordination, 4096)
-    static member Simple(main: ISqliteStorageFile, journal: ISqliteStorageFile, coordination: SqliteStorageCoordination, sectorSize: int) =
-        SqliteStorage.Managed(SqliteStorageProfile.Simple, [|main; journal|], Array.empty, coordination, sectorSize)
+        SqliteStorage.Managed(SqliteStorageProfile.Simple, [|main; journal|], Array.empty, coordination)
     static member Wal(main: ISqliteStorageFile, log: ISqliteStorageFile) =
-        SqliteStorage.Wal(main, log, null, 4096)
+        SqliteStorage.Wal(main, log, null)
     static member Wal(main: ISqliteStorageFile, log: ISqliteStorageFile, coordination: SqliteStorageCoordination) =
-        SqliteStorage.Wal(main, log, coordination, 4096)
-    static member Wal(main: ISqliteStorageFile, log: ISqliteStorageFile, coordination: SqliteStorageCoordination, sectorSize: int) =
-        SqliteStorage.Managed(SqliteStorageProfile.Wal, [|main; log|], Array.empty, coordination, sectorSize)
+        SqliteStorage.Managed(SqliteStorageProfile.Wal, [|main; log|], Array.empty, coordination)
     static member ReadOnly(main: ISqliteStorageFile) =
-        SqliteStorage.Managed(SqliteStorageProfile.ReadOnly, [|main|], Array.empty, null, 4096)
+        SqliteStorage.Managed(SqliteStorageProfile.ReadOnly, [|main|], Array.empty, null)
     static member Simple(main: Stream, journal: Stream, leaveOpen: bool) =
-        SqliteStorage.Simple(main, journal, leaveOpen, null, 4096)
+        SqliteStorage.Simple(main, journal, leaveOpen, null)
     static member Simple(main: Stream, journal: Stream, leaveOpen: bool, coordination: SqliteStorageCoordination) =
-        SqliteStorage.Simple(main, journal, leaveOpen, coordination, 4096)
-    static member Simple(main: Stream, journal: Stream, leaveOpen: bool, coordination: SqliteStorageCoordination, sectorSize: int) =
-        SqliteStorage.Streams(SqliteStorageProfile.Simple, [|main; journal|], leaveOpen, coordination, sectorSize)
+        SqliteStorage.Streams(SqliteStorageProfile.Simple, [|main; journal|], leaveOpen, coordination)
     static member Wal(main: Stream, log: Stream, leaveOpen: bool) =
-        SqliteStorage.Wal(main, log, leaveOpen, null, 4096)
+        SqliteStorage.Wal(main, log, leaveOpen, null)
     static member Wal(main: Stream, log: Stream, leaveOpen: bool, coordination: SqliteStorageCoordination) =
-        SqliteStorage.Wal(main, log, leaveOpen, coordination, 4096)
-    static member Wal(main: Stream, log: Stream, leaveOpen: bool, coordination: SqliteStorageCoordination, sectorSize: int) =
-        SqliteStorage.Streams(SqliteStorageProfile.Wal, [|main; log|], leaveOpen, coordination, sectorSize)
+        SqliteStorage.Streams(SqliteStorageProfile.Wal, [|main; log|], leaveOpen, coordination)
     static member ReadOnly(main: Stream, leaveOpen: bool) =
-        SqliteStorage.Streams(SqliteStorageProfile.ReadOnly, [|main|], leaveOpen, null, 4096)
+        SqliteStorage.Streams(SqliteStorageProfile.ReadOnly, [|main|], leaveOpen, null)

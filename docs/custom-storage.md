@@ -11,11 +11,10 @@ For an ordinary database file, keep using `new SoloDB(path)`.
 | `Simple(main, journal)` | Database and rollback journal | Readers normally finish before a writer commits. |
 | `Wal(main, log)` | Database and write-ahead log | A reader needs to keep its snapshot while another connection commits. |
 | `ReadOnly(main)` | One complete, unchanging database image | You only need to read an existing database. |
-| `Native(filename, registeredVfs, profile)` | An existing native SQLite filesystem registration | You need native handles, extensions or a specialist native filesystem. |
 
 `Simple` uses SQLite's PERSIST journal mode. `Wal` creates databases with 4096 byte pages. Both allow readers and one writer. A long-running reader can delay a writer in Simple mode or delay log cleanup in WAL mode.
 
-The first three factories accept either streams or `ISqliteStorageFile` objects. Each factory returns a single-use `SqliteStorage` object, called `storage` in the examples. Give it to one `SoloDB` instance and dispose it even if you never open the database.
+The factories accept either streams or `ISqliteStorageFile` objects. Each returns a single-use `SqliteStorage` object, called `storage` in the examples. Give it to one `SoloDB` instance and dispose it even if you never open the database.
 
 Keep the main file and its journal or log together across reopenings. Give each one separate storage. Do not replace a journal or log with an empty file: SQLite may need it to recover committed work.
 
@@ -141,7 +140,9 @@ Opening shared storage uses the connection's default timeout, normally 30 second
 
 A well-formed native filesystem name that is not registered causes `InvalidOperationException`. Register it before opening the database. Null or invalid factory arguments retain their argument exceptions.
 
-The `Simple`, `Wal` and `ReadOnly` factories do not expose connection or reader `Handle` values and cannot enable or load extensions. Those operations throw `NotSupportedException`. Disabling extensions with `EnableExtensions(false)` is allowed. Use the Native factory if your application needs raw handles or extensions. All `SqliteStorage` inputs require the bundled `e_sqlite3` provider; the ordinary string constructor retains its existing provider support.
+Connection and reader `Handle` values and the usual extension APIs remain available. Finish every raw statement, blob, backup and callback-dependent operation before disposing its connection or database. Finish a raw backup destination before any other access to it. These raw objects do not acquire an additional SoloDB disposal or retry protocol.
+
+Custom storage's direct native operations and the selected provider must use the same SQLite engine instance. The engine may be replaced in place; its name is not an encryption or capability policy. Missing native operations and errors retain their actual library/runtime behavior.
 
 ## Implement your own byte files
 
@@ -167,7 +168,7 @@ SoloDB serializes calls for each supplied file object, but different calls can r
 
 Make `Flush` preserve earlier byte and length writes to the level your backend promises. For durable files, make creation of the files and their parent directory durable too. Main and journal/log bytes all pass through your implementations; SQLite temporary files still use its ordinary native temporary-file path, so encrypting the supplied files does not encrypt those temporary files.
 
-Writable factories also accept `coordination` and `sectorSize`. The latter describes the data backend's sector damage unit, meaning the amount of neighbouring data a device failure can damage together. Use a truthful power of two from 32 through 65536; the default is 4096. Do not take that value from the unrelated coordination file or assume SoloDB adds atomic-write guarantees.
+Writable factories also accept `coordination`. Custom storage reports a 4096-byte sector unit to SQLite; this is separate from the database page size. It does not inherit media or atomic-write guarantees from the coordination file.
 
 Keep the supplied files available until `storage.IsClosed`. SoloDB clears an auxiliary journal or log by setting its length to zero and flushing it. It does not unlink your object or hide an old length behind an invalid header. Your objects are already bound to their database roles; do not treat them as a general create/delete filesystem.
 
@@ -182,16 +183,6 @@ Use `VacuumTo(path)` to export to an ordinary native file. Do not assume a trans
 For `ReadOnly`, supply a complete supported SoloDB main image. Finish WAL checkpointing or export a complete image first, and leave its bytes unchanged while it is open. SoloDB retains its usual read functions and metadata, but does not migrate schema, add indexes or create missing collections.
 
 Write-only administration, such as `Optimize`, `Vacuum`, index changes and search-index maintenance, throws `InvalidOperationException` on `ReadOnly` storage. An `EnsureIndex` or `EnsureSearchIndex` call that finds its existing index unchanged can succeed without writing. `DropIndexIfExists` and `DropSearchIndexIfExists` also succeed when their target is absent; they still refuse to remove an existing index. Raw write SQL instead keeps SQLite's READONLY error; it is not converted into an administration error.
-
-## Native access and extension users
-
-The Native factory borrows your registered SQLite filesystem. Keep that registration and its resources alive until `storage.IsClosed`.
-
-Finish raw statements, blobs, backups and callback-dependent work before disposing their connection or database. Finish a raw backup destination before any SoloDB access to that destination, including disposal.
-
-If outstanding raw objects make closing busy, `Dispose` records the error in `ClosingFailure` and keeps the connection and callback data alive. Finish those objects, call `Dispose` again on the database or storage input, and check `IsClosed`. A previous busy diagnostic can remain after a successful retry.
-
-SQLite automatic extensions run whenever a connection opens. If your process installs them on this engine, use the expert Native path rather than the managed layouts; managed inputs require that no foreign automatic extension is installed.
 
 ## Measure your workload
 

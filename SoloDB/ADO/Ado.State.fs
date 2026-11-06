@@ -97,7 +97,6 @@ type internal AdoSession(initial: NativeSqliteConnection, leaveOpen: bool, stand
     member _.Native =
         if not disposed then acquire()
         native
-    member _.IsManagedStorage = native.DatabaseOwner.IsManagedStorage
     member _.ConnectionString = connectionString
     member _.DataSource = dataSource
     member _.DefaultTimeout

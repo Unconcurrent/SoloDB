@@ -12,7 +12,7 @@ open StorageNative
 /// to the description. Disposal is permitted only after actual native close returns.
 [<Sealed>]
 type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNode[], profile: SqliteStorageProfile,
-                              sectorSize: int, coordination: SqliteStorageCoordination,
+                              coordination: SqliteStorageCoordination,
                               fault: Action<int,exn>, initialize: StorageHandle -> int) =
     let parent = StorageNativeVfs(null)
     let coordinator =
@@ -260,7 +260,7 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
             methodAt 7 (IntArg(fun file level -> protect 2058 (fun () -> StorageFiles.unlock (handle file) level)))
             methodAt 8 (Output(fun file output -> protect 3594 (fun () -> StorageFiles.reserved (handle file) output)))
             methodAt 9 (Control(fun file operation argument -> protect 10 (fun () -> control (handle file) operation argument)))
-            methodAt 10 (One(fun _ -> sectorSize))
+            methodAt 10 (One(fun _ -> 4096))
             methodAt 11 (One(fun _ -> 0x8800 ||| (if profile = SqliteStorageProfile.ReadOnly then 0x2000 else 0)))
             methodAt 12 (ShmMap(fun file region size extend output ->
                 Marshal.WriteIntPtr(output, 0n)

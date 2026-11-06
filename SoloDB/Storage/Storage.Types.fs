@@ -36,9 +36,6 @@ module internal StorageValidation =
     let bounds position count =
         if position < 0L || int64 count > Int64.MaxValue - position then
             raise(ArgumentOutOfRangeException("position"))
-    let sectorSize size =
-        if size < 32 || size > 65536 || size &&& (size - 1) <> 0 then
-            raise(ArgumentOutOfRangeException("sectorSize", "The logical sector size must be a power of two from 32 through 65536 bytes."))
     let writable readOnly =
         if readOnly then invalidOp "ReadOnly storage cannot perform write administration."
 

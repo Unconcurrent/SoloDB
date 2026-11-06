@@ -231,8 +231,6 @@ and [<AllowNullLiteral>] SqliteConnection private (session: AdoSession) as this 
         connection.Session.CheckSource()
         AdoConnectionPools.clear connection.Session.ConnectionString
     member _.Handle =
-        if session.IsManagedStorage then
-            raise (NotSupportedException("Managed storage does not expose native handles. Use borrowed Native storage for raw access."))
         if session.State = ConnectionState.Open then session.Native.Handle else null
     member _.CreateFunction<'R>(name: string, ``function``: Func<'R>, [<System.Runtime.InteropServices.Optional; System.Runtime.InteropServices.DefaultParameterValue(false)>] isDeterministic: bool) =
         session.Guard(fun () -> session.Native.CreateFunction(name, ``function``, isDeterministic))

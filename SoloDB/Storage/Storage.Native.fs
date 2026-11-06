@@ -81,14 +81,11 @@ module internal StorageNative =
             finally Marshal.FreeHGlobal(journal)
         finally Marshal.FreeHGlobal(db)
     let verifyProvider () =
-        // A matching name alone cannot prove that the provider and imports use
-        // one engine. Compare its static version-string address before any open.
-        if raw.GetNativeLibraryName() <> "e_sqlite3" then
-            raise(NotSupportedException("Custom storage requires the bundled e_sqlite3 provider."))
+        // Direct storage calls and provider-owned handles must belong to one engine.
         let version = raw.sqlite3_libversion()
         use address = fixed version
         if NativePtr.toNativeInt address <> sqlite3_libversion() then
-            raise(NotSupportedException("Custom storage requires one shared e_sqlite3 engine instance."))
+            raise(NotSupportedException("Custom storage and its provider must use the same SQLite engine instance."))
 
     [<UnmanagedFunctionPointer(CallingConvention.Cdecl)>]
     type Open = delegate of nativeint * nativeint * nativeint * int * nativeint -> int

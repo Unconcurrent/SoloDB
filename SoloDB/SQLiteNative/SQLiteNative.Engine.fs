@@ -103,7 +103,6 @@ type internal NativeDatabase(connectionString: string, storage: SqliteStorage op
     static member internal EnsureInitialized() = initialization.Force()
     member _.IsStorage = storage.IsSome
     member _.IsStorageReadOnly = match storage with Some input -> input.Profile = SqliteStorageProfile.ReadOnly | None -> false
-    member _.IsManagedStorage = match storage with Some input -> not input.IsNative | None -> false
     member _.Storage = storage
     member _.ReportClosingFailure(error: exn) =
         match storage with Some input -> input.ReportClosingFailure(error) | None -> ()
@@ -356,7 +355,7 @@ type internal NativeDatabase(connectionString: string, storage: SqliteStorage op
             let configure () =
                 this.Check(raw.sqlite3_extended_result_codes(handle, 1))
                 this.Check(raw.sqlite3_busy_timeout(handle, 0))
-                if this.IsManagedStorage then
+                if storage.IsSome then
                     this.Check(raw.sqlite3_enable_load_extension(handle, 0))
                     let mutable enabled = 0
                     this.Check(raw.sqlite3_db_config(handle, raw.SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, &enabled))

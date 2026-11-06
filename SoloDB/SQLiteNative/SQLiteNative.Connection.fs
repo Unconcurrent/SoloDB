@@ -75,13 +75,9 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
     let mutable storageReopen: Action = null
     let checkRegistration () =
         if not database.CanRegister then raise(ObjectDisposedException("NativeSqliteConnection"))
-    let checkExtensions () =
-        checkRegistration()
-        if database.IsManagedStorage then
-            raise(NotSupportedException("Managed storage cannot expose native handles or load extensions. Use borrowed Native storage for that capability."))
     let loadExtension file procedure =
         use lifetime = database.AdmitUse()
-        checkExtensions()
+        checkRegistration()
         if not extensionsEnabled then
             let mutable enabled = 0
             database.Check(raw.sqlite3_db_config(database.Handle, raw.SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 1, &enabled))
@@ -113,11 +109,11 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
     member internal _.RegisterAggregate(name, arity, callback: NativeAggregateFunction, flags) =
         registerFunction name arity (if isNull (box callback) then ValueNone else ValueSome(Aggregate(callback, flags)))
     member internal _.EnableExtensions(enable) =
-        if enable then checkExtensions() else checkRegistration()
+        checkRegistration()
         if database.IsOpen then database.Check(raw.sqlite3_enable_load_extension(database.Handle, if enable then 1 else 0))
         extensionsEnabled <- enable
     member internal _.LoadExtension(file, procedure) =
-        checkExtensions()
+        checkRegistration()
         if database.IsOpen then loadExtension file procedure
         if isNull extensions then extensions <- HashSet()
         extensions.Add(struct (file, procedure)) |> ignore
@@ -152,7 +148,6 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
         saved
     member internal _.RestoreRegistrations(saved: NativeConnectionRegistrations) =
         checkRegistration()
-        if saved.ExtensionsEnabled || (not(isNull saved.Extensions) && saved.Extensions.Count > 0) then checkExtensions()
         if isNull saved.Functions then functions.Clear() else functions <- saved.Functions
         collations <- saved.Collations
         extensions <- saved.Extensions
@@ -252,8 +247,6 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
         with error -> statement.Abort(error); reraise()
     member internal _.VariableLimit = raw.sqlite3_limit(database.Handle, raw.SQLITE_LIMIT_VARIABLE_NUMBER, -1)
     member _.Handle =
-        if database.IsManagedStorage then
-            raise(NotSupportedException("Managed storage does not expose native handles. Use borrowed Native storage for raw access."))
         database.EnsureOpen()
         database.Handle
     member internal _.InternalHandle = database.Handle
@@ -271,9 +264,6 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
             statements.Reopen()
             try
                 if database.Password.Length > 0 then
-                    let library = raw.GetNativeLibraryName()
-                    if library = "e_sqlite3" || library = "winsqlite3" then
-                        raise (InvalidOperationException($"The SQLite library '{library}' does not support encryption."))
                     let mutable quoting = this.OpenStatement("SELECT quote(@password)")
                     let password =
                         try
