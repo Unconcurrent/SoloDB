@@ -172,8 +172,7 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                                         Marshal.WriteIntPtr(file, methods)
                                         Interlocked.Increment(&files) |> ignore
                                         if output <> 0n then
-                                            let access = if profile = SqliteStorageProfile.ReadOnly then 1 else 2
-                                            Marshal.WriteInt32(output, (flags &&& ~~~3) ||| access)
+                                            Marshal.WriteInt32(output, flags)
                                         0
                                 with _ ->
                                     if root.IsAllocated then root.Free()

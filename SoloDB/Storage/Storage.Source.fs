@@ -183,7 +183,7 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
             try
                 if result = 0 then
                     let struct (main, log) = inspect()
-                    if profile = SqliteStorageProfile.Wal && main = 0L && log = 0L then
+                    if profile = SqliteStorageProfile.Wal && main = 0L && log = 0L && (state.Flags &&& 2 <> 0) then
                         result <- StorageFiles.lockFile state 4
                         if result = 0 then
                             let struct (main, log) = inspect()
