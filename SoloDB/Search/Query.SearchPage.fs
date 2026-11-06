@@ -164,11 +164,16 @@ module internal QuerySearchPage =
                     let expose expression =
                         expression |> SqlExpr.map(fun node ->
                             auxiliary index source text node |> Option.defaultValue node)
+                    let orderAliases = AliasRewrite.buildProjectionAliasMap core
+                    let orderPolicy = { AliasRewrite.MatchEmptyDerivedAlias = false; AliasRewrite.MatchUnqualifiedColumns = true
+                                        AliasRewrite.OnSubquerySelect = fun query -> query }
+                    let orders = core.OrderBy |> List.map(fun order ->
+                        { order with Expr = AliasRewrite.rewriteDerivedAliasExpr orderPolicy orderAliases "" order.Expr })
                     let projections = core.Projections |> ProjectionSetOps.map(fun projection ->
                         { projection with Expr = expose projection.Expr })
                     let values = ProjectionSetOps.toList projections
                     if values.IsEmpty || not(values |> List.forall(fun projection -> safe projection.Expr)) ||
-                       not(core.OrderBy |> List.forall(fun order ->
+                       not(orders |> List.forall(fun order ->
                            not(SqlExpr.exists(function AggregateCall _ | WindowCall _ | ScalarSubquery _ | Exists _ | InSubquery _ -> true | _ -> false) order.Expr))) then core else
                     let expensive = values |> List.exists(fun projection ->
                         SqlExpr.exists(function
@@ -181,27 +186,29 @@ module internal QuerySearchPage =
                     if not expensive then core else
                     let pageAlias = nextAlias()
                     let orderName i = "_search_order_" + string i
-                    let keys = core.OrderBy |> List.mapi(fun i order ->
+                    let keys = orders |> List.mapi(fun i order ->
                         { Alias = Some(orderName i); Expr = order.Expr })
                     let rank = Column(Some fts,"rank")
                     let needsRank = values |> List.exists(fun projection ->
                         SqlExpr.exists(fun node -> normalize node = rank) projection.Expr)
                     let rankKey =
                         if not needsRank then None else
-                        core.OrderBy |> List.tryFindIndex(fun order -> normalize order.Expr = rank)
-                        |> Option.map orderName |> Option.orElse(Some "_search_rank")
-                    let rankField =
-                        match rankKey with
-                        | Some "_search_rank" -> [{Alias = rankKey;Expr = rank}]
-                        | _ -> []
-                    let ids = { core with Projections = ProjectionSetOps.ofList({Alias = Some "_search_id";Expr = id}::keys @ rankField) }
+                        orders |> List.mapi(fun i order ->
+                            let key = Column(Some pageAlias,orderName i)
+                            let rec orderedRank negative expression =
+                                match normalize expression with
+                                | value when value = rank -> Some(if negative then Unary(UnaryOperator.Neg,key) else key)
+                                | Unary(UnaryOperator.Neg,value) -> orderedRank (not negative) value
+                                | _ -> None
+                            orderedRank false order.Expr) |> List.tryPick(fun value -> value)
+                    let ids = { core with Projections = ProjectionSetOps.ofList({Alias = Some "_search_id";Expr = id}::keys); OrderBy = orders }
                     let selectedId = Column(Some pageAlias,"_search_id")
                     let rewrite expression =
                         expression |> SqlExpr.map(fun node ->
                             let isId = match normalize node with Column(alias,"Id") -> fromSource source alias | _ -> false
                             if isId then selectedId else
-                            if needsRank && normalize node = rank then Column(Some pageAlias,rankKey.Value) else
-                            match core.OrderBy |> List.tryFindIndex(fun order -> normalize order.Expr = normalize node) with
+                            if rankKey.IsSome && normalize node = rank then rankKey.Value else
+                            match orders |> List.tryFindIndex(fun order -> normalize order.Expr = normalize node) with
                             | Some i -> Column(Some pageAlias,orderName i)
                             | None -> node)
                     let result = projections |> ProjectionSetOps.map(fun projection ->
@@ -218,13 +225,17 @@ module internal QuerySearchPage =
                         | FunctionCall("snippet",_) -> true
                         | Column(Some alias,"rank") when qualifier alias = fts -> true
                         | _ -> false))
+                    let scoresOutput = expressions |> List.exists(SqlExpr.exists(fun node -> normalize node = rank))
                     let joins = [
-                        if usesDocument then
-                            CrossJoin(BaseTable(table,alias))
                         if usesFts then
-                            CrossJoin(BaseTable(fts,None)) ]
-                    // Output fetches depend on the completed page, never on a second
-                    // traversal of all MATCH candidates. Candidate joins remain reorderable.
+                            if scoresOutput then
+                                ConditionedJoin(JoinKind.Inner,BaseTable(fts,None),Binary(Column(Some fts,"rowid"),BinaryOperator.Eq,selectedId))
+                            else CrossJoin(BaseTable(fts,None))
+                        if usesDocument then CrossJoin(BaseTable(table,alias)) ]
+                    // Fetch documents after page membership, retaining native scoring
+                    // cursor choice before that fetch. Unranked auxiliaries use rowid probes.
+                    // Output scoring keeps native cursor choice: candidate-wide ranking
+                    // and a new BM25 setup per rowid probe can both cost more than a scan.
                     let predicates = [
                         if usesDocument then Binary(id,BinaryOperator.Eq,selectedId)
                         if usesFts then Binary(Column(Some fts,"rowid"),BinaryOperator.Eq,selectedId)
@@ -233,7 +244,7 @@ module internal QuerySearchPage =
                                 Projections = result
                                 Where = if predicates.IsEmpty then None else Some(List.reduce (fun left right -> Binary(left,BinaryOperator.And,right)) predicates)
                                 Limit = None; Offset = None
-                                OrderBy = core.OrderBy |> List.mapi(fun i order -> { order with Expr = Column(Some pageAlias,orderName i) }) }
+                                OrderBy = orders |> List.mapi(fun i order -> { order with Expr = Column(Some pageAlias,orderName i) }) }
                 | _ -> core
         | _ -> core
 

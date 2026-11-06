@@ -174,7 +174,7 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
             { Sql = "NOT (" + operandEmitted.Sql + ")"
               Parameters = operandEmitted.Parameters }
         | Neg ->
-            { Sql = "-" + operandEmitted.Sql
+            { Sql = "-(" + operandEmitted.Sql + ")"
               Parameters = operandEmitted.Parameters }
         | IsNull ->
             { Sql = operandEmitted.Sql + " IS NULL"
