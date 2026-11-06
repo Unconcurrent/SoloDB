@@ -85,7 +85,9 @@ let run () =
 run ()
 ```
 
-For durable storage, use files whose successful `Flush` really supplies your required persistence guarantee. SoloDB calls the supplied stream's `Flush`; it cannot turn a memory stream or an unchecked operating-system flush into a durable disk write.
+For a writable `FileStream`, SoloDB drains its buffers and checks a native file synchronization call: `fsync` on Unix or `FlushFileBuffers` on Windows. A synchronization failure keeps its original native error in the exception chain.
+
+For other streams, including custom or encryption wrappers around a file, SoloDB calls the supplied stream's `Flush`. That implementation must provide the persistence guarantee you need; SoloDB does not unwrap it or replace its buffering or encryption. `MemoryStream` remains volatile. You must also make newly created file names and their parent directory durable before relying on recovery after power loss. A successful file synchronization call cannot establish that your filesystem or device honors its persistence contract.
 
 Generated and NativeAOT applications still need their [normal metadata registration](generated-metadata.md). Borrow connections from the database instance you opened; its diagnostic connection string cannot recreate the supplied streams or files.
 
@@ -108,7 +110,7 @@ using var storage = SqliteStorage.Wal(main, log, true, coordination);
 using var db = new SoloDB(storage);
 ```
 
-This uses native operating-system locks and shared memory on one host. It does not make arbitrary remote storage safe to share, and the generic FileStream flush in this example does not prove power-loss durability.
+This uses native operating-system locks and shared memory on one host, with checked file synchronization for the supplied FileStreams. It does not make arbitrary remote storage safe to share or establish your filesystem's power-loss behavior; file-name and directory durability still need your attention.
 
 When another `SqliteStorage` object has not finished with the files (`IsClosed` is false):
 

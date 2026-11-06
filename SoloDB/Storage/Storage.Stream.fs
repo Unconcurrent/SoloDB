@@ -2,9 +2,37 @@ namespace SoloDatabase
 
 open System
 open System.IO
+open System.ComponentModel
+open System.Runtime.InteropServices
 open System.Threading
 
-/// Owns one leased cursor; Flush has exactly the supplied Stream's semantics.
+module private StorageFileSync =
+    [<DllImport("libc", SetLastError=true, CallingConvention=CallingConvention.Cdecl)>]
+    extern int fsync(int file)
+    [<DllImport("kernel32.dll", SetLastError=true)>]
+    extern int FlushFileBuffers(nativeint file)
+
+    let private fail (code: int) =
+        raise(IOException("Native file synchronization failed.", Win32Exception(code)))
+
+    let flush (file: FileStream) =
+        let handle = file.SafeFileHandle
+        let mutable held = false
+        try
+            handle.DangerousAddRef(&held)
+            let value = handle.DangerousGetHandle()
+            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+                if FlushFileBuffers(value) = 0 then fail (Marshal.GetLastWin32Error())
+            else
+                let descriptor = value.ToInt32()
+                let mutable result = fsync(descriptor)
+                while result < 0 do
+                    let error = Marshal.GetLastWin32Error()
+                    if error <> 4 then fail error // POSIX EINTR.
+                    result <- fsync(descriptor)
+        finally if held then handle.DangerousRelease()
+
+/// Owns one leased cursor and preserves the supplied Stream's flushing behavior.
 [<Sealed>]
 type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool) =
     let gate = obj()
@@ -111,7 +139,13 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
         member _.Flush() =
             Monitor.Enter gate
             try
-                try check(); stream.Flush(); null
+                try
+                    check()
+                    stream.Flush()
+                    match stream with
+                    | :? FileStream as file when file.CanWrite -> StorageFileSync.flush file
+                    | _ -> ()
+                    null
                 with error -> failure error
             finally Monitor.Exit gate
     interface IDisposable with
