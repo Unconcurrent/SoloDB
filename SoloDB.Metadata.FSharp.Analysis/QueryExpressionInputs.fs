@@ -12,12 +12,14 @@ module internal QueryExpressionInputs =
         let typ = typ.StripAbbreviations()
         typ.HasTypeDefinition &&
         (typ.TypeDefinition.TryFullName = Some "System.Linq.Expressions.Expression`1" ||
+         typ.TypeDefinition.TryFullName = Some "Microsoft.FSharp.Quotations.FSharpExpr`1" ||
          typ.TypeDefinition.IsArrayType && isExpression typ.GenericArguments[0])
 
     let create (inputs: IDictionary<string,ParsedInput>) file contains (uses: FSharpSymbolUse[]) instantiate contexts =
         let bindings = ResizeArray<SynBinding>()
         let assignments = ResizeArray<range * SynExpr>()
         let lambdas = ResizeArray<range>()
+        let constants = ResizeArray<SynConst * range>()
         for input in inputs.Values do
             ParsedInput.fold (fun () _ node ->
                 match node with
@@ -29,6 +31,7 @@ module internal QueryExpressionInputs =
                     for SynExprRecordField(fieldName=(target,_);expr=value) in fields do
                         value |> Option.iter(fun value -> assignments.Add(target.Range,value))
                 | SyntaxNode.SynExpr(SynExpr.Lambda(range = location)) -> lambdas.Add location
+                | SyntaxNode.SynExpr(SynExpr.Const(value, location)) -> constants.Add(value, location)
                 | _ -> ()) () input
 
         let arguments (useSite: FSharpSymbolUse) =
@@ -152,4 +155,4 @@ module internal QueryExpressionInputs =
                     | _ -> () ]
             |> List.distinct
 
-        arguments, (fun context method useSite -> expressionArguments context method useSite |> List.collect(origins (context @ useSite.GenericArguments) [])), selected, producers
+        arguments, (fun context method useSite -> expressionArguments context method useSite |> List.collect(origins (context @ useSite.GenericArguments) [])), selected, producers, constants.ToArray()

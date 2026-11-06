@@ -65,7 +65,7 @@ module internal QueryDiscovery =
                 [ for call in calls do
                     for parent in contexts (visited.Add key) call do
                         for own in previous do yield parent @ call.GenericArguments @ own ])
-        let argumentGroups, expressionInputs, selectedArguments, inputProducers = QueryExpressionInputs.create inputs file contains uses instantiate (contexts Set.empty)
+        let argumentGroups, expressionInputs, selectedArguments, inputProducers, constants = QueryExpressionInputs.create inputs file contains uses instantiate (contexts Set.empty)
         let scope firstArgument (useSite: FSharpSymbolUse) =
             match argumentGroups useSite with
             | Some(callRange, first :: _) ->
@@ -77,6 +77,12 @@ module internal QueryDiscovery =
                 callRange, supplied first
             | _ -> invalidOp (sprintf "The checked query call at %O has no parsed argument scope." useSite.Range)
         let roots = ResizeArray<FSharpType>()
+        let literalRanges = Dictionary<string,ResizeArray<range>>(StringComparer.Ordinal)
+        let addLiteralRange (location: range) =
+            let name = file location.FileName
+            match literalRanges.TryGetValue name with
+            | true, ranges -> ranges.Add location
+            | _ -> literalRanges.Add(name, ResizeArray([location]))
         let rec closed (typ: FSharpType) =
             not typ.IsGenericParameter && (typ.GenericArguments |> Seq.forall closed)
         let rec soloNamespace (entity: FSharpEntity) =
@@ -281,6 +287,7 @@ module internal QueryDiscovery =
                 | _ -> None)
         for useSite, method, callScope, argumentScope in sites do
           for context in contexts Set.empty useSite do
+            for input in expressionInputs context method useSite do addLiteralRange input
             let reference = bound context useSite
             let query = method.CurriedParameterGroups |> Seq.collect id |> Seq.head |> fun argument -> argument.Type.StripAbbreviations()
             let callable = query.GenericArguments[0].StripAbbreviations()
@@ -370,6 +377,7 @@ module internal QueryDiscovery =
                 for context in contexts Set.empty useSite |> List.filter(fun context ->
                     operation.CurriedParameterGroups |> Seq.collect id |> Seq.exists(fun parameter -> QueryExpressionInputs.isExpression (instantiate (context @ useSite.GenericArguments) parameter.Type))) do
                     for input in expressionInputs context operation useSite do
+                        addLiteralRange input
                         for part in uses do
                             if contains input part.Range then
                                 for actual in contexts Set.empty part do
@@ -382,8 +390,67 @@ module internal QueryDiscovery =
                 (operation.DeclaringEntity |> Option.exists(fun entity -> entity.TryFullName = Some "System.Linq.Queryable")) ->
                 let _, argumentScope = scope false useSite
                 for context in contexts Set.empty useSite do
+                    for input in expressionInputs context operation useSite do addLiteralRange input
                     for part in uses do
                         if contains argumentScope part.Range then addWitness context part
+            | _ -> ()
+        // Intrinsic literal kinds select language-defined types. Resolve their
+        // original compiler aliases, without forcing unrelated reduced IL bodies.
+        let aliases = Dictionary<string,FSharpType>(StringComparer.Ordinal)
+        let alias name =
+            match aliases.TryGetValue name with
+            | true, typ -> typ
+            | _ ->
+                let typ =
+                    core.Contents.FindEntityByPath(["Microsoft";"FSharp";"Core";name])
+                    |> Option.defaultWith(fun () -> invalidOp ("The compiler has no literal type alias '" + name + "'."))
+                    |> fun entity -> entity.AsType().StripAbbreviations()
+                aliases.Add(name,typ)
+                typ
+        let arrayType item =
+            let template =
+                core.Contents.FindEntityByPath(["Microsoft";"FSharp";"Collections";"ArrayModule"])
+                |> Option.get |> _.MembersFunctionsAndValues
+                |> Seq.find(fun memberValue -> memberValue.CompiledName = "ZeroCreate")
+                |> _.ReturnParameter.Type |> _.StripAbbreviations()
+            template.Instantiate([template.GenericArguments[0].GenericParameter,item])
+        let rec literalType = function
+            | SynConst.Bool _ -> Some(alias "bool")
+            | SynConst.SByte _ -> Some(alias "sbyte")
+            | SynConst.Byte _ -> Some(alias "byte")
+            | SynConst.Int16 _ -> Some(alias "int16")
+            | SynConst.UInt16 _ -> Some(alias "uint16")
+            | SynConst.Int32 _ -> Some(alias "int32")
+            | SynConst.UInt32 _ -> Some(alias "uint32")
+            | SynConst.Int64 _ -> Some(alias "int64")
+            | SynConst.UInt64 _ -> Some(alias "uint64")
+            | SynConst.IntPtr _ -> Some(alias "nativeint")
+            | SynConst.UIntPtr _ -> Some(alias "unativeint")
+            | SynConst.Single _ -> Some(alias "float32")
+            | SynConst.Double _ -> Some(alias "float")
+            | SynConst.Char _ -> Some(alias "char")
+            | SynConst.Decimal _ -> Some(alias "decimal")
+            | SynConst.String _ | SynConst.SourceIdentifier _ -> Some(alias "string")
+            | SynConst.Bytes _ -> Some(arrayType (alias "byte"))
+            | SynConst.UInt16s _ -> Some(arrayType (alias "uint16"))
+            | SynConst.Measure(constant=value) -> literalType value
+            | SynConst.Unit | SynConst.UserNum _ -> None
+        for constant,location in constants do
+            match literalRanges.TryGetValue(file location.FileName) with
+            | true, ranges when ranges |> Seq.exists(fun outer -> contains outer location) ->
+                match literalType constant with
+                | Some typ -> roots.Add typ
+                | None ->
+                    // User numeric suffixes select their checked factory, not a
+                    // guessed built-in type with the same suffix spelling.
+                    for part in uses do
+                        if not part.IsFromDefinition && contains location part.Range then
+                            match part.Symbol with
+                            | :? FSharpMemberOrFunctionOrValue as method when method.IsMethod || method.IsFunction ->
+                                for context in contexts Set.empty part do
+                                    let typ = instantiate (context @ part.GenericArguments) method.ReturnParameter.Type
+                                    if closed typ && not typ.IsFunctionType then roots.Add typ
+                            | _ -> ()
             | _ -> ()
         let argumentSources = RawSqlInputs.collect moduleDefinition mapper (project.ProjectContext.GetReferencedAssemblies()) uses contains instantiate (contexts Set.empty) selectedArguments inputProducers
         operations.ToArray(), (calls.Values |> Seq.toArray), (witnesses.Values |> Seq.toArray), (lambdas.Values |> Seq.toArray), roots.ToArray(), providers.ToArray(), (operationAccess |> Seq.toArray), argumentSources

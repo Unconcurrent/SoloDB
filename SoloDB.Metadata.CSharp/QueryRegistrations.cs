@@ -42,6 +42,11 @@ internal static partial class QueryRegistrations
                 var original = facts.Type(node).Type;
                 if (original == null) continue;
                 var type = origin.Symbols.Type(original);
+                // Constants have no captured-value symbol. Their original scalar
+                // facts are still consumed when query parameters are bound.
+                if (facts.Operation(node) is IOperation value && value.ConstantValue.HasValue &&
+                    value.ConstantValue.Value != null && Closed(type) && !HasAnonymous(type))
+                    yield return type;
                 if (SequenceElement(type) != null || EnumerableElement(type) == null || !Closed(type) || HasAnonymous(type)) continue;
                 yield return type;
             }
