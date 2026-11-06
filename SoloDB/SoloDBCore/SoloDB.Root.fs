@@ -211,19 +211,23 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <returns>True if the collection was dropped, false if it did not exist.</returns>
     member this.DropCollectionIfExists name =
         this.CheckDisposed()
-        this.CheckWritable()
         let name = Helper.validateUserCollectionName name
 
-        lock ddlLock (fun () ->
-            connectionManager.WithTransaction(fun connection ->
-                if Helper.existsCollection name connection then
-                    Helper.dropCollection name connection
-                    RuntimeIndexModelCache.invalidate connectionString name
-                    true
-                else
-                    false
+        if connectionManager.IsReadOnly then
+            use connection = connectionManager.BorrowNative()
+            if Helper.existsCollection name connection then this.CheckWritable()
+            false
+        else
+            lock ddlLock (fun () ->
+                connectionManager.WithTransaction(fun connection ->
+                    if Helper.existsCollection name connection then
+                        Helper.dropCollection name connection
+                        RuntimeIndexModelCache.invalidate connectionString name
+                        true
+                    else
+                        false
+                )
             )
-        )
 
     /// <summary>
     /// Drops a collection for the specified type if it exists.
