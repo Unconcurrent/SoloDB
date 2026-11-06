@@ -173,9 +173,10 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
         new NativeStatementScope(statements, source, 0, NativeExecutionBudget(database.DefaultTimeout), true)
     member internal _.OpenStatementAsync(sql: string) =
         NativeStatementScope.CreateAsync(statements, NativeStatementSource.Text sql, 0, NativeExecutionBudget(database.DefaultTimeout), true)
-    member internal _.ExecuteScriptAsync(sql: string) = task {
+    member private _.ExecuteScriptAsync(sql: string, maintenance: bool) = task {
         let! prepared = NativeSqlScript.CreateAsync(statements, NativeStatementSource.Text sql, null, database.DefaultTimeout, true)
         let mutable script = prepared
+        script.SetMaintenance(maintenance)
         try
             let! struct (updated, affected) = script.ConsumeAsync()
             script <- updated
@@ -185,10 +186,15 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
             script.Abort(error)
             return (System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw(); Unchecked.defaultof<_>)
     }
-    member internal _.AcquireScript(source: NativeStatementSource, parameters: obj) =
+    member internal this.ExecuteScriptAsync(sql: string) = this.ExecuteScriptAsync(sql, false)
+    member internal this.ExecuteSetupScriptAsync(sql: string) = this.ExecuteScriptAsync(sql, true)
+    member private _.AcquireScript(source: NativeStatementSource, parameters: obj, maintenance: bool) =
         let mutable script = NativeSqlScript(statements, source, parameters, database.DefaultTimeout, true)
+        script.SetMaintenance(maintenance)
         try script.NextResult() |> ignore; script
         with error -> script.Abort(error); reraise()
+    member internal this.AcquireScript(source: NativeStatementSource, parameters: obj) = this.AcquireScript(source, parameters, false)
+    member internal this.AcquireSetupScript(sql: string) = this.AcquireScript(NativeStatementSource.Text sql, null, true)
     member internal _.AcquireScript(sql: string, plan: SqlParameterPlan<'Input, 'State>, input: 'Input) =
         let mutable script = NativeSqlScript.Create(statements, sql, plan, input, database.DefaultTimeout, true)
         try script.NextResult() |> ignore; script

@@ -101,14 +101,14 @@ module internal Bootstrap =
         // Lock waiting belongs to each native command budget, including cold setup.
         let setup (connection: NativeSqliteConnection) =
             register connection
-            let mutable execution = connection.AcquireScript(NativeStatementSource.Text connectionSetupSql, null)
+            let mutable execution = connection.AcquireSetupScript(connectionSetupSql)
             try
                 execution.Consume() |> ignore
                 execution.Dispose()
             with error -> execution.Abort(error); reraise()
         let setupAsync (connection: NativeSqliteConnection) = task {
             register connection
-            let! _ = connection.ExecuteScriptAsync(connectionSetupSql)
+            let! _ = connection.ExecuteSetupScriptAsync(connectionSetupSql)
             return ()
         }
         struct (setup, setupAsync)

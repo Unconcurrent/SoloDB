@@ -261,7 +261,7 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
             methodAt 8 (Output(fun file output -> protect 3594 (fun () -> StorageFiles.reserved (handle file) output)))
             methodAt 9 (Control(fun file operation argument -> protect 10 (fun () -> control (handle file) operation argument)))
             methodAt 10 (One(fun _ -> 4096))
-            methodAt 11 (One(fun _ -> 0x8800 ||| (if profile = SqliteStorageProfile.ReadOnly then 0x2000 else 0)))
+            methodAt 11 (One(fun _ -> 0x8000 ||| (if profile = SqliteStorageProfile.ReadOnly then 0x2000 else 0)))
             methodAt 12 (ShmMap(fun file region size extend output ->
                 Marshal.WriteIntPtr(output, 0n)
                 protect 5386 (fun () -> StorageFiles.map (handle file) region size extend output)))

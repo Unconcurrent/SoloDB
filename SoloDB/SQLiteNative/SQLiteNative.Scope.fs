@@ -269,6 +269,7 @@ type internal NativeStatementScope =
     member this.StepTransactionBoundaryAsync() = this.StepAsync(TransactionBoundary)
     // Fixed in-place maintenance may restart a halted VM before application callbacks.
     member this.StepMaintenance() = this.Step(Maintenance)
+    member this.StepMaintenanceAsync() = this.StepAsync(Maintenance)
     member this.Reset() =
         this.Check()
         if this.statement.HasStatement then

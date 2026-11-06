@@ -33,8 +33,6 @@ module internal StorageNative =
     [<DllImport("e_sqlite3", CallingConvention=CallingConvention.Cdecl)>]
     extern nativeint sqlite3_libversion()
     [<DllImport("e_sqlite3", CallingConvention=CallingConvention.Cdecl)>]
-    extern int sqlite3_libversion_number()
-    [<DllImport("e_sqlite3", CallingConvention=CallingConvention.Cdecl)>]
     extern int sqlite3_close(nativeint db)
     [<DllImport("e_sqlite3", CallingConvention=CallingConvention.Cdecl)>]
     extern nativeint sqlite3_create_filename(nativeint database, nativeint journal, nativeint wal, int count, nativeint parameters)

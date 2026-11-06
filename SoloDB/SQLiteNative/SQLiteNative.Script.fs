@@ -20,6 +20,7 @@ type internal NativeSqlScript =
     val mutable private current: NativeStatementScope
     val mutable private offset: int
     val mutable private initialized: bool
+    val mutable private maintenance: bool
     val mutable private available: bool
     val mutable private pending: bool
     val mutable private doneState: bool
@@ -33,11 +34,11 @@ type internal NativeSqlScript =
             try root.Statement.Capture(parameters)
             with error -> root.Abort(error); reraise()
         { cache = cache; root = root; arguments = arguments; current = root; offset = 0
-          initialized = false; available = true; pending = false; doneState = true; closed = false
+          initialized = false; maintenance = false; available = true; pending = false; doneState = true; closed = false
           failure = null; affected = -1; budget = root.Budget }
     private new(cache: NativeStatementCache, root: NativeStatementScope, arguments: INativeArgumentBinding) =
         { cache = cache; root = root; arguments = arguments; current = root; offset = 0
-          initialized = false; available = true; pending = false; doneState = true; closed = false
+          initialized = false; maintenance = false; available = true; pending = false; doneState = true; closed = false
           failure = null; affected = -1; budget = root.Budget }
     static member Create<'Input, 'State>(cache: NativeStatementCache, sql, plan: SqlParameterPlan<'Input, 'State>, input: 'Input, timeout, checkReader) =
         let mutable root = new NativeStatementScope(cache, NativeStatementSource.Text sql, 0, NativeExecutionBudget(timeout), checkReader)
@@ -136,6 +137,11 @@ type internal NativeSqlScript =
             this.pending <- row
             true
         else false
+    member internal this.SetMaintenance(value) = this.maintenance <- value
+    member private this.Step() =
+        if this.maintenance then this.current.StepMaintenance() else this.current.Step()
+    member private this.StepAsync() =
+        if this.maintenance then this.current.StepMaintenanceAsync() else this.current.StepAsync()
     member this.NextResult(result: NativeBlobResult) =
         this.Check()
         let mutable found = false
@@ -148,7 +154,7 @@ type internal NativeSqlScript =
             | CurrentStatement -> ()
             if more then
                 if this.BeginResult(result) then
-                    found <- this.CompleteResult(this.current.Step(), result)
+                    found <- this.CompleteResult(this.Step(), result)
                 else more <- false
         found
     static member private NextResultAsync(initialScript: NativeSqlScript) = task {
@@ -166,7 +172,7 @@ type internal NativeSqlScript =
                 | CurrentStatement -> ()
                 if more then
                     if script.BeginResult(null) then
-                        let! struct (scope, row) = script.current.StepAsync()
+                        let! struct (scope, row) = script.StepAsync()
                         script.current <- scope
                         found <- script.CompleteResult(row, null)
                     else more <- false
@@ -183,7 +189,7 @@ type internal NativeSqlScript =
                 script.Check()
                 if script.pending then script.pending <- false
                 while script.available && not script.doneState do
-                    let! struct (scope, row) = script.current.StepAsync()
+                    let! struct (scope, row) = script.StepAsync()
                     script.current <- scope
                     script.doneState <- not row
                 let! struct (updated, found) = NativeSqlScript.NextResultAsync(script)
@@ -201,7 +207,7 @@ type internal NativeSqlScript =
         if this.pending then this.pending <- false; true
         elif this.doneState || not this.available then false
         else
-            let row = this.current.Step()
+            let row = this.Step()
             this.doneState <- not row
             row
     member this.Dispose() =

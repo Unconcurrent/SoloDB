@@ -12,7 +12,7 @@ For an ordinary database file, keep using `new SoloDB(path)`.
 | `Wal(main, log)` | Database and write-ahead log | A reader needs to keep its snapshot while another connection commits. |
 | `ReadOnly(main)` | One complete, unchanging database image | You only need to read an existing database. |
 
-`Simple` selects SQLite's PERSIST mode when a connection opens. `Wal` selects WAL and creates new databases with 4096 byte pages; existing images keep their native page size. Both allow readers and one writer. A long-running reader can delay a rollback-mode writer or WAL cleanup.
+`Simple` selects SQLite's PERSIST mode when a connection opens. `Wal` selects WAL; SQLite creates the image with its native default page size (4096 bytes in the bundled engine). Existing images keep their page size. Both allow readers and one writer. A long-running reader can delay a rollback-mode writer or WAL cleanup.
 
 The factories accept either streams or `ISqliteStorageFile` objects. Each returns a `SqliteStorage` object, called `storage` in the examples. Several live `SoloDB` instances can use the same object. Dispose each database and dispose the storage even if you never open a database.
 
@@ -174,7 +174,7 @@ Keep the supplied files available until `storage.IsClosed`. The auxiliary file h
 
 ## Import, export and read-only images
 
-Use `source.BackupTo(destination)` with a fresh destination. Keep both databases open until it finishes. SQLite cannot change a WAL destination's page size during backup: its page size must match the source. New WAL storage starts with 4096 byte pages; an existing coherent image can use another native page size.
+Use `source.BackupTo(destination)` with a fresh destination. Keep both databases open until it finishes. SQLite cannot change a WAL destination's page size during backup: its page size must match the source. New WAL storage uses the engine default (4096 bytes in the bundled engine); an existing coherent image can use another native page size.
 
 For a source with another page size, you can choose a rollback-mode destination instead. If you need a fresh 4096-byte WAL destination, preserve the original and work on an ordinary-file copy: put the copy in rollback journal mode, set its page size to 4096 and run `VACUUM`, then back it up. This is an import option, not a restriction on directly opening existing images.
 

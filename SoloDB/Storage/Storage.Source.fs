@@ -96,25 +96,6 @@ module private StorageInput =
         with _ ->
             for adapter in acquired do try (adapter :> IDisposable).Dispose() with _ -> ()
             reraise()
-    let seed () =
-        // SQLite fileformat.html sections 1.2 and 1.6: one empty leaf table page.
-        let page = Array.zeroCreate<byte> 4096
-        Text.Encoding.ASCII.GetBytes("SQLite format 3\000").CopyTo(page, 0)
-        page.[16] <- 0x10uy
-        page.[18] <- 2uy
-        page.[19] <- 2uy
-        page.[21] <- 64uy
-        page.[22] <- 32uy
-        page.[23] <- 32uy
-        page.[27] <- 1uy
-        page.[31] <- 1uy
-        page.[95] <- 1uy
-        let version = StorageNative.sqlite3_libversion_number()
-        for i = 0 to 3 do page.[96 + i] <- byte(version >>> (24 - i * 8))
-        page.[100] <- 0x0Duy
-        page.[105] <- 0x10uy
-        page
-
 /// A shared storage input. Dispose deterministically; abandoned native callback
 /// cycles may retain all resources. Positional files are borrowed.
 [<Sealed>]
@@ -176,8 +157,7 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
             let logLength = if profile <> SqliteStorageProfile.ReadOnly then lock nodes.[1].Gate (fun () -> StorageFiles.length nodes.[1]) else 0L
             struct (mainLength, logLength))
     let validateExisting main log =
-        if main = 0L && log <> 0L &&
-           (profile = SqliteStorageProfile.Wal || StorageFiles.auxiliaryRole nodes.[1] = 1) then
+        if main = 0L && log <> 0L && StorageFiles.auxiliaryRole nodes.[1] = 1 then
             raise(StorageConfigurationError("A nonempty WAL requires its main image. Preserve both backings and restore a coherent pair."))
     let initialize timeout (state: StorageHandle) =
         if profile = SqliteStorageProfile.ReadOnly then 0 else
@@ -190,20 +170,10 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
             try
                 if result = 0 then
                     let struct (main, log) = inspect()
-                    if profile = SqliteStorageProfile.Wal && main = 0L && log = 0L && (state.Flags &&& 2 <> 0) then
-                        result <- StorageFiles.lockFile state 4
-                        if result = 0 then
-                            let struct (main, log) = inspect()
-                            if main = 0L && log = 0L then
-                                let page = StorageInput.seed()
-                                lock nodes.[0].Gate (fun () ->
-                                    nodes.[0].File.WriteAt(0L, ReadOnlySpan<byte>(page)) |> StorageFiles.check
-                                    nodes.[0].File.Flush() |> StorageFiles.check)
-                            else validateExisting main log
-                    else validateExisting main log
+                    validateExisting main log
             finally
-                // In particular, release our own SHARED/PENDING grants before a
-                // upgrade retry; two empty openers cannot block each other.
+                // Native pager transactions create and change the image. This
+                // admission only inspects under SHARED and releases before retry.
                 let unlocked = StorageFiles.unlock state 0
                 if result = 0 then result <- unlocked
             finished <- result <> 5 || (timeout > 0 && timer.Elapsed.TotalSeconds >= float timeout)
