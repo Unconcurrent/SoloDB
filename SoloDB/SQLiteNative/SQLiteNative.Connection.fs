@@ -113,7 +113,7 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
     member internal _.RegisterAggregate(name, arity, callback: NativeAggregateFunction, flags) =
         registerFunction name arity (if isNull (box callback) then ValueNone else ValueSome(Aggregate(callback, flags)))
     member internal _.EnableExtensions(enable) =
-        checkExtensions()
+        if enable then checkExtensions() else checkRegistration()
         if database.IsOpen then database.Check(raw.sqlite3_enable_load_extension(database.Handle, if enable then 1 else 0))
         extensionsEnabled <- enable
     member internal _.LoadExtension(file, procedure) =

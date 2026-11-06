@@ -135,7 +135,11 @@ For database errors, inspect `SqliteErrorCode` and `SqliteExtendedErrorCode` on 
 
 If another connection blocks a write with SQLite's BUSY error, finish the blocking reader or transaction. Keep transactions short rather than waiting on a reader that your own thread still holds.
 
-The `Simple`, `Wal` and `ReadOnly` factories do not expose connection or reader `Handle` values and cannot load extensions. Those operations throw `NotSupportedException`. Use the Native factory if your application needs them. All `SqliteStorage` inputs require the bundled `e_sqlite3` provider; the ordinary string constructor retains its existing provider support.
+Opening shared storage uses the connection's default timeout, normally 30 seconds, when waiting for initialization locks. Zero means no time limit; disposing the storage input stops its initialization retries. Do not use an unlimited wait when your own thread still holds the blocking database object.
+
+A well-formed native filesystem name that is not registered causes `InvalidOperationException`. Register it before opening the database. Null or invalid factory arguments retain their argument exceptions.
+
+The `Simple`, `Wal` and `ReadOnly` factories do not expose connection or reader `Handle` values and cannot enable or load extensions. Those operations throw `NotSupportedException`. Disabling extensions with `EnableExtensions(false)` is allowed. Use the Native factory if your application needs raw handles or extensions. All `SqliteStorage` inputs require the bundled `e_sqlite3` provider; the ordinary string constructor retains its existing provider support.
 
 ## Implement your own byte files
 
@@ -174,6 +178,8 @@ To convert a different page size, preserve the original and work on a disposable
 Use `VacuumTo(path)` to export to an ordinary native file. Do not assume a transaction writing both your supplied database and an attached database commits atomically across the two. Some combinations need a super-journal, an extra file coordinating multiple rollback journals; these layouts do not supply that file, so those combinations are refused.
 
 For `ReadOnly`, supply a complete supported SoloDB main image. Finish WAL checkpointing or export a complete image first, and leave its bytes unchanged while it is open. SoloDB retains its usual read functions and metadata, but does not migrate schema, add indexes or create missing collections.
+
+Write-only administration, such as `Optimize`, `Vacuum`, index changes and search-index maintenance, throws `InvalidOperationException` on `ReadOnly` storage. An `EnsureIndex` or `EnsureSearchIndex` call that finds its existing index unchanged can succeed without writing. Raw write SQL instead keeps SQLite's READONLY error; it is not converted into an administration error.
 
 ## Native access and extension users
 

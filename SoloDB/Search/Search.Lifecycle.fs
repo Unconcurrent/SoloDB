@@ -101,7 +101,9 @@ module internal SearchLifecycle =
         let current =
             use connection = source.Get()
             readSnapshot connection (fun () -> sameCurrent connection collection name version definition)
-        if not current then source.WithTransaction(fun connection -> ensureLocked connection collection name version definition)
+        if not current then
+            source.CheckWritable()
+            source.WithTransaction(fun connection -> ensureLocked connection collection name version definition)
     let drop connection collection name =
         SearchCatalog.validateName name
         match SearchCatalog.tryFind connection collection name with

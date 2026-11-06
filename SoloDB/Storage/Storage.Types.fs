@@ -39,6 +39,8 @@ module internal StorageValidation =
     let sectorSize size =
         if size < 32 || size > 65536 || size &&& (size - 1) <> 0 then
             raise(ArgumentOutOfRangeException("sectorSize", "The logical sector size must be a power of two from 32 through 65536 bytes."))
+    let writable readOnly =
+        if readOnly then invalidOp "ReadOnly storage cannot perform write administration."
 
 /// An immutable failure and its optional original managed cause. Null means success.
 [<Sealed; AllowNullLiteral>]

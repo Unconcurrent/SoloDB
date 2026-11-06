@@ -175,10 +175,10 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
     let initialize timeout (state: StorageHandle) =
         if profile = SqliteStorageProfile.ReadOnly then 0 else
         let timer = Stopwatch.StartNew()
-        let limit = if timeout > 0 then timeout else 30
         let mutable result = 5
         let mutable finished = false
         while not finished do
+            if lock gate (fun () -> retired) then raise(ObjectDisposedException("SqliteStorage"))
             result <- StorageFiles.lockFile state 1
             try
                 if result = 0 then
@@ -196,10 +196,10 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
                     else validateExisting main log
             finally
                 // In particular, release our own SHARED/PENDING grants before a
-                // bounded upgrade retry; two empty openers cannot block each other.
+                // upgrade retry; two empty openers cannot block each other.
                 let unlocked = StorageFiles.unlock state 0
                 if result = 0 then result <- unlocked
-            finished <- result <> 5 || timer.Elapsed.TotalSeconds >= float limit
+            finished <- result <> 5 || (timeout > 0 && timer.Elapsed.TotalSeconds >= float timeout)
             if not finished then Thread.Sleep(1)
         result
     do

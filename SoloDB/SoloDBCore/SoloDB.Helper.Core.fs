@@ -315,6 +315,7 @@ module internal Helper =
     /// </summary>
     let internal ensureIndex<'T, 'R> (collectionName: string) (conn: NativeSqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
         let indexName, whereSQL = getIndexWhereAndName<'T,'R> collectionName expression
+        HelperSchema.checkIndexWrite conn indexName
 
         let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
 
@@ -331,6 +332,7 @@ module internal Helper =
     /// </summary>
     let internal ensureUniqueAndIndex<'T,'R> (collectionName: string) (conn: NativeSqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
         let indexName, whereSQL = getIndexWhereAndName<'T,'R> collectionName expression
+        HelperSchema.checkIndexWrite conn indexName
 
         let indexSQL = $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
 

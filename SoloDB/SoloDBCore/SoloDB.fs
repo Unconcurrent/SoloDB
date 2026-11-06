@@ -295,17 +295,22 @@ type internal Collection<'T>(connection: NativeConnection, name: string, connect
     member this.EnsureSearchIndex(configure: Action<SearchIndexBuilder<'T>>) = this.ConfigureSearch("default",1,configure)
     member this.EnsureSearchIndex(name: string, configure: Action<SearchIndexBuilder<'T>>) = this.ConfigureSearch(name,1,configure)
     member this.EnsureSearchIndex(name: string, version: int, configure: Action<SearchIndexBuilder<'T>>) = this.ConfigureSearch(name,version,configure)
+    member private _.AdministerSearch(name: string, operation: NativeSqliteConnection -> 'R) =
+        connection.CheckAccess()
+        SearchCatalog.validateName name
+        connection.CheckWritable()
+        connection.WithTransaction operation
     member this.RebuildSearchIndex(name: string) =
-        connection.WithTransaction(fun native -> SearchLifecycle.rebuild native this.Name name)
+        this.AdministerSearch(name, fun native -> SearchLifecycle.rebuild native this.Name name)
     member this.DropSearchIndexIfExists(name: string) =
-        connection.WithTransaction(fun native -> SearchLifecycle.drop native this.Name name)
+        this.AdministerSearch(name, fun native -> SearchLifecycle.drop native this.Name name)
     member this.ListSearchIndexes() =
         use native = connection.Get()
         SearchLifecycle.list native this.Name
     member this.VerifySearchIndex(name: string) =
-        connection.WithTransaction(fun native -> SearchLifecycle.verify native this.Name name)
+        this.AdministerSearch(name, fun native -> SearchLifecycle.verify native this.Name name)
     member this.OptimizeSearchIndex(name: string) =
-        connection.WithTransaction(fun native -> SearchLifecycle.optimize native this.Name name)
+        this.AdministerSearch(name, fun native -> SearchLifecycle.optimize native this.Name name)
     member this.Search(text: string) = this.SearchIn("default",text)
     member this.Search(query: SearchQuery) = this.SearchIn("default",query)
     member this.SearchIn(name: string, text: string) =

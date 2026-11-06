@@ -132,8 +132,21 @@ module internal HelperSchema =
         let indexName = $"{name}_index_{expressionStr}"
         indexName, whereSQL
 
+    let internal checkIndexWrite (conn: NativeSqliteConnection) name =
+        if conn.DatabaseOwner.IsStorageReadOnly then
+            let mutable statement = conn.OpenStatement("SELECT 1 FROM main.sqlite_schema WHERE type='index' AND name=@name")
+            let exists =
+                try
+                    statement.BindText(1,name)
+                    let found = statement.Step()
+                    statement.Dispose()
+                    found
+                with error -> statement.Abort(error); reraise()
+            StorageValidation.writable (not exists)
+
     let private ensureIndexLocal<'T, 'R> (collectionName: string) (conn: NativeSqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
         let indexName, whereSQL = getIndexWhereAndNameShared<'T, 'R> collectionName expression
+        checkIndexWrite conn indexName
         let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
         let mutable statement = conn.OpenStatement(indexSQL)
         try
@@ -143,6 +156,7 @@ module internal HelperSchema =
 
     let private ensureUniqueAndIndexLocal<'T, 'R> (collectionName: string) (conn: NativeSqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
         let indexName, whereSQL = getIndexWhereAndNameShared<'T, 'R> collectionName expression
+        checkIndexWrite conn indexName
         let indexSQL = $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
         let mutable statement = conn.OpenStatement(indexSQL)
         try
@@ -215,8 +229,10 @@ module internal HelperSchema =
         if QueryTranslatorNumeric.unsigned64 valueType then
             let struct (exists, old) = storedIndexState name conn valueType property unique
             if not exists || old.IsSome then
+                StorageValidation.writable conn.DatabaseOwner.IsStorageReadOnly
                 Connections.NativeTransactional(conn).WithTransaction create
         else
+            checkIndexWrite conn indexName
             let uniqueSQL = if unique then "UNIQUE " else ""
             let mutable statement = conn.OpenStatement($"CREATE {uniqueSQL}INDEX IF NOT EXISTS {indexName} ON \"{name}\"{whereSQL}")
             try

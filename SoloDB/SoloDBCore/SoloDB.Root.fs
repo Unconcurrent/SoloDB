@@ -123,7 +123,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         if System.Threading.Volatile.Read(&disposed) then
             raise (ObjectDisposedException(nameof(SoloDB)))
     member private _.CheckWritable() =
-        if connectionManager.IsReadOnly then raise (NotSupportedException("ReadOnly storage cannot modify the database."))
+        StorageValidation.writable connectionManager.IsReadOnly
         
     member private this.InitializeCollection<'T> (name: string) =
         SoloDBRootOps.initializeCollection<'T>

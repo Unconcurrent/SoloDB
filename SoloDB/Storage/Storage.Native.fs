@@ -169,7 +169,7 @@ type internal StorageNativeVfs(name: string) =
         else
             let text = StorageNative.utf8 name
             try StorageNative.sqlite3_vfs_find(text) finally Marshal.FreeHGlobal(text)
-    do if address = 0n then invalidArg "registeredVfs" "The native VFS is not registered."
+    do if address = 0n then invalidOp "The native VFS is not registered."
     let version = Marshal.ReadInt32(address)
     let openFile = StorageNative.bindAt<StorageNative.Open> version address StorageNative.vfsFields 3 1
     let delete = StorageNative.bindAt<StorageNative.Path> version address StorageNative.vfsFields 4 1

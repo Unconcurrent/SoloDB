@@ -141,8 +141,7 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                 protect 14 (fun () ->
                     let logical = role(text path)
                     if logical = -1 then
-                        if flags &&& 0x4000 <> 0 then 14 // No managed super-journal namespace.
-                        else parent.Open(path, file, flags, output)
+                        parent.Open(path, file, flags, output)
                     else
                         match nodeForRole logical with
                         | None -> 14
