@@ -41,9 +41,6 @@ module internal SearchLifecycle =
               FromVersion = 6; TargetVersion = 7; SupportedCeiling = 7; LegacyTextPolicy = SchemaMigration.Strict }
         // A missing catalog after adoption is damage, never a new identity sequence.
         if not(SearchCatalog.exists connection) then invalidOp "The adopted search catalog is missing."
-    let private validateVersion name version =
-        SearchCatalog.validateName name
-        if version <= 0 then raise(ArgumentOutOfRangeException("version", "Search definition versions must be positive."))
     let private sameCurrent connection collection name version definition =
         match SearchCatalog.tryFind connection collection name with
         | ValueSome index when index.Version = version && index.Definition = definition ->
@@ -85,19 +82,13 @@ module internal SearchLifecycle =
                 statement.Dispose()
             with error -> statement.Abort(error); reraise()
         | ValueSome index ->
-            // Logical names cannot contain NUL. This unpublished name cannot collide with
-            // a declaration and frees the unique key while the old corpus remains intact.
-            let mutable statement = connection.OpenStatement($"UPDATE {SearchCatalog.table} SET Name=@name WHERE Id=@id")
-            try
-                statement.BindText(1,"\000"+string index.Id)
-                statement.BindInt64(2,index.Id)
-                statement.Step() |> ignore
-                statement.Dispose()
-            with error -> statement.Abort(error); reraise()
+            // Release only the logical key inside this unpublished transaction.
+            // Keep the old corpus until its replacement has been built successfully.
+            SearchSchema.forget connection index
             insert connection collection name version definition |> ignore
-            remove connection index
+            SearchSchema.drop connection index
     let ensure (source: NativeConnection) collection name version definition =
-        validateVersion name version
+        SearchCatalog.validateName name
         let current =
             use connection = source.Get()
             readSnapshot connection (fun () -> sameCurrent connection collection name version definition)

@@ -11,15 +11,13 @@ module internal SearchCatalog =
         CREATE TABLE "SoloDB.SearchIndexes"(
           Id INTEGER PRIMARY KEY AUTOINCREMENT,
           Collection TEXT NOT NULL, Name TEXT NOT NULL,
-          Version INTEGER NOT NULL CHECK(Version>0),
+          Version INTEGER NOT NULL,
           Definition TEXT NOT NULL CHECK(json_valid(Definition)),
           Objects TEXT NOT NULL CHECK(json_valid(Objects)),
           UNIQUE(Collection,Name)) STRICT;
         """
     let validateName (name: string) =
         if isNull name then nullArg "name"
-        if String.IsNullOrWhiteSpace name || name.IndexOf('\000') >= 0 then
-            invalidArg "name" "A search index name must be nonblank and cannot contain NUL."
     let exists (connection: NativeSqliteConnection) =
         let mutable statement = connection.OpenStatement("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='SoloDB.SearchIndexes')")
         try

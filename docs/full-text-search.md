@@ -41,7 +41,7 @@ public sealed class Article
 
 `EnsureSearchIndex(builder => ...)` declares the index named `default` at version 1. `EnsureSearchIndex(name, builder => ...)` also uses version 1. `Search(text)` and `Search(query)` use `default`; `SearchIn(name, ...)` selects another index.
 
-Field selectors must follow fixed stored members to a string. Method calls, array/indexer traversal and reference traversal are unsupported. Stored names follow the model's serializer. A missing, null or nontext stored value contributes empty text. A stored path can have several distinct aliases and weights. Aliases follow SQLite identifier comparison; `rank` and `rowid` are reserved. Weights must be finite; negative and zero weights are valid. Null required arguments raise `ArgumentNullException`. A nonpositive definition version raises `ArgumentOutOfRangeException`.
+Field selectors must follow fixed stored members to a string. Method calls, array/indexer traversal and reference traversal are unsupported. Stored names follow the model's serializer. A missing, null or nontext stored value contributes empty text. A stored path can have several distinct aliases and weights. Aliases follow SQLite identifier comparison; `rank` and `rowid` are reserved. Weights must be finite; negative and zero weights are valid. Null required arguments raise `ArgumentNullException`. Definition versions are signed integer labels; a larger version advances a declaration. Index names are stored as text, including empty names or names containing NUL.
 
 The builder defaults to `SearchTextStorage.Shared` and tokenizer `unicode61`. Set `Storage`, `Tokenizer` and `PrefixLengths` during configuration:
 

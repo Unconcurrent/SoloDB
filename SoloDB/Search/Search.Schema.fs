@@ -57,14 +57,16 @@ module internal SearchSchema =
     let drop connection (index: SearchIndexDescriptor) =
         for suffix in ["_insert";"_delete";"_update"] do execute connection $"DROP TRIGGER IF EXISTS {quote(index.Table+suffix)}"
         execute connection $"DROP TABLE IF EXISTS {quote index.Table}; DROP VIEW IF EXISTS {quote index.View}"
-    let remove (connection: NativeSqliteConnection) (index: SearchIndexDescriptor) =
-        drop connection index
+    let forget (connection: NativeSqliteConnection) (index: SearchIndexDescriptor) =
         let mutable statement = connection.OpenStatement($"DELETE FROM {SearchCatalog.table} WHERE Id=@id")
         try
             statement.BindInt64(1,index.Id)
             statement.Step() |> ignore
             statement.Dispose()
         with error -> statement.Abort(error); reraise()
+    let remove connection index =
+        drop connection index
+        forget connection index
     let dropCollection connection collection =
         for index in SearchCatalog.load connection collection do remove connection index
     let rebuild (connection: NativeSqliteConnection) (index: SearchIndexDescriptor) =
