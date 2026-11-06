@@ -259,6 +259,7 @@ type internal StorageNativeFile(parent: StorageNativeVfs, name: string, wal: boo
             file <- 0n
             filename <- 0n
             reraise()
+    member _.HasSharedMemory = methods.HasSharedMemory
     member _.Identity = identity
     member _.Lock(level) = methods.Lock(file, level)
     member _.Unlock(level) = methods.Unlock(file, level)

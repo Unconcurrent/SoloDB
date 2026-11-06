@@ -23,9 +23,10 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
     let nameBytes = bytes name
     let methodSize = methodFields + 18 * ptr
     let vfsSize = vfsFields + 19 * ptr
-    let memory = alloc (methodSize + vfsSize + nameBytes.Length)
+    let memory = alloc (2 * methodSize + vfsSize + nameBytes.Length)
     let methods = memory
-    let vfs = memory + nativeint methodSize
+    let rollbackMethods = memory + nativeint methodSize
+    let vfs = rollbackMethods + nativeint methodSize
     let namePointer = vfs + nativeint vfsSize
     let mutable registered = false
     let mutable files = 0
@@ -63,8 +64,7 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
     let nodeForRole role =
         match role with
         | 0 -> Some nodes.[0]
-        | 1 when profile = SqliteStorageProfile.Wal -> Some nodes.[1]
-        | 2 when profile = SqliteStorageProfile.Simple -> Some nodes.[1]
+        | 1 | 2 when profile <> SqliteStorageProfile.ReadOnly -> Some nodes.[1]
         | _ -> None
     let returnText argument message result =
         let data = bytes message
@@ -73,23 +73,6 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
         Marshal.Copy(data, 0, memory, data.Length)
         Marshal.WriteIntPtr(argument, memory)
         result
-    let pragma argument =
-        let name = text(Marshal.ReadIntPtr(argument, ptr))
-        let value = text(Marshal.ReadIntPtr(argument, 2 * ptr))
-        if isNull value then 12
-        elif name.Equals("journal_mode", StringComparison.OrdinalIgnoreCase) &&
-             not(value.Equals((if profile = SqliteStorageProfile.Wal then "wal" else "persist"), StringComparison.OrdinalIgnoreCase)) then
-            returnText argument "The journal mode is fixed by this storage profile." 1
-        elif name.Equals("synchronous", StringComparison.OrdinalIgnoreCase) then
-            let valid =
-                match value.ToLowerInvariant() with
-                | "normal" | "full" | "extra" | "on" | "true" | "yes" -> true
-                | _ ->
-                    match Int32.TryParse(value, Globalization.NumberStyles.Integer, Globalization.CultureInfo.InvariantCulture) with
-                    | true, level when level >= 1 && level <= 3 -> true
-                    | _ -> false
-            if valid then 12 else returnText argument "The synchronous mode must be NORMAL, FULL or EXTRA." 1
-        else 12
     let control (state: StorageHandle) operation argument =
         match operation with
         | 1 ->
@@ -108,7 +91,7 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
             // by setting a bit borrowed from the unrelated coordination file.
             if Marshal.ReadInt32(argument) > 0 then 12
             else Marshal.WriteInt32(argument, 0); 0
-        | 14 -> pragma argument
+        | 14 -> 12 // SQLite owns journal and synchronization mode semantics.
         | 18 -> Marshal.WriteInt64(argument, 0L); 0 // Managed bytes have no stable native mapping.
         | 20 -> Marshal.WriteInt32(argument, 0); 0 // Permanent bound identity cannot move.
         | 15 | 16 | 24 | 34 | 40 | 44 ->
@@ -141,7 +124,8 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                         | None -> 14
                         | Some node ->
                             let expected = if logical = 0 then 0x100 elif logical = 1 then 0x80000 else 0x800
-                            if flags &&& expected = 0 || flags &&& (openDeleteOnClose ||| openExclusive) <> 0 then 14
+                            if flags &&& expected = 0 || flags &&& openExclusive <> 0 then 14
+                            elif flags &&& openDeleteOnClose <> 0 && flags &&& 2 = 0 then 8
                             elif profile = SqliteStorageProfile.ReadOnly && flags &&& 2 <> 0 then 8
                             else
                                 let native =
@@ -162,7 +146,10 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                                     else
                                         root <- GCHandle.Alloc(state)
                                         Marshal.WriteIntPtr(file, ptr, GCHandle.ToIntPtr(root))
-                                        Marshal.WriteIntPtr(file, methods)
+                                        let table =
+                                            if native |> Option.exists (fun file -> not file.HasSharedMemory) then rollbackMethods
+                                            else methods
+                                        Marshal.WriteIntPtr(file, table)
                                         Interlocked.Increment(&files) |> ignore
                                         if output <> 0n then
                                             Marshal.WriteInt32(output, flags)
@@ -177,14 +164,16 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
             set 4 (Path(fun _ path sync -> protect 2570 (fun () ->
                 let logical = role(text path)
                 if logical = -1 then parent.Delete(path, sync)
-                elif logical = 0 then 2570
+                elif profile = SqliteStorageProfile.ReadOnly then 8
                 else
                     match nodeForRole logical with
                     | None -> 5898
                     | Some node ->
                         lock node.Gate (fun () ->
-                            node.File.SetLength(0L) |> StorageFiles.check
-                            node.File.Flush() |> StorageFiles.check
+                            let present = if logical = 0 then 0 else StorageFiles.auxiliaryRole node
+                            if logical = 0 || present = 0 || present = logical then
+                                node.File.SetLength(0L) |> StorageFiles.check
+                                node.File.Flush() |> StorageFiles.check
                             0))))
             set 5 (Access(fun _ path flags output -> protect 3338 (fun () ->
                 let logical = role(text path)
@@ -195,7 +184,9 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                         | None -> false
                         | Some node ->
                             match flags with
-                            | 0 -> lock node.Gate (fun () -> StorageFiles.length node > 0L)
+                            | 0 ->
+                                if logical = 0 then lock node.Gate (fun () -> StorageFiles.length node > 0L)
+                                else StorageFiles.auxiliaryRole node = logical
                             | 1 -> profile <> SqliteStorageProfile.ReadOnly
                             | 2 -> true
                             | _ -> raise(ArgumentOutOfRangeException("flags"))
@@ -225,7 +216,13 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                 protect 4106 (fun () ->
                     let root = GCHandle.FromIntPtr(Marshal.ReadIntPtr(file, ptr))
                     let state = root.Target :?> StorageHandle
-                    try StorageFiles.close state
+                    try
+                        let result = StorageFiles.close state
+                        if result = 0 && state.Flags &&& openDeleteOnClose <> 0 then
+                            lock state.Node.Gate (fun () ->
+                                state.Node.File.SetLength(0L) |> StorageFiles.check
+                                state.Node.File.Flush() |> StorageFiles.check)
+                        result
                     finally
                         root.Free()
                         Marshal.WriteIntPtr(file, ptr, 0n)
@@ -273,6 +270,11 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
             methodAt 15 (IntArg(fun file delete -> protect 5130 (fun () -> StorageFiles.unmap (handle file) delete)))
             methodAt 16 (Fetch(fun _ _ _ output -> Marshal.WriteIntPtr(output, 0n); 0))
             methodAt 17 (Unfetch(fun _ _ _ -> 0))
+            // Publish the real main-file capability. SQLite then declines WAL
+            // natively when the selected coordination receiver has no shm methods.
+            Marshal.WriteInt32(rollbackMethods, 1)
+            for i = 0 to 17 do
+                setField rollbackMethods methodFields i (field methods methodFields i)
             let result = sqlite3_vfs_register(vfs, 0)
             if result <> 0 then raise(StorageNativeError(result, "The SQLite VFS could not be registered."))
             registered <- true

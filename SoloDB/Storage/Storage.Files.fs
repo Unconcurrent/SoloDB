@@ -4,6 +4,9 @@ open System
 open System.Collections.Generic
 open System.Runtime.InteropServices
 open System.Threading
+open Microsoft.FSharp.NativeInterop
+
+#nowarn "9"
 
 [<Sealed>]
 type internal StorageFileError(failure: StorageFailure) =
@@ -60,6 +63,16 @@ module internal StorageFiles =
             if result.Count = 0 then ended <- true else count <- count + result.Count
         if count < destination.Length then destination.Slice(count).Clear()
         count
+    let auxiliaryRole (node: StorageNode) =
+        lock node.Gate (fun () ->
+            if length node = 0L then 0 else
+            // fileformat.html 4.1: the WAL magic is 0x377f0682 or 0x377f0683.
+            // A cold PERSIST journal has a zero header and remains a journal.
+            let bytes = NativePtr.stackalloc<byte> 4
+            let prefix = Span<byte>(NativePtr.toVoidPtr bytes, 4)
+            let count = read node 0L prefix
+            if count = 4 && prefix.[0] = 0x37uy && prefix.[1] = 0x7Fuy &&
+               prefix.[2] = 0x06uy && prefix.[3] &&& 0xFEuy = 0x82uy then 1 else 2)
     let private conflict (state: StorageHandle) predicate =
         let mutable found = false
         let mutable i = 0

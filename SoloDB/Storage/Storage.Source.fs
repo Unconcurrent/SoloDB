@@ -173,24 +173,12 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
     let inspect () =
         lock nodes.[0].Gate (fun () ->
             let mainLength = StorageFiles.length nodes.[0]
-            let logLength = if profile = SqliteStorageProfile.Wal then lock nodes.[1].Gate (fun () -> StorageFiles.length nodes.[1]) else 0L
+            let logLength = if profile <> SqliteStorageProfile.ReadOnly then lock nodes.[1].Gate (fun () -> StorageFiles.length nodes.[1]) else 0L
             struct (mainLength, logLength))
-    let validateHeader () =
-        lock nodes.[0].Gate (fun () ->
-            if StorageFiles.length nodes.[0] >= 100L then
-                let header = Array.zeroCreate<byte> 100
-                let read = StorageFiles.read nodes.[0] 0L (Span<byte>(header))
-                let signature = Text.Encoding.ASCII.GetBytes("SQLite format 3\000")
-                if read = 100 && header.AsSpan(0, 16).SequenceEqual(ReadOnlySpan<byte>(signature)) then
-                    if profile = SqliteStorageProfile.Wal &&
-                       (header.[16] <> 0x10uy || header.[17] <> 0uy || header.[18] <> 2uy || header.[19] <> 2uy) then
-                        raise(StorageConfigurationError("WAL storage requires an existing 4096-byte WAL image. Import another image through BackupTo."))
-                    if profile = SqliteStorageProfile.Simple && (header.[18] = 2uy || header.[19] = 2uy) then
-                        raise(StorageConfigurationError("Simple storage requires a rollback-journal image. Import a WAL image through BackupTo.")))
     let validateExisting main log =
-        if profile = SqliteStorageProfile.Wal && main = 0L && log <> 0L then
+        if main = 0L && log <> 0L &&
+           (profile = SqliteStorageProfile.Wal || StorageFiles.auxiliaryRole nodes.[1] = 1) then
             raise(StorageConfigurationError("A nonempty WAL requires its main image. Preserve both backings and restore a coherent pair."))
-        validateHeader()
     let initialize timeout (state: StorageHandle) =
         if profile = SqliteStorageProfile.ReadOnly then 0 else
         let timer = Stopwatch.StartNew()

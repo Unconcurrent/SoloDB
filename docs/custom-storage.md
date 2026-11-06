@@ -12,13 +12,13 @@ For an ordinary database file, keep using `new SoloDB(path)`.
 | `Wal(main, log)` | Database and write-ahead log | A reader needs to keep its snapshot while another connection commits. |
 | `ReadOnly(main)` | One complete, unchanging database image | You only need to read an existing database. |
 
-`Simple` uses SQLite's PERSIST journal mode. `Wal` creates databases with 4096 byte pages. Both allow readers and one writer. A long-running reader can delay a writer in Simple mode or delay log cleanup in WAL mode.
+`Simple` selects SQLite's PERSIST mode when a connection opens. `Wal` selects WAL and creates new databases with 4096 byte pages; existing images keep their native page size. Both allow readers and one writer. A long-running reader can delay a rollback-mode writer or WAL cleanup.
 
 The factories accept either streams or `ISqliteStorageFile` objects. Each returns a `SqliteStorage` object, called `storage` in the examples. Several live `SoloDB` instances can use the same object. Dispose each database and dispose the storage even if you never open a database.
 
 Keep the main file and its journal or log together across reopenings. Give each one separate storage. Do not replace a journal or log with an empty file: SQLite may need it to recover committed work.
 
-An existing WAL image must already use 4096 byte pages and WAL headers. A nonempty log without its main image is refused. Simple needs an image in rollback journal format. To change layouts, back up into a fresh destination using the chosen layout; do not reopen incompatible files and expect them to be reformatted. See the [conversion steps below](#import-export-and-read-only-images).
+Keep the matching auxiliary bytes when changing between Simple and WAL. SQLite recovers the supplied journal or log before changing the database header; opening an image does not reformat its page size. A nonempty WAL without its main image is refused. You can change journal mode or synchronization through normal SQLite PRAGMAs on a borrowed connection. The factory selects a connection default, rather than vetoing your choices; SQLite's transaction, shared-memory and recovery rules still apply. See [SQLite's journal-mode documentation](https://sqlite.org/pragma.html#pragma_journal_mode) and the [import options below](#import-export-and-read-only-images).
 
 The string and `SqliteStorage` constructors remain distinct. An F# helper with an untyped constructor argument needs its intended type, for example `let openDatabase (source: string) = new SoloDB(source)`. Give a null argument its intended type too.
 
@@ -170,13 +170,13 @@ Make `Flush` preserve earlier byte and length writes to the level your backend p
 
 Writable factories also accept `coordination`. Custom storage reports a 4096-byte sector unit to SQLite; this is separate from the database page size. It does not inherit media or atomic-write guarantees from the coordination file.
 
-Keep the supplied files available until `storage.IsClosed`. SoloDB clears an auxiliary journal or log by setting its length to zero and flushing it. It does not unlink your object or hide an old length behind an invalid header. Your objects are already bound to their database roles; do not treat them as a general create/delete filesystem.
+Keep the supplied files available until `storage.IsClosed`. The auxiliary file holds the current rollback journal or WAL, as selected by SQLite; mode changes reuse that file after the previous role has finished. A native request to delete a supplied file clears its length and flushes it, including delete-on-close. It does not unlink your object or hide an old length behind an invalid header. Exclusive creation still fails because these objects are already supplied; they are not a general create/delete filesystem.
 
 ## Import, export and read-only images
 
-Use `source.BackupTo(destination)` with a fresh destination. Keep both databases open until it finishes. A managed WAL destination requires 4096 byte page geometry.
+Use `source.BackupTo(destination)` with a fresh destination. Keep both databases open until it finishes. SQLite cannot change a WAL destination's page size during backup: its page size must match the source. New WAL storage starts with 4096 byte pages; an existing coherent image can use another native page size.
 
-To convert a different page size, preserve the original and work on a disposable ordinary-file copy. Put that copy in rollback journal mode, set its page size to 4096 and run `VACUUM`, then back it up into the fresh WAL destination. Do not reformat the original in place.
+For a source with another page size, you can choose a rollback-mode destination instead. If you need a fresh 4096-byte WAL destination, preserve the original and work on an ordinary-file copy: put the copy in rollback journal mode, set its page size to 4096 and run `VACUUM`, then back it up. This is an import option, not a restriction on directly opening existing images.
 
 Use `VacuumTo(path)` to export to an ordinary native file. Do not assume a transaction writing both your supplied database and an attached database commits atomically across the two. Some combinations need a super-journal, an extra file coordinating multiple rollback journals; these layouts do not supply that file, so those combinations are refused.
 
