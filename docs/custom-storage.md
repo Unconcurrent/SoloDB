@@ -15,8 +15,6 @@ Choose the storage layout, its persistence guarantee and its sharing configurati
 
 The first three factories accept either `ISqliteStorageFile` objects or `Stream` objects. Stream overloads require `leaveOpen`. Positional files and native VFS registrations are borrowed. A factory result belongs to one `SoloDB` instance and can be attached only once. Dispose an unused result too.
 
-The new constructor accepts `SqliteStorage`; the existing constructor still accepts a string source. An F# helper with an unconstrained constructor argument now needs its intended type, for example `let openDatabase (source: string) = new SoloDB(source)`.
-
 Keep each writable main, journal and log as a distinct logical file. Their contents must survive reopening together. Replacing a journal or WAL with an empty file can discard recovery data.
 
 An existing managed WAL image must already have 4096 byte pages and WAL format headers. Simple storage requires a rollback journal image. Use an explicit backup conversion for a different layout; opening an incompatible image does not reformat it.
