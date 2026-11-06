@@ -51,6 +51,8 @@ type internal CollectionTypeDescription = {
     History: string
     Contract: string
     Alternatives: string
+    Shape: string
+    mutable EncodedShape: byte[]
 }
 
 /// Shared projection for runtime discovery and compiler-supplied descriptions.
@@ -227,17 +229,12 @@ module internal CodecDescription =
                             // children; retain their identity without preparing codecs.
                             values.Add("TypeArguments",f.GenericArguments |> Array.map(typeIdentity >> quote) |> array)
                         objectValue(values.ToArray())
-            let contract = node root
-            let f = facts.Invoke root
-            let description = objectValue [|
-                "FullName",quote f.FullName; "AssemblyQualifiedName",quote f.Identity
-                "Contract",contract; "Labels",objectValue(labels.ToArray()) |]
-            struct(description,contract)
-        let struct(history,contract) = build root
-        // Alternative graphs have their own local definition numbers. Discovery
-        // enriches this separate inventory, never the declared contract identity.
-        let alternatives = ResizeArray<string>()
-        let recorded = HashSet<struct(string * string)>()
+            struct(node root,objectValue(labels.ToArray()))
+        let struct(contract,rootLabels) = build root
+        // Alternatives belong to the complete model snapshot, with independent
+        // graph references and labels kept outside semantic shape identity.
+        let alternatives = ResizeArray<struct(string * string * string * string)>()
+        let recorded = HashSet<struct(string * string * string)>()
         let visited = HashSet<Type>()
         let mutable pending = projected |> Seq.toArray
         while pending.Length > 0 do
@@ -245,9 +242,23 @@ module internal CodecDescription =
                 if visited.Add target then
                     let f = facts.Invoke target
                     for alternative in f.Alternatives do
-                        let struct(description,contract) = build alternative
-                        let owner = typeIdentity target
-                        if recorded.Add(struct(owner,contract)) then
-                            alternatives.Add(objectValue [|"For",quote owner;"Description",description|])
+                        let struct(contract,labels) = build alternative
+                        let owner,identity = typeIdentity target,typeIdentity alternative
+                        if recorded.Add(struct(owner,identity,contract)) then
+                            let a = facts.Invoke alternative
+                            alternatives.Add(struct(owner,identity,contract,objectValue [|
+                                "FullName",quote a.FullName; "AssemblyQualifiedName",quote a.Identity; "Definitions",labels |]))
             pending <- projected |> Seq.filter(fun target -> not(visited.Contains target)) |> Seq.toArray
-        { History = history; Contract = contract; Alternatives = array(alternatives.ToArray()) }
+        let ordered = alternatives.ToArray() |> Array.sortWith(fun struct(a,b,c,_) struct(x,y,z,_) ->
+            let compare = String.CompareOrdinal(a,x)
+            if compare <> 0 then compare else
+            let compare = String.CompareOrdinal(b,y)
+            if compare <> 0 then compare else String.CompareOrdinal(c,z))
+        let alternatives = ordered |> Array.map(fun struct(owner,identity,contract,_) ->
+            objectValue [|"For",quote owner; "Identity",quote identity; "Contract",contract|]) |> array
+        let shape = objectValue [|"Contract",contract;"Alternatives",alternatives|]
+        let f = facts.Invoke root
+        let history = objectValue [|
+            "FullName",quote f.FullName; "AssemblyQualifiedName",quote f.Identity
+            "Shape",shape; "Labels",objectValue [|"Root",rootLabels;"Alternatives",ordered |> Array.map(fun struct(_,_,_,labels) -> labels) |> array|] |]
+        { History = history; Contract = contract; Alternatives = alternatives; Shape = shape; EncodedShape = Unchecked.defaultof<_> }

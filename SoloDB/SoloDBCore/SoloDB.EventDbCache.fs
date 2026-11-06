@@ -6,6 +6,7 @@ open System.Collections.Generic
 open FileStorage
 open Connections
 open NativeSQLiteTools
+open SoloDatabase.Metadata.CodecGeneration
 
 type internal EventDbCacheStore(initialCapacity: int) =
     let cache = ConcurrentDictionary<string, obj>(Environment.ProcessorCount, initialCapacity, StringComparer.Ordinal)
@@ -32,6 +33,10 @@ type internal EventDbCache(connectionString: string, directConnection: NativeSql
     let mutable knownCollectionExists = Option.isSome knownCollectionName
     let cacheStore = EventDbCacheStore(4)
     let mutable cachedFileSystem: IFileSystem | null = null
+    // This cache ends with the handler invocation, never with a transaction
+    // commit. Existing callback epochs detect nested handlers on this owner.
+    let descriptions = Dictionary<struct(string * Type),CollectionTypeDescription>()
+    let mutable callbacks = directConnection.DatabaseOwner.CallbackEpoch
 
     member private _.TryGetCached<'U>(collectionName: string) : ISoloDBCollection<'U> option =
         cacheStore.TryGetCached<'U>(collectionName)
@@ -71,6 +76,7 @@ type internal EventDbCache(connectionString: string, directConnection: NativeSql
         cachedFileSystem
 
     member this.GetCollection<'U>(collectionName: string) : ISoloDBCollection<'U> =
+        guardedConnection.CheckAccess()
         let collectionName = Helper.formatName collectionName
         if collectionName.StartsWith "SoloDB" then
             raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
@@ -83,7 +89,23 @@ type internal EventDbCache(connectionString: string, directConnection: NativeSql
                 let collection = collectionFactory.CreateCollection<'U>(collectionName)
                 this.TryStoreCached<'U>(collectionName) collection |> ignore
                 collection
-        CollectionTypeInformation.record directConnection collectionName (TypeDescriptions.Get typeof<'U>)
+        let epoch = directConnection.DatabaseOwner.CallbackEpoch
+        if epoch <> callbacks then descriptions.Clear(); callbacks <- epoch
+        let key = struct(collectionName,typeof<'U>)
+        let description = TypeDescriptions.Get typeof<'U>
+        match descriptions.TryGetValue key with
+        | true,saved when obj.ReferenceEquals(saved,description) -> ()
+        | _ ->
+            let changed = CollectionTypeInformation.recordChanged directConnection collectionName description
+            let completed = directConnection.DatabaseOwner.CallbackEpoch
+            if completed <> epoch then
+                descriptions.Clear()
+                callbacks <- completed
+            else
+                if changed then
+                    for candidate in descriptions.Keys |> Seq.filter(fun struct(name,_) -> name = collectionName) |> Seq.toArray do
+                        descriptions.Remove candidate |> ignore
+                descriptions[key] <- description
         collection
 
     member this.CollectionExists(collectionName: string) =
