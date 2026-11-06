@@ -490,7 +490,7 @@ long count = countUsers("Al");
 
 Counts, quantifiers, aggregates and element terminals share ordinary query execution, including empty-result and multiple-result behavior. Materializers such as `ToArray`, `ToList` and `ToDictionary` execute on each invocation. An explicit `AsEnumerable()` keeps subsequent operations on the client, just as in an ordinary query. Compiling retains query machinery, never result rows or counts.
 
-Compile from a nontransactional collection and keep that collection alive while using the function. Recompile after changing its model or indexes, or to use refreshed statistics. Unindexed filtering and deep offsets still require database work.
+Keep the collection alive while using the compiled function. A function compiled from a transactional collection uses that transaction: invoke and finish enumerating it before its callback returns. Recompile after changing its model or indexes, or to use refreshed statistics. Unindexed filtering and deep offsets still require database work.
 
 For supported ordered pages with an explicit `Id` tie-breaker, compiled queries select page IDs before fetching payloads. Planning considers compound-index ordering, bounded early-page scans and, when statistics are available, a capped covering count to choose a deep-page strategy within the same statement. These choices preserve your results and ordering; gains depend on the filter, indexes and data distribution.
 

@@ -97,7 +97,7 @@ var first = find("sqlite", 24).ToArray();
 var second = find("journal", 16).ToArray();
 ```
 
-Retain the function. Text, markers and token counts supplied as arguments bind on invocation; enumeration reads current rows. The index name and declaration are fixed when compiling. An ordinary query resolves the current declaration when executed. A retained query never silently switches to a replacement declaration: recompile after replacing or dropping its index. Rebuild keeps the declaration identity.
+Retain the function. Text, markers and token counts supplied as arguments bind on invocation; enumeration reads current rows. A transactional collection can compile and execute within its transaction callback; finish every enumeration before that callback returns. The index name and declaration are fixed when compiling. An ordinary query resolves the current declaration when executed. A retained query never silently switches to a replacement declaration: recompile after replacing or dropping its index. Rebuild keeps the declaration identity.
 
 An undefined or damaged index found during resolution raises `InvalidOperationException`. Starting a retained execution against an index retired by replacement or Drop raises `NativeSqliteException`; create a new compiled query against the current declaration. Preparation and reprepare errors preserve their native codes and cause. SoloDB does not infer their cause from a generic SQLite error or a changed catalog, and other native errors remain unchanged.
 

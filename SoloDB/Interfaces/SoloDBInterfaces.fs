@@ -320,7 +320,7 @@ and ISoloDBCollection<'T> =
     // selecting the generic-result overload and exposing IQueryable as its result.
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
     /// <remarks>
-    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// Recompile after model or index changes. Transactional queries must finish within their transaction callback.
     /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
     /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
     /// </remarks>
@@ -328,7 +328,7 @@ and ISoloDBCollection<'T> =
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
     /// <remarks>
-    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// Recompile after model or index changes. Transactional queries must finish within their transaction callback.
     /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
     /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
     /// </remarks>
@@ -339,7 +339,7 @@ and ISoloDBCollection<'T> =
     /// <param name="_marker">Omit this parameter. Its optional position makes F# prefer
     /// the sequence overload when applicable; it does not alter query execution.</param>
     /// <remarks>
-    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// Recompile after model or index changes. Transactional queries must finish within their transaction callback.
     /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
     /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
     /// </remarks>
@@ -347,7 +347,7 @@ and ISoloDBCollection<'T> =
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
     /// <remarks>
-    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// Recompile after model or index changes. Transactional queries must finish within their transaction callback.
     /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
     /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
     /// </remarks>
@@ -355,7 +355,7 @@ and ISoloDBCollection<'T> =
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
     /// <remarks>
-    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// Recompile after model or index changes. Transactional queries must finish within their transaction callback.
     /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
     /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
     /// </remarks>
@@ -366,7 +366,7 @@ and ISoloDBCollection<'T> =
     /// <param name="_marker">Omit this parameter. Its optional position makes F# prefer
     /// the sequence overload when applicable; it does not alter query execution.</param>
     /// <remarks>
-    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// Recompile after model or index changes. Transactional queries must finish within their transaction callback.
     /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
     /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
     /// </remarks>
@@ -374,7 +374,7 @@ and ISoloDBCollection<'T> =
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
     /// <remarks>
-    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// Recompile after model or index changes. Transactional queries must finish within their transaction callback.
     /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
     /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
     /// </remarks>
@@ -382,7 +382,7 @@ and ISoloDBCollection<'T> =
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
     /// <remarks>
-    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// Recompile after model or index changes. Transactional queries must finish within their transaction callback.
     /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
     /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
     /// </remarks>
@@ -393,7 +393,7 @@ and ISoloDBCollection<'T> =
     /// <param name="_marker">Omit this parameter. Its optional position makes F# prefer
     /// the sequence overload when applicable; it does not alter query execution.</param>
     /// <remarks>
-    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// Recompile after model or index changes. Transactional queries must finish within their transaction callback.
     /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
     /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
     /// </remarks>
@@ -401,7 +401,7 @@ and ISoloDBCollection<'T> =
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
     /// <remarks>
-    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// Recompile after model or index changes. Transactional queries must finish within their transaction callback.
     /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
     /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
     /// </remarks>
@@ -409,7 +409,7 @@ and ISoloDBCollection<'T> =
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
     /// <remarks>
-    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// Recompile after model or index changes. Transactional queries must finish within their transaction callback.
     /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
     /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
     /// </remarks>
@@ -420,7 +420,7 @@ and ISoloDBCollection<'T> =
     /// <param name="_marker">Omit this parameter. Its optional position makes F# prefer
     /// the sequence overload when applicable; it does not alter query execution.</param>
     /// <remarks>
-    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// Recompile after model or index changes. Transactional queries must finish within their transaction callback.
     /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
     /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
     /// </remarks>
@@ -493,7 +493,7 @@ and ISoloDBCollection<'T> =
     /// <c>true</c> if the collection is within a transaction context; otherwise, <c>false</c>.
     /// </value>
     /// <remarks>
-    /// When <c>true</c>, all operations are deferred until the transaction is committed or rolled back.
+    /// When <c>true</c>, operations share the current transaction and commit or roll back together.
     /// </remarks>
     /// <seealso cref="SoloDB.WithTransaction"/>
     abstract member InTransaction: bool with get

@@ -41,7 +41,6 @@ module internal CompiledQueries =
             elif not(isNull call.Object) && (call.Method.Name = "Search" || call.Method.Name = "SearchIn") &&
                  call.Method.DeclaringType.IsGenericType && call.Method.DeclaringType.GetGenericTypeDefinition().Equals(typedefof<ISoloDBCollection<_>>) then
                 let receiver = ExpressionEvaluation.evaluateExpr<obj> call.Object :?> ISearchOwner
-                if receiver.InTransaction then raise (NotSupportedException("Transactional collections cannot compile queries."))
                 let root =
                     if Object.Equals(receiver.Owner,owner) then source :> Expression
                     elif receiver.Database = (owner :?> ISearchOwner).Database then receiver.RootExpression
@@ -150,7 +149,6 @@ module internal CompiledQueries =
         (invocationState: Expression -> Expression option) =
         if isNull (box source) then nullArg "source"
         if isNull queryBody then nullArg "query"
-        if source.InTransaction then invalid "transactional collections are not supported."
         let body = NormalizeQueryLambdas(box source,parameters.[0]).Visit queryBody
         checkRoot parameters.[0] body
         let replacements =
