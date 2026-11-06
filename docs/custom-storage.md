@@ -14,7 +14,7 @@ For an ordinary database file, keep using `new SoloDB(path)`.
 
 `Simple` uses SQLite's PERSIST journal mode. `Wal` creates databases with 4096 byte pages. Both allow readers and one writer. A long-running reader can delay a writer in Simple mode or delay log cleanup in WAL mode.
 
-The factories accept either streams or `ISqliteStorageFile` objects. Each returns a single-use `SqliteStorage` object, called `storage` in the examples. Give it to one `SoloDB` instance and dispose it even if you never open the database.
+The factories accept either streams or `ISqliteStorageFile` objects. Each returns a `SqliteStorage` object, called `storage` in the examples. Several live `SoloDB` instances can use the same object. Dispose each database and dispose the storage even if you never open a database.
 
 Keep the main file and its journal or log together across reopenings. Give each one separate storage. Do not replace a journal or log with an empty file: SQLite may need it to recover committed work.
 
@@ -60,7 +60,7 @@ sealed class Article
 }
 ```
 
-Sequential reuse is allowed after the previous `storage.IsClosed` is true, provided you left the streams open. Create a new `SqliteStorage` object for each database instance; you cannot attach the old object again.
+Sequential reuse is allowed after the previous `storage.IsClosed` is true, provided you left the streams open. You can open another database on the same storage while at least one database is still attached. Closing its last database retires that storage; create a new `SqliteStorage` object to reopen afterward.
 
 Put F# disposal scopes inside a function or entry point:
 
@@ -92,7 +92,7 @@ Generated and NativeAOT applications still need their [normal metadata registrat
 
 ## Share a database between instances or processes
 
-Without a coordination option, only connections borrowed from the same `SoloDB` instance can safely share your files. To open the same database from several instances or processes, use `SqliteStorageCoordination.File` with the same separate coordination path in every participant.
+Several `SoloDB` instances using the same `SqliteStorage` share its database locks and can safely use its files without a coordination option. For separate `SqliteStorage` objects or separate processes accessing the same database bytes, use `SqliteStorageCoordination.File` with the same separate coordination path in every participant.
 
 Each participant opens its own streams:
 
@@ -113,7 +113,7 @@ This uses the active SQLite engine's default filesystem for locks and shared mem
 
 When another `SqliteStorage` object has not finished with the files (`IsClosed` is false):
 
-- Open a separate Stream or `ISqliteStorageFile` object for each instance. Do not share the same object or hide it behind different wrappers.
+- You may share the same Stream or `ISqliteStorageFile` object in one process; SoloDB serializes access to that actual object. Separate views must expose coherent bytes. If different wrappers share a cursor underneath, those wrappers must serialize their own seek/read/write operations together.
 - Point every main stream at the same main bytes, and every log stream at the same log bytes.
 - Ensure a successful read can see another participant's committed writes. Avoid independent buffering that returns stale bytes.
 - Use the same coordination path. Do not open and close that file yourself, delete it or replace it while anyone is using the database.
@@ -126,9 +126,9 @@ For a specialist native filesystem, `SqliteStorageCoordination.File(filename, re
 
 Dispose readers, streams selected from query results, transactions and borrowed connections before disposing their database. A normal `using` or `use` scope does this when these objects are declared after the database.
 
-`db.Dispose()` stops new work but returns if a database operation or borrowed object still needs the files. Finish or dispose those objects, then check `storage.IsClosed`. Do not close or reuse the supplied files while it is false. Do not spin waiting for it on the thread that still owns an unfinished reader or transaction.
+`db.Dispose()` stops new work on that database. Other databases attached to the same storage remain usable. Disposing the storage itself stops all its databases. Closing its last database retires the storage, but disposal returns if a database operation or borrowed object still needs the files. Finish or dispose those objects, then check `storage.IsClosed`. Do not close or reuse the supplied files while it is false. Do not spin waiting for it on the thread that still owns an unfinished reader or transaction.
 
-After completion, inspect `storage.ClosingFailure` for the first closing error. With `leaveOpen: false`, SoloDB closes the streams once all database use has finished. With `true`, you close them yourself. Your `ISqliteStorageFile` implementations always remain yours to close.
+After completion, inspect `storage.ClosingFailure` for the first closing error. With `leaveOpen: false`, SoloDB closes each stream after all storage objects using that actual stream have finished. With `true`, you close it yourself unless another participant transferred its ownership with `false`. A single storage reaching `IsClosed` does not let you close a stream still used by another storage. Your `ISqliteStorageFile` implementations always remain yours to close.
 
 Use deterministic disposal. If you abandon a database or a reader, its files, callbacks and locks can remain allocated; garbage collection is not a promised fallback for these inputs.
 

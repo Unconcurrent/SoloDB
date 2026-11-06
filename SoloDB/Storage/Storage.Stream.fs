@@ -7,7 +7,10 @@ open System.Threading
 /// Owns one leased cursor and preserves the supplied Stream's flushing behavior.
 [<Sealed>]
 type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool) =
-    let gate = obj()
+    let state =
+        if isNull stream then nullArg "stream"
+        StorageObjects.get stream
+    let gate = state.Gate
     let mutable disposed = false
     let mutable zeros = Array.empty<byte>
 #if NETSTANDARD2_0
@@ -16,9 +19,11 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
         if buffer.Length < length then buffer <- Array.zeroCreate length
 #endif
     do
-        if isNull stream then nullArg "stream"
-        if not stream.CanSeek || not stream.CanRead || (writable && not stream.CanWrite) then
-            invalidArg "stream" "Storage requires a readable, seekable Stream and write access for a writable profile."
+        lock gate (fun () ->
+            if state.Closing then raise(ObjectDisposedException("stream"))
+            if not stream.CanSeek || not stream.CanRead || (writable && not stream.CanWrite) then
+                invalidArg "stream" "Storage requires a readable, seekable Stream and write access for a writable profile."
+            state.References <- state.References + 1)
     let failure (error: exn) =
         let kind = match error with :? StorageIOException as error -> error.Kind | _ -> StorageFailureKind.IoError
         StorageFailure(kind, error)
@@ -42,6 +47,7 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
 #endif
                 position <- position + int64 count
     member internal _.StreamIdentity = stream
+    member internal _.Gate = gate
     interface ISqliteStorageFile with
         member _.ReadAt(position, destination) =
             Monitor.Enter gate
@@ -130,5 +136,11 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
 #if NETSTANDARD2_0
                     buffer <- Array.empty
 #endif
-                    if not leaveOpen then stream.Dispose()
+                    state.CloseRequested <- state.CloseRequested || not leaveOpen
+                    state.References <- state.References - 1
+                    if state.References = 0 && state.CloseRequested then
+                        state.CloseRequested <- false
+                        state.Closing <- true
+                        try stream.Dispose()
+                        finally state.Closing <- false
             finally Monitor.Exit gate

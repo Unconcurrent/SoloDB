@@ -24,7 +24,7 @@ open System.Collections.Concurrent
 /// The main database class, representing a single SQLite database file or in-memory instance.
 /// Provides access to collections and file system storage.
 /// </summary>
-type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration, eventSystem: EventSystem, storage: SqliteStorage option, attachment: IDisposable) =
+type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration, eventSystem: EventSystem, storage: SqliteStorage option, attachment: StorageRootLease) =
     let mutable disposed = false
     // Serializes DDL operations (InitializeCollection, DropCollectionIfExists) to prevent
     // collection initialization and removal from observing incomplete schema changes.
@@ -63,7 +63,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
         new SoloDB(manager, connectionString, location, defaultConfig, eventSystem, None, null)
 
-    /// Opens a single-use storage input. Dispose the database and every borrowed
+    /// Opens a shared storage input. Dispose the database and every borrowed
     /// reader, transaction and stream deterministically.
     new(storage: SqliteStorage) as this =
         if isNull (box storage) then nullArg "storage"
@@ -89,7 +89,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     reraise()
             with _ -> attachment.Dispose(); reraise()
         new SoloDB(manager, connectionString, location, config, eventSystem, Some storage, attachment)
-        then storage.BindRootClose(Action(fun () -> this.Dispose()))
+        then storage.BindRootClose(attachment, Action(fun () -> this.Dispose()))
 
     /// <summary>
     /// Gets the underlying connection manager for the database.
@@ -401,7 +401,6 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         try (connectionManager :> IDisposable).Dispose()
         finally
             if not(isNull attachment) then attachment.Dispose()
-            match storage with Some input -> input.Dispose() | None -> ()
 
     interface IDisposable with
         member this.Dispose() = this.Dispose()

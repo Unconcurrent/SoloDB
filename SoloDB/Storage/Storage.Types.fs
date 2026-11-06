@@ -2,6 +2,19 @@ namespace SoloDatabase
 
 open System
 open System.IO
+open System.Runtime.CompilerServices
+
+/// State attached to the supplied object, not a database or coordination identity.
+[<Sealed>]
+type internal StorageObjectState() =
+    member val Gate = obj()
+    member val References = 0 with get,set
+    member val CloseRequested = false with get,set
+    member val Closing = false with get,set
+
+module internal StorageObjects =
+    let private states = ConditionalWeakTable<obj, StorageObjectState>()
+    let get (value: obj) = states.GetValue(value, fun _ -> StorageObjectState())
 
 /// Library-established admission failures, distinct from exceptions thrown by a backend.
 [<Sealed>]
@@ -66,7 +79,8 @@ type StorageLengthResult =
 /// Failed writes preserve bytes outside their range, cannot shrink length, and cannot grow
 /// beyond max(previous length, requested end). Failed resize preserves its retained prefix.
 /// Flush supplies the backend's actual ordered bytes/length durability barrier.
-/// Each description supplies independent coherent views; methods must not reenter the database.
+/// Shared objects are serialized by identity; independent views must expose coherent bytes.
+/// Methods must not reenter the database.
 type ISqliteStorageFile =
     abstract ReadAt: position: int64 * destination: Span<byte> -> StorageReadResult
     abstract WriteAt: position: int64 * source: ReadOnlySpan<byte> -> StorageFailure

@@ -59,6 +59,15 @@ type internal SqliteStorageLease(name: string, filename: string, profile: Sqlite
                     try vfs.Dispose() with error -> report error
             finally release()
 
+/// One root's logical attachment, separate from native physical completion.
+[<Sealed; AllowNullLiteral>]
+type internal StorageRootLease(release: StorageRootLease -> unit) =
+    let mutable active = 1
+    member val Close: Action = null with get,set
+    member this.Dispose() =
+        if Interlocked.Exchange(&active, 0) = 1 then release this
+    interface IDisposable with member this.Dispose() = this.Dispose()
+
 module private StorageInput =
     let distinct profile (files: ISqliteStorageFile[]) =
         for i = 0 to files.Length - 1 do
@@ -106,7 +115,7 @@ module private StorageInput =
         page.[105] <- 0x10uy
         page
 
-/// A single-use storage input. Dispose deterministically; abandoned native callback
+/// A shared storage input. Dispose deterministically; abandoned native callback
 /// cycles may retain all resources. Positional files are borrowed.
 [<Sealed>]
 type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorageFile[], owned: IDisposable[],
@@ -116,11 +125,10 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
     let mutable ownedResources = owned
     let identity = "solodb-storage-" + Guid.NewGuid().ToString("N")
     let leases = HashSet<SqliteStorageLease>()
-    let mutable used = false
+    let roots = HashSet<StorageRootLease>()
     let mutable retired = false
     let mutable references = 0
     let mutable cleanupState = 0
-    let mutable rootClose: Action = null
     let mutable closingFailure: exn = null
     let report error = lock gate (fun () -> if isNull closingFailure then closingFailure <- error)
     let cleanup () =
@@ -141,14 +149,27 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
                     try resource.Dispose() with error -> report error
             finally lock gate (fun () -> cleanupState <- 2)
     let retire () =
-        let pending =
+        let closers, pending =
             lock gate (fun () ->
                 retired <- true
-                rootClose <- null
-                leases |> Seq.toArray)
+                let closers = roots |> Seq.map (fun root -> let close = root.Close in root.Close <- null; close) |> Seq.toArray
+                roots.Clear()
+                closers, leases |> Seq.toArray)
+        for close in closers do
+            if not(isNull close) then
+                try close.Invoke() with error -> report error
         for lease in pending do
             try lease.RequestClose() with error -> report error
         cleanup()
+    let detach (root: StorageRootLease) =
+        let last =
+            lock gate (fun () ->
+                root.Close <- null
+                if roots.Remove(root) && roots.Count = 0 && not retired then
+                    retired <- true
+                    true
+                else false)
+        if last then retire()
     let inspect () =
         lock nodes.[0].Gate (fun () ->
             let mainLength = StorageFiles.length nodes.[0]
@@ -221,20 +242,18 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
     member internal _.Attach() =
         lock gate (fun () ->
             if retired then raise(ObjectDisposedException("SqliteStorage"))
-            if used then invalidOp "A SqliteStorage input can be attached only once."
-            used <- true)
-        let mutable active = 1
-        { new IDisposable with
-            member _.Dispose() = if Interlocked.Exchange(&active, 0) = 1 then retire() }
-    member internal _.BindRootClose(action: Action) =
+            let root = new StorageRootLease(detach)
+            roots.Add(root) |> ignore
+            root)
+    member internal _.BindRootClose(root: StorageRootLease, action: Action) =
         let closing =
             lock gate (fun () ->
-                if not retired then rootClose <- action
-                retired)
+                if not retired && roots.Contains(root) then root.Close <- action; false
+                else true)
         if closing then action.Invoke()
     member internal _.Acquire(timeout: int) =
         lock gate (fun () ->
-            if retired || not used then raise(ObjectDisposedException("SqliteStorage"))
+            if retired || roots.Count = 0 then raise(ObjectDisposedException("SqliteStorage"))
             references <- references + 1)
         let faults = StorageFaultChannel()
         let mutable registration: IDisposable = null
@@ -259,12 +278,7 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
             if not(isNull registration) then try registration.Dispose() with error -> report error
             release()
             reraise()
-    member _.Dispose() =
-        let action = lock gate (fun () -> rootClose)
-        if not(isNull action) then
-            try action.Invoke() with error -> report error
-            if not(lock gate (fun () -> retired)) then retire() else cleanup()
-        else retire()
+    member _.Dispose() = retire()
     interface IDisposable with member this.Dispose() = this.Dispose()
     static member private Managed(profile, files, owned, coordination) =
         new SqliteStorage(profile, files, owned, coordination)

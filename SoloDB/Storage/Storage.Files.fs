@@ -10,10 +10,14 @@ type internal StorageFileError(failure: StorageFailure) =
     inherit IO.IOException("The storage operation failed.", failure.Cause)
     member _.Failure = failure
 
-/// A description's coherent view and private coordination domain. No static identity map.
+/// A coherent byte view and its private SQLite coordination domain.
 type internal StorageNode(file: ISqliteStorageFile) =
     member _.File = file
-    member val Gate = obj()
+    member val Gate =
+        match file with
+        | :? StreamStorageFile as stream -> stream.Gate
+        | _ when isNull (box file) -> obj() // The input validates its named role.
+        | _ -> (StorageObjects.get file).Gate
     member val Handles = ResizeArray<StorageHandle>()
     member val Regions = ResizeArray<nativeint>()
     member val RegionSize = 0 with get,set
