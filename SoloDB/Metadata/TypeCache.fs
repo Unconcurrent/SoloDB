@@ -182,7 +182,7 @@ type internal JsonDefaultMethod =
 /// One concrete record of facts and functions for a closed CLR type.
 type internal TypeMetadataRecord = {
     TypeFacts: MetadataValue<ModelTypeFacts> voption
-    TypeDescription: MetadataValue<struct(string * string)> voption
+    TypeDescription: MetadataValue<CollectionTypeDescription> voption
     TypeDescriptionFacts: MetadataValue<CodecDescriptionFacts<Type>> voption
     DescriptionDependencies: Type[]
     DescriptionBases: Type[]
@@ -363,7 +363,7 @@ type internal TypeMetadataCache private () =
         gate.EnterReadLock()
         try entries |> Seq.choose(fun (KeyValue(target,metadata)) -> if known metadata then Some target else None) |> Seq.toArray
         finally gate.ExitReadLock()
-    static member StoreDescription(modelType: Type, candidates: Type[], dependencies: Type[], bases: Type[], description: struct(string * string)) =
+    static member StoreDescription(modelType: Type, candidates: Type[], dependencies: Type[], bases: Type[], description: CollectionTypeDescription) =
         gate.EnterWriteLock()
         try
             let added = entries |> Seq.exists(fun (KeyValue(target,metadata)) ->

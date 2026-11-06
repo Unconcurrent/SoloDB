@@ -18,17 +18,20 @@ module internal SoloDBRootOps =
         checkDisposed()
         if name.StartsWith "SoloDB" then raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
-        let description = if connectionManager.IsReadOnly then ValueNone else ValueSome(TypeDescriptions.Get typeof<'T>)
-        let struct(existsAlready,recorded) =
+        let struct(description,existsAlready,recorded,readOnly) =
             use connection = connectionManager.BorrowNative()
-            match description with
-            | ValueSome(struct(_,meaning)) -> CollectionTypeInformation.lookup connection name meaning
-            | ValueNone -> struct(Helper.existsCollection name connection,true)
+            let readOnly = connection.IsReadOnly
+            let description = if readOnly then ValueNone else ValueSome(TypeDescriptions.Get typeof<'T>)
+            let struct(exists,recorded) =
+                match description with
+                | ValueSome description -> CollectionTypeInformation.lookup connection name description
+                | ValueNone -> struct(Helper.existsCollection name connection,true)
+            struct(description,exists,recorded,readOnly)
 
-        if connectionManager.IsReadOnly && not existsAlready then
+        if readOnly && not existsAlready then
             raise (InvalidOperationException("ReadOnly storage cannot create a missing collection."))
 
-        if existsAlready && not connectionManager.IsReadOnly then
+        if existsAlready && not readOnly then
             let needsIndexes =
                 use connection=connectionManager.BorrowNative()
                 HelperSchema.unsignedIndexesRequireEnsure<'T> name connection
@@ -63,7 +66,7 @@ module internal SoloDBRootOps =
                         RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
                 )
             )
-        elif hasRelations && not connectionManager.IsReadOnly then
+        elif hasRelations && not readOnly then
             let needsEnsure =
                 use conn = connectionManager.BorrowNative()
                 RelationsSchemaLinkTableDDL.relationSchemaRequiresEnsure conn name typeof<'T>

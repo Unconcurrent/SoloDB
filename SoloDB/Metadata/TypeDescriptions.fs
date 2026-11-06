@@ -23,30 +23,34 @@ type internal TypeDescriptions private () =
                 [|DBRefTypeHelpers.referenceTargetType target|]
             else arguments
         let facts = {
-            Definition = definition; Scope = target.Assembly.GetName().Name; FullName = target.FullName; Identity = target.AssemblyQualifiedName
+            Definition = definition; Scope = CodecDescription.assemblyScope target; FullName = target.FullName; Identity = target.AssemblyQualifiedName
             GenericDefinition = if target.IsGenericType && decision.Shape = TypeShape.Object then Some(target.GetGenericTypeDefinition()) else None
-            GenericArguments = if decision.Shape = TypeShape.Object then arguments else [||]
+            GenericArguments = if target.IsGenericType then target.GetGenericArguments() else [||]
             Templates = Array.map2(fun name template -> struct(name,template)) names templates
             CaseTemplates = if isNull unionRoot then caseTemplates else [||]
             UnionRoot = Option.ofObj unionRoot
-            Abstract = abstractType; RequiresTypeInformation = requiresTypeInformation; NonGenericSequence = nonGenericSequence
+            Abstract = abstractType; Sealed = target.IsSealed || target.IsValueType; RequiresTypeInformation = requiresTypeInformation; NonGenericSequence = nonGenericSequence
             Record = record; Decision = decision; Arguments = arguments
             Members = Array.init names.Length (fun index -> struct(names[index],types[index],many[index]))
             Cases = if not(isNull unionRoot) then [||] else Array.init caseNames.Length (fun index -> struct(caseNames[index],tags[index],Array.map2(fun name child -> struct(name,child)) caseFields[index] caseTypes[index]))
             Enum = Array.map2(fun name value -> struct(name,value)) enumNames enumValues
             EnumUnderlying = Option.ofObj underlying; Flags = flags; PhysicalId = physicalId; CustomId = Option.ofObj customId
             Alternatives = alternatives
-            ByteSequence = target = typeof<byte[]> || (arguments.Length = 1 && arguments[0] = typeof<byte> && (decision.RawKind = RawCodecKind.Sequence || decision.Shape = TypeShape.CustomSequence)) }
+            ByteSequence = typeof<Collections.Generic.IEnumerable<byte>>.IsAssignableFrom target }
         lock gate (fun () ->
             TypeMetadataCache.Register(typeof<'T>,fun metadata ->
-                { metadata with TypeDescriptionFacts = MetadataValue.generated facts; TypeDescription = ValueNone }))
+                let alternatives =
+                    match MetadataValue.tryValue metadata.TypeDescriptionFacts with
+                    | ValueSome previous -> Array.append previous.Alternatives facts.Alternatives |> Array.distinct
+                    | ValueNone -> facts.Alternatives
+                { metadata with TypeDescriptionFacts = MetadataValue.generated { facts with Alternatives = alternatives }; TypeDescription = ValueNone }))
 
     static member private Facts(known: Type[], target: Type): CodecDescriptionFacts<Type> =
         let dynamic = MetadataRuntime.supportsDynamicCode()
         let metadata = TypeMetadataCache.Get target
         match MetadataValue.tryValue metadata.TypeDescriptionFacts with
         | ValueSome facts ->
-            if dynamic && not(target.IsSealed || target.IsValueType) && facts.Decision.Shape <> TypeShape.DynamicObject then
+            if not(target.IsSealed || target.IsValueType) && facts.Decision.Shape <> TypeShape.DynamicObject then
                 let alternatives =
                     Array.append facts.Alternatives (known |> Array.filter(fun candidate -> candidate <> target && target.IsAssignableFrom candidate))
                     |> Array.distinct
@@ -172,17 +176,17 @@ type internal TypeDescriptions private () =
                 | ValueSome members -> members |> Array.tryHead |> Option.map _.Name
                 | _ when dynamic && decision.Shape = TypeShape.Object -> CustomIdMetadata.GetMembers target |> Array.tryHead |> Option.map _.Name
                 | _ -> None
-            { Definition = definition; Scope = target.Assembly.GetName().Name; FullName = target.FullName; Identity = target.AssemblyQualifiedName
+            { Definition = definition; Scope = CodecDescription.assemblyScope target; FullName = target.FullName; Identity = target.AssemblyQualifiedName
               GenericDefinition = if target.IsGenericType && decision.Shape = TypeShape.Object then Some(target.GetGenericTypeDefinition()) else None
-              GenericArguments = if decision.Shape = TypeShape.Object then arguments else [||]
+              GenericArguments = if target.IsGenericType then target.GetGenericArguments() else [||]
               Templates = templates; CaseTemplates = caseTemplates; UnionRoot = unionRoot
               RequiresTypeInformation = requiresTypeInformation; NonGenericSequence = nonGenericSequence
-              Abstract = target.IsAbstract; Record = if dynamic then Microsoft.FSharp.Reflection.FSharpType.IsRecord target else match MetadataValue.tryValue metadata.RecordFields with ValueSome(ValueSome _) -> true | _ -> false
+              Abstract = target.IsAbstract; Sealed = target.IsSealed || target.IsValueType; Record = if dynamic then Microsoft.FSharp.Reflection.FSharpType.IsRecord target else match MetadataValue.tryValue metadata.RecordFields with ValueSome(ValueSome _) -> true | _ -> false
               Decision = decision; Arguments = arguments; Members = members; Cases = cases
               Enum = enumValues; EnumUnderlying = enumUnderlying; Flags = dynamic && target.IsEnum && target.IsDefined(typeof<FlagsAttribute>,false)
               PhysicalId = physical; CustomId = customId
               Alternatives = if target.IsSealed || target.IsValueType || decision.Shape = TypeShape.DynamicObject then [||] else known |> Array.filter(fun candidate -> candidate <> target && target.IsAssignableFrom candidate)
-              ByteSequence = target = typeof<byte[]> || (arguments.Length = 1 && arguments[0] = typeof<byte> && (decision.RawKind = RawCodecKind.Sequence || decision.Shape = TypeShape.CustomSequence)) }
+              ByteSequence = typeof<Collections.Generic.IEnumerable<byte>>.IsAssignableFrom target }
 
     static member Get(target: Type) =
         match MetadataValue.tryValue (TypeMetadataCache.Get(target).TypeDescription) with
@@ -203,7 +207,7 @@ type internal TypeDescriptions private () =
                             | _ ->
                                 let value = TypeDescriptions.Facts(known,child)
                                 facts.Add(child,value)
-                                if MetadataRuntime.supportsDynamicCode() && not(child.IsSealed || child.IsValueType) && value.Decision.Shape <> TypeShape.DynamicObject then bases.Add child |> ignore
+                                if not(child.IsSealed || child.IsValueType) && value.Decision.Shape <> TypeShape.DynamicObject then bases.Add child |> ignore
                                 value)
                         let description = CodecDescription.describe acquireFacts target
                         if TypeMetadataCache.StoreDescription(target,known,facts.Keys |> Seq.toArray,bases |> Seq.toArray,description) then description

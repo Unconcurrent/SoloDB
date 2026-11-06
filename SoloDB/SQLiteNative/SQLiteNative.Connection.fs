@@ -64,6 +64,7 @@ type NativeSqliteTransaction internal (database: NativeDatabase, isolationLevel:
 /// A configured SQLite database connection with native commands and rows.
 [<AllowNullLiteral>]
 type NativeSqliteConnection internal (connectionString: string, storage: SqliteStorage option) =
+    static let mainName = utf8z.GetZeroTerminatedUTF8Bytes("main")
     let database = NativeDatabase(connectionString, storage)
     let statements = NativeStatementCache(database)
     let mutable transaction: NativeSqliteTransaction = Unchecked.defaultof<_>
@@ -251,6 +252,11 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
                 statement.Dispose()
                 result
         with error -> statement.Abort(error); reraise()
+    /// Actual main-database access, including SQLite's ordinary file fallback.
+    member internal _.IsReadOnly =
+        use lifetime = database.AdmitUse()
+        database.EnsureOpen()
+        raw.sqlite3_db_readonly(database.Handle, utf8z.FromSpan(ReadOnlySpan<byte>(mainName))) = 1
     member internal _.VariableLimit = raw.sqlite3_limit(database.Handle, raw.SQLITE_LIMIT_VARIABLE_NUMBER, -1)
     member _.Handle =
         database.EnsureOpen()

@@ -51,6 +51,7 @@ public sealed class GeneratedMember
     public MethodReference? Getter { get; }
     public MethodReference? Setter { get; }
     public FieldReference? Field { get; }
+    internal TypeReference? DescriptionSignature { get; set; }
     public bool QueryWritable { get; set; }
     public bool StaticField { get; set; }
 

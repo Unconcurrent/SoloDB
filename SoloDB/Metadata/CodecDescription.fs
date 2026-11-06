@@ -30,6 +30,7 @@ type internal CodecDescriptionFacts<'T> = {
     FullName: string
     Identity: string
     Abstract: bool
+    Sealed: bool
     RequiresTypeInformation: bool
     NonGenericSequence: bool
     Record: bool
@@ -44,6 +45,12 @@ type internal CodecDescriptionFacts<'T> = {
     CustomId: string option
     Alternatives: 'T[]
     ByteSequence: bool
+}
+
+type internal CollectionTypeDescription = {
+    History: string
+    Contract: string
+    Alternatives: string
 }
 
 /// Shared projection for runtime discovery and compiler-supplied descriptions.
@@ -78,20 +85,34 @@ module internal CodecDescription =
                 (if shape.Signed then " signed" else " unsigned")
             | None -> "dynamic JSON"
 
-    let describe (facts: Func<'T,CodecDescriptionFacts<'T>>) (root: 'T) =
-        let build labels =
-            let active = Dictionary<'T,int>()
-            let definitions = Dictionary<'T,int>()
+    let assemblyScope (target: Type) =
+        let identity = target.Assembly.GetName()
+        identity.Version <- null
+        identity.FullName
+
+    let rec typeIdentity (target: Type) =
+        if target.IsArray then typeIdentity(target.GetElementType()) + "[" + String(',',target.GetArrayRank()-1) + "]"
+        elif target.IsGenericType then
+            target.GetGenericTypeDefinition().FullName + "[" + String.Join(",",target.GetGenericArguments() |> Array.map typeIdentity) + "], " + assemblyScope target
+        else target.FullName + ", " + assemblyScope target
+
+    let describe (facts: Func<Type,CodecDescriptionFacts<Type>>) (root: Type) =
+        let projected = HashSet<Type>()
+        let build root =
+            let labels = ResizeArray<string * string>()
+            let active = Dictionary<Type,int>()
+            let definitions = Dictionary<Type,int>()
             let mutable next = 0
             let rec signature = function
                 | UnavailableType -> objectValue [|"Type",quote "Unknown"|]
                 | FormalType position -> objectValue [|"Parameter",string position|]
-                | NamedType(target,arguments) -> objectValue [|"Type",quote target.FullName; "Assembly",quote (target.Assembly.GetName().Name); "Arguments",arguments |> Array.map signature |> array|]
+                | NamedType(target,arguments) -> objectValue [|"Type",quote target.FullName; "Assembly",quote (assemblyScope target); "Arguments",arguments |> Array.map signature |> array|]
                 | ElementType(rank,element) -> objectValue [|"ArrayRank",string rank;"Element",signature element|]
             let rec node target =
                 match active.TryGetValue target with
                 | true,index -> objectValue [|"Reference",string index|]
                 | _ ->
+                    projected.Add target |> ignore
                     let f = facts.Invoke target
                     match f.GenericDefinition |> Option.bind(fun definition ->
                         match definitions.TryGetValue definition with true,index -> Some index | _ -> None) with
@@ -99,9 +120,6 @@ module internal CodecDescription =
                         let values = ResizeArray<string * string>()
                         values.Add("GenericReference",string index)
                         values.Add("Arguments",f.GenericArguments |> Array.map node |> array)
-                        if labels then
-                            values.Add("FullName",quote f.FullName)
-                            values.Add("AssemblyQualifiedName",quote f.Identity)
                         objectValue(values.ToArray())
                     | None ->
                         let index = next
@@ -111,9 +129,9 @@ module internal CodecDescription =
                         let d = f.Decision
                         let values = ResizeArray<string * string>()
                         values.Add("Definition",string index)
-                        if labels then
-                            values.Add("FullName",quote f.FullName)
-                            values.Add("AssemblyQualifiedName",quote f.Identity)
+                        labels.Add(string index,objectValue [|"FullName",quote f.FullName;"AssemblyQualifiedName",quote f.Identity|])
+                        values.Add("FullName",quote f.Definition)
+                        values.Add("Assembly",quote f.Scope)
                         values.Add("Abstract",flag f.Abstract)
                         let kind =
                             if f.NonGenericSequence then "Sequence"
@@ -123,15 +141,14 @@ module internal CodecDescription =
                             elif d.Shape = TypeShape.Object then "POCO"
                             else string d.Shape
                         values.Add("Type",quote kind)
-                        if not labels then
-                            values.Add("ClrType",quote f.Definition)
-                            values.Add("Assembly",quote f.Scope)
                         let argument position =
                             if position >= 0 && position < f.Arguments.Length then node f.Arguments[position]
                             else objectValue [|"Type",quote "Dynamic"|]
                         let fields members =
                             members |> Array.map(fun struct(name,child) -> name,node child) |> objectValue
                         match d.Shape with
+                        | _ when f.ByteSequence && CodecPreparation.writer(f.Definition,d,true,f.Abstract,f.ByteSequence,f.NonGenericSequence) = RawRootOperation.Scalar ->
+                            values.Add("Shape",quote "base64 string")
                         | TypeShape.Scalar ->
                             values.Add("Shape",quote(if f.ByteSequence then "base64 string" else encoding f.Definition))
                         | TypeShape.Enum ->
@@ -165,8 +182,6 @@ module internal CodecDescription =
                             values.Add("Storage",quote "relation catalogue")
                         | TypeShape.Grouping | TypeShape.GroupingImplementation ->
                             values.Add("Shape",array [|argument 1|])
-                            values.Add("KeyType",argument 0)
-                            values.Add("KeyStored","false")
                         | TypeShape.Object when f.NonGenericSequence ->
                             values.Add("Shape",array [|objectValue [|"Type",quote "Dynamic"|]|])
                         | shape when d.RawKind = RawCodecKind.Sequence || shape = TypeShape.CustomSequence ->
@@ -185,6 +200,9 @@ module internal CodecDescription =
                                     memberValue.Add("Shape",node child)
                                     if index < f.Templates.Length then memberValue.Add("Signature",signature (let struct(_,value) = f.Templates[index] in value))
                                     Some(objectValue(memberValue.ToArray()))) |> Array.choose id |> array)
+                        if d.Shape = TypeShape.Grouping || d.Shape = TypeShape.GroupingImplementation then
+                            values.Add("KeyType",argument 0)
+                            values.Add("KeyStored","false")
                         match f.UnionRoot with Some parent -> values.Add("UnionRoot",node parent) | None -> ()
                         if f.Cases.Length > 0 then
                             values.Add("Null",quote "null CLR union values encode as null; other values use the selected case members")
@@ -195,9 +213,8 @@ module internal CodecDescription =
                         if f.PhysicalId then values.Add("PhysicalId",quote "root Id column; nested Id remains in JSON")
                         match f.CustomId with Some name -> values.Add("CustomId",quote name) | None -> ()
                         if not f.NonGenericSequence && (d.Shape = TypeShape.Object || TypeSupport.DictionaryShape d.Shape || d.Shape = TypeShape.NonGenericDictionary) &&
-                           (f.RequiresTypeInformation || f.Abstract || f.Alternatives.Length > 0) then
+                           (f.RequiresTypeInformation || f.Abstract || (d.Shape = TypeShape.Object && not f.Sealed)) then
                             values.Add("Discriminator",quote "$type")
-                            values.Add("Alternatives",f.Alternatives |> Array.map node |> array)
                         if f.GenericDefinition.IsSome then
                             values.Add("Arguments",f.GenericArguments |> Array.map node |> array)
                             let names = HashSet<string>(StringComparer.Ordinal)
@@ -205,11 +222,32 @@ module internal CodecDescription =
                                 values.Add("MemberSignatures",f.Templates |> Array.map(fun struct(name,template) -> name,signature template) |> objectValue)
                             if f.CaseTemplates.Length > 0 then
                                 values.Add("CaseSignatures",f.CaseTemplates |> Array.map(fun fields -> fields |> Array.map signature |> array) |> array)
+                        elif f.GenericArguments.Length > 0 then
+                            // Container parameters can include types not stored as
+                            // children; retain their identity without preparing codecs.
+                            values.Add("TypeArguments",f.GenericArguments |> Array.map(typeIdentity >> quote) |> array)
                         objectValue(values.ToArray())
-            node root
-        let meaning = build false
-        let description = build true
-        // Exact semantic text permits a native presence query without
-        // transferring all retained descriptions or conflating CLR identity labels.
-        let result = description.Substring(0,description.Length-1) + ",\"ShapeKey\":" + quote meaning + "}"
-        struct(result,meaning)
+            let contract = node root
+            let f = facts.Invoke root
+            let description = objectValue [|
+                "FullName",quote f.FullName; "AssemblyQualifiedName",quote f.Identity
+                "Contract",contract; "Labels",objectValue(labels.ToArray()) |]
+            struct(description,contract)
+        let struct(history,contract) = build root
+        // Alternative graphs have their own local definition numbers. Discovery
+        // enriches this separate inventory, never the declared contract identity.
+        let alternatives = ResizeArray<string>()
+        let recorded = HashSet<struct(string * string)>()
+        let visited = HashSet<Type>()
+        let mutable pending = projected |> Seq.toArray
+        while pending.Length > 0 do
+            for target in pending do
+                if visited.Add target then
+                    let f = facts.Invoke target
+                    for alternative in f.Alternatives do
+                        let struct(description,contract) = build alternative
+                        let owner = typeIdentity target
+                        if recorded.Add(struct(owner,contract)) then
+                            alternatives.Add(objectValue [|"For",quote owner;"Description",description|])
+            pending <- projected |> Seq.filter(fun target -> not(visited.Contains target)) |> Seq.toArray
+        { History = history; Contract = contract; Alternatives = array(alternatives.ToArray()) }

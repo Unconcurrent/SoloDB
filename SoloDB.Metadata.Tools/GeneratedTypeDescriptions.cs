@@ -33,8 +33,9 @@ internal static class GeneratedTypeDescriptions
             else GeneratedJsonAssembly.TypeTemplate(il,value,api);
         });
         var codec = GeneratedCodec.Model(model);
-        var members = CodecEmitter.writtenMembers(codec).Select(index => codec.Members[index])
-            .Concat(codec.Members.Where(member => member.Many && member.Readable && !member.Ignored)).ToArray();
+        var selected = CodecEmitter.writtenMembers(codec)
+            .Concat(Enumerable.Range(0,codec.Members.Length).Where(index => codec.Members[index].Many && codec.Members[index].Readable && !codec.Members[index].Ignored)).ToArray();
+        var members = selected.Select(index => codec.Members[index]).ToArray();
         var arguments = model.Type is ArrayType array ? new[] { array.ElementType }
             : model.CollectionArguments.Length != 0 ? model.CollectionArguments
             : model.Type is GenericInstanceType generic ? generic.GenericArguments.ToArray() : System.Array.Empty<TypeReference>();
@@ -47,7 +48,27 @@ internal static class GeneratedTypeDescriptions
         Strings(members.Select(member => member.Name).ToArray());
         Types(members.Select(member => member.Type).ToArray());
         Array(module.TypeSystem.Boolean,members.Select(member => member.Many).ToArray(),Boolean);
-        Templates(members.Select(member => member.Getter?.Value.ReturnType ?? member.Field?.Value.FieldType ?? member.Setter?.Value.Parameters.Last().ParameterType).ToArray());
+        TypeReference? Signature(CodecMember<TypeReference,MethodReference,FieldReference> member)
+        {
+            var method = member.Getter?.Value ?? member.Setter?.Value;
+            var declaring = method?.DeclaringType ?? member.Field?.Value.DeclaringType;
+            var value = member.Getter?.Value.ReturnType ?? member.Field?.Value.FieldType ?? member.Setter?.Value.Parameters.Last().ParameterType;
+            if (value == null || declaring == null || model.UnionRoot != null ||
+                GeneratedJsonDefinitions.SameType(declaring.GetElementType(),model.Type.GetElementType())) return value;
+            // Calls keep their original physical signature. Description operands
+            // instead follow the acquired definition's inherited substitution.
+            var physical = declaring.Resolve();
+            TypeReference? current = model.Type.Resolve();
+            while (current != null)
+            {
+                var definition = current.Resolve();
+                if (definition.FullName == physical.FullName && definition.Module.Assembly.Name.FullName == physical.Module.Assembly.Name.FullName)
+                    return OriginalArgumentSources.Close(value,current);
+                current = definition.BaseType == null ? null : OriginalArgumentSources.Close(definition.BaseType,current);
+            }
+            return value;
+        }
+        Templates(selected.Select(index => model.Members[index].DescriptionSignature ?? Signature(codec.Members[index])).ToArray());
         Strings(cases.Select(item => item.Name).ToArray());
         Array(module.TypeSystem.Int32,cases.Select(item => item.Tag).ToArray(),tag => il.Emit(OpCodes.Ldc_I4,tag));
         Array(new ArrayType(module.TypeSystem.String),cases.Select(item => item.FieldNames).ToArray(),Strings);

@@ -411,6 +411,14 @@ module internal ModelDiscovery =
                             let declaringType = reference owningType
                             let declaringDefinition = match declaringType with :? GenericInstanceType as closed -> closed.ElementType | _ -> declaringType
                             let declaringSubstitutions = Seq.zip declaringEntity.GenericParameters owningType.GenericArguments |> Seq.toList
+                            // Keep descriptive types relative to the acquired formal
+                            // owner, independently of physical accessor signatures.
+                            let rec originalOwner (current: FSharpType) =
+                                if current.TypeDefinition.Equals declaringEntity then current
+                                else originalOwner current.BaseType.Value
+                            let original = originalOwner(entity.AsType())
+                            let originalSubstitutions = Seq.zip declaringEntity.GenericParameters original.GenericArguments |> Seq.toList
+                            let descriptionSignature (value: FSharpType) = signature(value.Instantiate originalSubstitutions)
                             let declaringMemberType (memberType: FSharpType) =
                                 let closed = memberType.Instantiate(declaringSubstitutions)
                                 queue.Enqueue(closed)
@@ -522,7 +530,7 @@ module internal ModelDiscovery =
                                     let setter = effective |> Option.bind(fun declaration -> declaration.Member.Setter) |> Option.toObj
                                     facts.Add(Member(property.DisplayName, valueType.FullName, false, getter <> null, setter <> null,
                                                      hasAttribute "System.Runtime.Serialization.IgnoreDataMemberAttribute" property.Attributes))
-                                    members.Add(GeneratedMember(valueType, getter, setter, null))
+                                    members.Add(GeneratedMember(valueType, getter, setter, null, DescriptionSignature = descriptionSignature property.FullType))
                                     referencePolicyFacts facts.[facts.Count - 1] property.Attributes
                     completeReferenceFacts facts members
                     let mutable constructFromMembers = entity.IsFSharpRecord
