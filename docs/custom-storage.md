@@ -1,29 +1,33 @@
 # Custom SQLite storage
 
-`SoloDB` can use caller supplied byte files or streams through `SqliteStorage`. Collections, transactions, full text search, generated queries and the ADO connection use the same database engine and execution paths as ordinary file databases.
+Use `SqliteStorage` when you want to supply the database's bytes through streams or your own file implementation. You still use the usual collections, transactions, queries, full text search and ADO connections.
 
-Choose the storage layout, its persistence guarantee and its sharing configuration before opening the database.
+For an ordinary database file, keep using `new SoloDB(path)`.
 
-## Choose a layout
+## Choose what to supply
 
-| Factory | Supplied files | Use |
+| Factory | What you keep | When to choose it |
 | --- | --- | --- |
-| `Simple(main, journal)` | Main image and rollback journal | SQLite PERSIST journaling with one writer and conventional reader locks. |
-| `Wal(main, log)` | Main image and WAL | Readers can retain snapshots while another connection commits. New images use 4096 byte pages. |
-| `ReadOnly(main)` | One complete immutable main image | Read an existing SoloDB database without schema initialization or migration. |
-| `Native(filename, registeredVfs, profile)` | A filename in an existing native VFS | Expert access to that VFS, including native handles and extensions. |
+| `Simple(main, journal)` | Database and rollback journal | Readers normally finish before a writer commits. |
+| `Wal(main, log)` | Database and write-ahead log | A reader needs to keep its snapshot while another connection commits. |
+| `ReadOnly(main)` | One complete, unchanging database image | You only need to read an existing database. |
+| `Native(filename, registeredVfs, profile)` | An existing native SQLite filesystem registration | You need native handles, extensions or a specialist native filesystem. |
 
-The first three factories accept either `ISqliteStorageFile` objects or `Stream` objects. Stream overloads require `leaveOpen`. Positional files and native VFS registrations are borrowed. A factory result belongs to one `SoloDB` instance and can be attached only once. Dispose an unused result too.
+`Simple` uses SQLite's PERSIST journal mode. `Wal` creates databases with 4096 byte pages. Both allow readers and one writer. A long-running reader can delay a writer in Simple mode or delay log cleanup in WAL mode.
 
-The new constructor accepts `SqliteStorage`; the existing constructor still accepts a string source. An F# helper with an unconstrained constructor argument needs its intended type, for example `let openDatabase (source: string) = new SoloDB(source)`. Disambiguate a null argument with its intended type too.
+The first three factories accept either streams or `ISqliteStorageFile` objects. Each factory returns a single-use `SqliteStorage` object, called `storage` in the examples. Give it to one `SoloDB` instance and dispose it even if you never open the database.
 
-Keep each writable main, journal and log as a distinct logical file. Their contents must survive reopening together. Replacing a journal or WAL with an empty file can discard recovery data.
+Keep the main file and its journal or log together across reopenings. Give each one separate storage. Do not replace a journal or log with an empty file: SQLite may need it to recover committed work.
 
-An existing managed WAL image must already have 4096 byte pages and WAL format headers. A nonempty WAL without its main image is refused; preserve the pair for restoration. Simple storage requires a rollback journal image. Use an explicit backup conversion for a different layout; opening an incompatible image does not reformat it.
+An existing WAL image must already use 4096 byte pages and WAL headers. A nonempty log without its main image is refused. Simple needs an image in rollback journal format. To change layouts, back up into a fresh destination using the chosen layout; do not reopen incompatible files and expect them to be reformatted. See the [conversion steps below](#import-export-and-read-only-images).
 
-## Open streams
+The string and `SqliteStorage` constructors remain distinct. An F# helper with an untyped constructor argument needs its intended type, for example `let openDatabase (source: string) = new SoloDB(source)`. Give a null argument its intended type too.
 
-This complete C# example uses memory only. Its `Flush` has no persistence guarantee.
+## Open and reopen streams
+
+Streams must support reading and seeking, plus writing for Simple or WAL. Pass `leaveOpen: true` if you will close them yourself, or `false` to let SoloDB close them after the database has finished using them.
+
+This complete C# example uses memory. Its contents disappear when the process ends.
 
 ```csharp
 using System.IO;
@@ -39,6 +43,12 @@ using (var db = new SoloDB(storage))
     rows.EnsureSearchIndex(b => b.Field(x => x.Title));
 }
 
+// Reuse the streams only after every reader, connection and transaction has finished.
+if (!storage.IsClosed)
+    throw new System.InvalidOperationException("Finish the remaining database users before reopening.");
+if (storage.ClosingFailure is System.Exception closeError)
+    throw new IOException("Closing the database failed.", closeError);
+
 using var next = SqliteStorage.Simple(main, journal, leaveOpen: true);
 using var reopened = new SoloDB(next);
 if (reopened.GetCollection<Article>().GetById(1L).Title != "alpha")
@@ -50,6 +60,8 @@ sealed class Article
     public string Title { get; set; } = "";
 }
 ```
+
+Sequential reuse is allowed after the previous `storage.IsClosed` is true, provided you left the streams open. Create a new `SqliteStorage` object for each database instance; you cannot attach the old object again.
 
 Put F# disposal scopes inside a function or entry point:
 
@@ -73,15 +85,15 @@ let run () =
 run ()
 ```
 
-The Stream adapter serializes seeking and I/O for each supplied view. It handles fragmented reads, initializes gaps and extended ranges with zeros, and calls the stream's `Flush`. A stream must support reading and seeking, plus writing for a writable layout. The adapter cannot manufacture a durable storage barrier that the stream does not provide.
+For durable storage, use files whose successful `Flush` really supplies your required persistence guarantee. SoloDB calls the supplied stream's `Flush`; it cannot turn a memory stream or an unchecked operating-system flush into a durable disk write.
 
-Generated and NativeAOT callers keep their [normal metadata registration](generated-metadata.md). Choosing storage does not replace that setup. A custom input also cannot be reconstructed from its diagnostic connection string; borrow connections from its existing database instance.
+Generated and NativeAOT applications still need their [normal metadata registration](generated-metadata.md). Borrow connections from the database instance you opened; its diagnostic connection string cannot recreate the supplied streams or files.
 
-## Share a store between processes
+## Share a database between instances or processes
 
-Without a coordination option, a description is private to its own pooled connections. Independent descriptions and processes sharing bytes must use `SqliteStorageCoordination.File` with the same dedicated coordination identity.
+Without a coordination option, only connections borrowed from the same `SoloDB` instance can safely share your files. To open the same database from several instances or processes, use `SqliteStorageCoordination.File` with the same separate coordination path in every participant.
 
-For ordinary filesystem coordination, each process can open this layout independently:
+Each participant opens its own streams:
 
 ```csharp
 using System.IO;
@@ -96,19 +108,38 @@ using var storage = SqliteStorage.Wal(main, log, true, coordination);
 using var db = new SoloDB(storage);
 ```
 
-This example supplies coherent byte views and native locks on one host. Its generic FileStream flush does not establish a physical power loss guarantee. Use a backend with a checked durable barrier when that guarantee is needed.
+This uses native operating-system locks and shared memory on one host. It does not make arbitrary remote storage safe to share, and the generic FileStream flush in this example does not prove power-loss durability.
 
-Every description needs independent coherent views. Do not reuse the same actual Stream or positional backend object between descriptions, even if a wrapper appears to make it safe. Do not use independent buffering that can hide a peer's committed bytes. Main and auxiliary views must refer to the same store in every process.
+While two database instances are open:
 
-The coordination file is separate from the data files. Keep its identity stable: do not independently open and close it, unlink it or replace it while any participant remains. Each physical SQLite connection gets its own native lock and shared memory session. This coordinates readers, writers and WAL shared memory across processes; a managed monitor is not its authority.
+- Open a separate Stream or `ISqliteStorageFile` object for each instance. Do not share the same object or hide it behind different wrappers.
+- Point every main stream at the same main bytes, and every log stream at the same log bytes.
+- Ensure a successful read can see another participant's committed writes. Avoid independent buffering that returns stale bytes.
+- Use the same coordination path. Do not open and close that file yourself, delete it or replace it while anyone is using the database.
 
-`SqliteStorageCoordination.File(filename, registeredVfs)` borrows a named native coordinator instead. Its filename belongs to that VFS's namespace. Keep the registration alive until every participating storage input is closed.
+SoloDB obtains the necessary locks before inspecting or initializing the files. You do not need your own initialization monitor or a registry of open databases.
 
-Initialization takes a shared admission lock before inspecting an image. An empty WAL pair requires exclusive admission and a second inspection before seeding. Existing initialized stores do not take an exclusive initialization lock on every open.
+For a specialist native filesystem, `SqliteStorageCoordination.File(filename, registeredVfs)` uses its existing registration instead of the ordinary operating-system filesystem. Keep that registration alive until all participating `storage.IsClosed` values are true.
 
-## Implement positional files
+## Close safely and handle errors
 
-`ISqliteStorageFile` has five synchronous operations:
+Dispose readers, streams selected from query results, transactions and borrowed connections before disposing their database. A normal `using` or `use` scope does this when these objects are declared after the database.
+
+`db.Dispose()` stops new work but returns if a database operation or borrowed object still needs the files. Finish or dispose those objects, then check `storage.IsClosed`. Do not close or reuse the supplied files while it is false. Do not spin waiting for it on the thread that still owns an unfinished reader or transaction.
+
+After completion, inspect `storage.ClosingFailure` for the first closing error. With `leaveOpen: false`, SoloDB closes the streams once all database use has finished. With `true`, you close them yourself. Your `ISqliteStorageFile` implementations always remain yours to close.
+
+Use deterministic disposal. If you abandon a database or a reader, its files, callbacks and locks can remain allocated; garbage collection is not a promised fallback for these inputs.
+
+For database errors, inspect `SqliteErrorCode` and `SqliteExtendedErrorCode` on `NativeSqliteException`, or on the ADO `SqliteException`. The original backing exception remains in the exception chain, including failures from either end of a backup. Use it to distinguish a full or read-only backend from another I/O failure. A failed write may have partially changed bytes; let SQLite roll back or recover rather than retrying that byte write yourself.
+
+If another connection blocks a write with SQLite's BUSY error, finish the blocking reader or transaction. Keep transactions short rather than waiting on a reader that your own thread still holds.
+
+The `Simple`, `Wal` and `ReadOnly` factories do not expose connection or reader `Handle` values and cannot load extensions. Those operations throw `NotSupportedException`. Use the Native factory if your application needs them. All `SqliteStorage` inputs require the bundled `e_sqlite3` provider; the ordinary string constructor retains its existing provider support.
+
+## Implement your own byte files
+
+Implement these five synchronous methods on `ISqliteStorageFile`:
 
 ```csharp
 StorageReadResult ReadAt(long position, Span<byte> destination);
@@ -118,48 +149,44 @@ StorageLengthResult GetLength();
 StorageFailure? SetLength(long length);
 ```
 
-Return a null failure on success. Reads may return fewer bytes than requested; zero means EOF. SoloDB repeats successful fragmented reads and zero fills the unread tail only after successful EOF. A failed read is not EOF.
+Return a null failure on success, or a `StorageFailure` with `IoError`, `Full` or `ReadOnly` and the original exception when available. A Stream implementation can throw `StorageIOException` to supply the same classification. Other exceptions become I/O errors; exception text does not determine the category.
 
-Validate positions and requested ends before returning EOF. Empty operations at a valid position succeed without extending the file. Writes fill the whole supplied span, and newly visible gaps contain zeros. `SetLength` reports the exact logical length, discards the truncated tail and initializes later extension with zeros. Retained buffer capacity must not change the reported length.
+Check the requested position and end, including on a read beyond EOF. A successful read can return fewer bytes than requested; zero means EOF. SoloDB repeats fragmented reads and fills the remaining destination with zeros only after successful EOF. Do not report a failed read as EOF.
 
-A failed write may change part of its requested range, but must preserve bytes outside that range, never shrink the file and never extend beyond the requested end or its previous length. A failed resize preserves the prefix that both lengths retain. These conditions let SQLite perform its own rollback and recovery.
+A successful write fills its whole span. New gaps and extended ranges must read as zeros. Empty reads and writes at valid positions do not extend the file. Report the exact logical length; retained buffer capacity is not file content. After shrinking and growing a file, do not expose the discarded bytes again.
 
-Calls for one supplied view are serialized but may move between threads. Keep spans inside their method; an F# implementation must not capture them in a `lock` closure. Backend methods must not reenter the database. The caller owns positional resources and closes them only after the storage input is physically closed.
+A failed write must preserve existing bytes outside its requested range, cannot shrink the file, and cannot extend it beyond the greater of the old length and the requested end. A failed resize must preserve the prefix shared by the old and requested lengths. SQLite relies on these guarantees for rollback.
 
-`Flush` is the backend's ordered barrier for bytes and length. For durable files, establish durable creation of the data roles and their parent namespace as well. A successful managed flush alone does not prove that an operating system reported every native sync error. An encrypted backend receives the supplied main and auxiliary bytes; SQLite temporary files still use the ordinary native temporary-file path.
+SoloDB serializes calls for each supplied file object, but different calls can run on different threads. Keep spans inside the called method. In F#, do not capture a span in a `lock` closure. Do not call back into the database from these methods.
 
-Writable factories also accept `coordination` and `sectorSize`. The sector size describes the data backend's failure geometry, not the coordination file's disk. Its default is 4096; configure a truthful power of two from 32 through 65536. The adapter does not claim atomic writes or powersafe overwrite merely because the native coordinator provides them.
+Make `Flush` preserve earlier byte and length writes to the level your backend promises. For durable files, make creation of the files and their parent directory durable too. Main and journal/log bytes all pass through your implementations; SQLite temporary files still use its ordinary native temporary-file path, so encrypting the supplied files does not encrypt those temporary files.
 
-## Handle failures and disposal
+Writable factories also accept `coordination` and `sectorSize`. The latter describes the data backend's sector damage unit, meaning the amount of neighbouring data a device failure can damage together. Use a truthful power of two from 32 through 65536; the default is 4096. Do not take that value from the unrelated coordination file or assume SoloDB adds atomic-write guarantees.
 
-Positional operations return `StorageFailure` with `IoError`, `Full` or `ReadOnly` and an optional original exception. A Stream can throw `StorageIOException` to supply the same classification. Other backend exceptions become I/O failures; their text is not used to guess a category.
+Keep the supplied files available until `storage.IsClosed`. SoloDB clears an auxiliary journal or log by setting its length to zero and flushing it. It does not unlink your object or hide an old length behind an invalid header. Your objects are already bound to their database roles; do not treat them as a general create/delete filesystem.
 
-SQLite failures retain primary and extended result codes. The original backing cause stays in the exception chain, including failures from either backup endpoint. Cleanup preserves the primary operation failure. Failed writes are not replayed by the adapter.
+## Import, export and read-only images
 
-Dispose readers, selected streams, transactions and borrowed connections deterministically. Closing the database rejects new work and returns without waiting for an outstanding tracked user. The last completing user performs the actual native close. A root's `Dispose` returning therefore does not mean its files are quiet.
+Use `source.BackupTo(destination)` with a fresh destination. Keep both databases open until it finishes. A managed WAL destination requires 4096 byte page geometry.
 
-`storage.IsClosed` reports physical completion. `storage.ClosingFailure` retains the first close diagnostic. Check these after completing all users and before closing borrowed files. With `leaveOpen: false`, owned streams close after physical completion. Forgotten disposal can retain the whole callback and backing graph; these layouts do not promise automatic reclamation of abandoned cycles.
+To convert a different page size, preserve the original and work on a disposable ordinary-file copy. Put that copy in rollback journal mode, set its page size to 4096 and run `VACUUM`, then back it up into the fresh WAL destination. Do not reformat the original in place.
 
-Managed storage does not expose connection or reader `Handle` values. Those getters throw `NotSupportedException`, as do extension enabling and loading. SQL extension loading is disabled too. Processes using managed storage must not install foreign auto-extensions on the SQLite engine. Internal SQL, typed functions, aggregates, collations, blobs and generated queries still use their normal owners.
+Use `VacuumTo(path)` to export to an ordinary native file. Do not assume a transaction writing both your supplied database and an attached database commits atomically across the two. Some combinations need a super-journal, an extra file coordinating multiple rollback journals; these layouts do not supply that file, so those combinations are refused.
 
-Choose borrowed Native storage when raw access is needed. Finish every raw statement, blob, backup and callback-dependent operation before disposing its connection or root. A raw backup destination must finish before any library access to that destination, including a close probe.
+For `ReadOnly`, supply a complete supported SoloDB main image. Finish WAL checkpointing or export a complete image first, and leave its bytes unchanged while it is open. SoloDB retains its usual read functions and metadata, but does not migrate schema, add indexes or create missing collections.
 
-If foreign raw objects nevertheless leave Native close busy, `Dispose` stays quiet and retains the entire physical owner, its PCL callback state and borrowed registration. Finish those raw objects, call `Dispose` again on the root or input, then check `IsClosed`. Keep the registration and backing alive through this completion. A previous busy diagnostic can remain in `ClosingFailure` after a successful retry.
+## Native access and extension users
 
-## Import and export
+The Native factory borrows your registered SQLite filesystem. Keep that registration and its resources alive until `storage.IsClosed`.
 
-Use `source.BackupTo(destination)` with a fresh destination. Both native endpoints remain owned through backup completion. A managed WAL destination requires matching 4096 byte page geometry. To import a different page size, first make a disposable ordinary-file rollback copy, change its page size and run `VACUUM` on that copy, then back up the converted copy. Preserve the original source throughout conversion.
+Finish raw statements, blobs, backups and callback-dependent work before disposing their connection or database. Finish a raw backup destination before any SoloDB access to that destination, including disposal.
 
-`VacuumTo(path)` can export managed storage to an ordinary native file. Ordinary parent opens, including SQLite's ATTACH output for this operation, retain their native namespace semantics. Arbitrary additional managed main images and super-journals are not provided by the fixed roles. Native per-database commit rules still apply to supported attachments; rejecting a super-journal is not a blanket prohibition or an atomicity guarantee for every multiple-database write.
+If outstanding raw objects make closing busy, `Dispose` records the error in `ClosingFailure` and keeps the connection and callback data alive. Finish those objects, call `Dispose` again on the database or storage input, and check `IsClosed`. A previous busy diagnostic can remain after a successful retry.
 
-Managed immutable storage requires a complete current SoloDB image. Opening it retains required read functions and metadata but does not initialize schema, migrate versions, add indexes or create a missing collection. Finish checkpointing or export a complete main image before selecting this layout, and keep that image unchanged for its lifetime.
+SQLite automatic extensions run whenever a connection opens. If your process installs them on this engine, use the expert Native path rather than the managed layouts; managed inputs require that no foreign automatic extension is installed.
 
-## Understand the native interface
+## Measure your workload
 
-The adapter supplies the complete SQLite version 3 file and VFS tables. Byte reads, writes, sync and exact truncate reach the supplied files. Lock, unlock, reserved-lock checks, WAL mapping, shared-memory locks, barriers and unmap use either the private description or real native coordination sessions. Fetch returns no native mapping and unfetch accepts that fallback.
+Measure the complete operations and returned fields you need on your actual backend. A warm query can read entirely from SQLite's page cache and tell you nothing about stream or positional read costs. Check a read workload that exceeds that cache as well as writes and transaction completion.
 
-File controls describe the data backend truthfully. Mapping size is zero; stable role identity does not move. Advisory controls do not silently resize files, and unsupported controls return SQLite's `NOTFOUND` fallback. Ordinary temporary files and native utilities are forwarded to their responsible parent VFS. Fixed roles reject destructive delete-on-close and exclusive creation, including when empty; deleting an auxiliary role means exact length zero followed by its barrier.
-
-The namespace uses permanent role bindings. Content-based `EXISTS` can report an empty role absent while a nondestructive open still succeeds. Read and write access answers describe permissions, not length. Do not interpret this as a POSIX create/unlink namespace for the supplied objects.
-
-Measure complete operations on the intended backend. Native calls, managed transitions, stream cursor work, legacy array copies, gap initialization and synchronization have different costs. WAL readers can delay checkpoints and grow the log. Keep transactions short, reuse the pool and retain compiled queries when repeated translation matters; an in-memory result is not a durability or production throughput measurement.
+Keep transactions short, reuse borrowed connections through the pool and retain compiled queries when translation matters. Include log growth and checkpoint delays when assessing long-lived WAL readers. Memory and RAM-backed files do not establish disk throughput or power-loss durability.
