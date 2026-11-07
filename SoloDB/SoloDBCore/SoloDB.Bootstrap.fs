@@ -337,7 +337,7 @@ module internal Bootstrap =
         if dbSchemaVersion > currentSupportedSchemaVersion then
             raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
-        let readOnly = dbConnection.DatabaseOwner.IsStorageReadOnly
+        let readOnly = dbConnection.IsReadOnly
         if readOnly && dbSchemaVersion < 6 then
             raise (NotSupportedException("ReadOnly storage requires a current SoloDB image. Upgrade a writable copy before opening it as immutable storage."))
 
