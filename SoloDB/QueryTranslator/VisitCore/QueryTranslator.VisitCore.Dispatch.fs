@@ -35,9 +35,12 @@ module internal QueryTranslatorVisitCore =
 
     and private arrayIndexDu (array: Expression) (index: Expression) (resultType: Type) (qb: QueryBuilder) : QueryProducedValue =
         match index with
+        | _ when typeof<byte array>.Equals array.Type && not qb.UpdateMode ->
+            QueryTranslatorIndex.lower visitProduced array index resultType qb
         | :? ConstantExpression as ce when ce.Type.IsPrimitive ->
             visitAccessDu array (StoredLabel(box(Convert.ToInt32 ce.Value))) resultType qb
-        | _ -> raise (NotSupportedException("The index of the array must always be a constant value."))
+        | _ when not qb.UpdateMode -> QueryTranslatorIndex.lower visitProduced array index resultType qb
+        | _ -> raise (NotSupportedException("A computed mutation destination requires a value-bound update plan."))
 
     /// Member paths and root consumption use the same original parameter binding.
     and private resolveAliasForParameter (paramExpr: ParameterExpression) (qb: QueryBuilder) : string option =
@@ -315,8 +318,10 @@ module internal QueryTranslatorVisitCore =
             let indexExp = exp :?> IndexExpression
             if indexExp.Arguments.Count <> 1 then raise (NotSupportedException("The SQL translator does not support multiple args indexes."))
             let arge = indexExp.Arguments.[0]
-            if not (isFullyConstant arge) then raise (NotSupportedException("The SQL translator does not support non constant index arg."))
-            if typeof<string>.Equals(arge.Type) then
+            if not(isFullyConstant arge) && not(qb.SourceContext.BindQueryValue |> ValueOption.exists(fun binder -> binder.IsValue arge)) then
+                if isNull indexExp.Indexer then QueryTranslatorIndex.lower visitProduced indexExp.Object arge indexExp.Type qb
+                else visitMethodCallDu valueUse (Expression.Call(indexExp.Object,indexExp.Indexer.GetMethod,indexExp.Arguments)) qb
+            elif typeof<string>.Equals(arge.Type) then
                 let prepared =
                     match qb.SourceContext.BindQueryValue with
                     | ValueSome binder -> binder.PrepareConstant arge indexExp.Type

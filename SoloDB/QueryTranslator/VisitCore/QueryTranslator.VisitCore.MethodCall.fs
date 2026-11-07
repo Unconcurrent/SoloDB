@@ -34,6 +34,9 @@ module internal QueryTranslatorVisitCoreMethodCall =
         match nullableOperation with
         | ValueSome operation -> visitDu (Expression.MakeBinary(operation, m.Arguments[0], m.Arguments[1], false, m.Method)) qb
         | ValueNone ->
+        match QueryTranslatorCollectionMutation.tryCall visitProduced visitDu visitStoredValueDu m qb with
+        | ValueSome mutation -> mutation
+        | ValueNone ->
         match m with
         | _ when QuerySearchAuxiliary.isMethod m.Method -> QuerySearchAuxiliary.translate visitProduced visitDu m qb
         | _ when m.Method.DeclaringType = typeof<SearchSql> ->
@@ -79,146 +82,6 @@ module internal QueryTranslatorVisitCoreMethodCall =
             SqlExpr.FunctionCall("TO_UPPER", [visitDu value qb])
         | OfShape1 null null "Like" null (str, likeWhat) ->
             SqlExpr.Binary(visitDu str qb, BinaryOperator.Like, visitDu likeWhat qb)
-        // Update methods collect target paths and stored values.
-        | OfShape1 null null "Set" null (oldValue, newValue) when qb.UpdateMode ->
-            let destination = visitProduced oldValue qb
-            let pathExpr = QueryProduced.value qb.SourceContext.NextAlias destination
-            let valueExpr = visitStoredValueDu destination.Input newValue qb
-            qb.UpdateAssignments.Add(pathExpr, valueExpr)
-            SqlExpr.Literal(SqlLiteral.Null)
-
-        | OfShape1 null null "Append" null (array, newValue)
-        | OfShape1 null null "Add" null (array, newValue) when qb.UpdateMode ->
-            let destination = visitProduced array qb
-            let arrayPathExpr = QueryProduced.value qb.SourceContext.NextAlias destination
-            let modifiedPath =
-                match arrayPathExpr with
-                | SqlExpr.Literal(SqlLiteral.String path) -> SqlExpr.Literal(SqlLiteral.String $"{path}[#]")
-                | other -> other
-            let struct(element, _) = QueryTranslatorSerialization.serializationAccess destination.Input (StoredLabel(box 0))
-            let valueExpr = visitStoredValueDu element newValue qb
-            qb.UpdateAssignments.Add(modifiedPath, valueExpr)
-            SqlExpr.Literal(SqlLiteral.Null)
-
-        | OfShape2 null null "SetAt" null null (array, indexExpr, newValue) when qb.UpdateMode ->
-            let destination = visitProduced array qb
-            let arrayPathExpr = QueryProduced.value qb.SourceContext.NextAlias destination
-            let indexVal = ExpressionEvaluation.evaluateExpr<obj> indexExpr
-            let modifiedPath =
-                match arrayPathExpr with
-                | SqlExpr.Literal(SqlLiteral.String path) -> SqlExpr.Literal(SqlLiteral.String $"{path}[{indexVal}]")
-                | other -> other
-            let struct(element, _) = QueryTranslatorSerialization.serializationAccess destination.Input (StoredLabel(box 0))
-            let valueExpr = visitStoredValueDu element newValue qb
-            qb.UpdateAssignments.Add(modifiedPath, valueExpr)
-            SqlExpr.Literal(SqlLiteral.Null)
-
-        | OfShape1 null null "RemoveAt" null (array, indexExpr) when qb.UpdateMode ->
-            let arrayPathExpr = visitDu array qb
-            let indexVal = ExpressionEvaluation.evaluateExpr<obj> indexExpr
-            let alias = qb.SourceAlias
-            let valueExpr =
-                SqlExpr.FunctionCall("jsonb_remove", [
-                    SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(alias, "Value"); arrayPathExpr])
-                    SqlExpr.Literal(SqlLiteral.String $"$[{indexVal}]")
-                ])
-            qb.UpdateAssignments.Add(arrayPathExpr, valueExpr)
-            SqlExpr.Literal(SqlLiteral.Null)
-
-        | OfShape2 null null "Insert" null null (array, indexExpr, newValue) when qb.UpdateMode ->
-            // Shift-insert into a JSON array via json_each rebuild. Emit a
-            // 3-arm UNION ALL (rows before idx, the new value at idx, rows from
-            // idx onward shifted by +1) and re-aggregate via jsonb_group_array.
-            // The intermediate SELECT applies ORDER BY k LIMIT -1 — a documented
-            // SQLite idiom that preserves subquery row order through the outer
-            // aggregate consumer.
-            let destination = visitProduced array qb
-            let arrayPathExpr = QueryProduced.value qb.SourceContext.NextAlias destination
-            let indexVal = Convert.ToInt64(ExpressionEvaluation.evaluateExpr<obj> indexExpr)
-            if indexVal < 0L then
-                raise (ArgumentOutOfRangeException(
-                    "indexExpr",
-                    indexVal,
-                    "Insert: negative index is not supported. Use a non-negative index."))
-            let struct(element, _) = QueryTranslatorSerialization.serializationAccess destination.Input (StoredLabel(box 0))
-            let newValueExpr = visitStoredValueDu element newValue qb
-            let alias = qb.SourceAlias
-            let extractArrayExpr =
-                SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(alias, "Value"); arrayPathExpr])
-            let beforeAlias = "_je_b"
-            let afterAlias = "_je_a"
-            let unionAlias = "_u"
-            let orderedAlias = "_o"
-            let mkCore source projections where =
-                { Distinct = false
-                  Projections = ProjectionSetOps.ofList projections
-                  Source = source
-                  Joins = []
-                  Where = where
-                  GroupBy = []
-                  Having = None
-                  OrderBy = []
-                  Limit = None
-                  Offset = None }
-            let beforeCore =
-                mkCore
-                    (Some (FromJsonEach(extractArrayExpr, Some beforeAlias)))
-                    [ { Alias = Some "k"; Expr = SqlExpr.Column(Some beforeAlias, "key") }
-                      { Alias = Some "v"; Expr = SqlExpr.Column(Some beforeAlias, "value") } ]
-                    (Some (SqlExpr.Binary(
-                        SqlExpr.Column(Some beforeAlias, "key"),
-                        BinaryOperator.Lt,
-                        SqlExpr.Literal(SqlLiteral.Integer indexVal))))
-            let middleCore =
-                mkCore
-                    None
-                    [ { Alias = Some "k"; Expr = SqlExpr.Literal(SqlLiteral.Integer indexVal) }
-                      { Alias = Some "v"; Expr = newValueExpr } ]
-                    None
-            let afterCore =
-                mkCore
-                    (Some (FromJsonEach(extractArrayExpr, Some afterAlias)))
-                    [ { Alias = Some "k"
-                        Expr = SqlExpr.Binary(
-                                  SqlExpr.Column(Some afterAlias, "key"),
-                                  BinaryOperator.Add,
-                                  SqlExpr.Literal(SqlLiteral.Integer 1L)) }
-                      { Alias = Some "v"; Expr = SqlExpr.Column(Some afterAlias, "value") } ]
-                    (Some (SqlExpr.Binary(
-                        SqlExpr.Column(Some afterAlias, "key"),
-                        BinaryOperator.Ge,
-                        SqlExpr.Literal(SqlLiteral.Integer indexVal))))
-            let unionSel = { Ctes = []; Body = UnionAllSelect(beforeCore, [middleCore; afterCore]) }
-            let orderedCore =
-                { Distinct = false
-                  Projections = ProjectionSetOps.ofList
-                      [ { Alias = Some "k"; Expr = SqlExpr.Column(Some unionAlias, "k") }
-                        { Alias = Some "v"; Expr = SqlExpr.Column(Some unionAlias, "v") } ]
-                  Source = Some (DerivedTable(unionSel, unionAlias))
-                  Joins = []
-                  Where = None
-                  GroupBy = []
-                  Having = None
-                  OrderBy = [ { Expr = SqlExpr.Column(Some unionAlias, "k"); Direction = SortDirection.Asc } ]
-                  Limit = Some (SqlExpr.Literal(SqlLiteral.Integer -1L))
-                  Offset = None }
-            let orderedSel = { Ctes = []; Body = SingleSelect orderedCore }
-            let outerCore =
-                { Distinct = false
-                  Projections = ProjectionSetOps.ofList
-                      [ { Alias = None
-                          Expr = SqlExpr.FunctionCall("jsonb_group_array", [SqlExpr.Column(Some orderedAlias, "v")]) } ]
-                  Source = Some (DerivedTable(orderedSel, orderedAlias))
-                  Joins = []
-                  Where = None
-                  GroupBy = []
-                  Having = None
-                  OrderBy = []
-                  Limit = None
-                  Offset = None }
-            let outerSel = { Ctes = []; Body = SingleSelect outerCore }
-            qb.UpdateAssignments.Add(arrayPathExpr, SqlExpr.ScalarSubquery outerSel)
-            SqlExpr.Literal(SqlLiteral.Null)
         | OfShape1 null null "Any" null (array, whereFuncExpr) ->
             visitNestedArrayPredicateDu qb array whereFuncExpr false
         | OfShape1 null null "All" null (array, whereFuncExpr) ->
@@ -377,6 +240,9 @@ module internal QueryTranslatorVisitCoreMethodCall =
         | ValueNone -> visitOtherMethodCallDu visitProduced visitRequested visitDu visitStoredValueDu visitPresenceDu visitMathMethodDu arrayIndexDu visitPropertyDu visitPreparedPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu membersProduced emitStringOperandDu m qb
 
     and private visitOtherMethodCallDu visitProduced visitRequested visitDu visitStoredValueDu visitPresenceDu visitMathMethodDu arrayIndexDu visitPropertyDu visitPreparedPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu membersProduced emitStringOperandDu (m: MethodCallExpression) (qb: QueryBuilder) =
+        match QueryTranslatorIndex.tryCall visitProduced visitDu visitPropertyDu visitPreparedPropertyDu m qb with
+        | ValueSome indexed -> indexed
+        | ValueNone ->
         match m with
         | _ when m.Arguments.Count = 1 && TypeSupport.OptionalMember(m.Method.DeclaringType, m.Method.Name).IsSome ->
             match TypeSupport.OptionalMember(m.Method.DeclaringType, m.Method.Name).Value with
@@ -402,26 +268,6 @@ module internal QueryTranslatorVisitCoreMethodCall =
                 | ValueNone -> DirectValue(value, input)) produced
         | OfShape0 null null "op_Explicit" arg -> castToDu qb m.Type arg
         | OfShape0 null null "NewSqlId" arg -> visitProduced arg qb
-        | OfShape1 null null "get_Item" null (o, key) when o.Type.IsGenericType && typedefof<IReadOnlyDictionary<_,_>>.Equals(o.Type.GetGenericTypeDefinition()) ->
-            let produced = visitProduced o qb
-            let keyValue = visitDu key qb
-            QueryProduced.bind qb.SourceContext.NextAlias (fun value input ->
-                let alias = qb.SourceContext.NextAlias()
-                let token = SqlExpr.FunctionCall("jsonb", [SqlExpr.Binary(value, BinaryOperator.JsonText, SqlExpr.Column(Some alias, "fullkey"))])
-                let child = QueryTranslatorSerialization.elementInput input (SqlExpr.Column(Some alias, "key")) token
-                let selected = DirectValue(jsonTokenValue m.Type token, child)
-                let core = { Source = Some(FromJsonEach(value, Some alias)); Joins = []
-                             Projections = Explicit({ Alias = None; Expr = QueryProduced.packet selected }, [])
-                             Where = Some(SqlExpr.Binary(SqlExpr.Column(Some alias, "key"), BinaryOperator.Eq, keyValue))
-                             GroupBy = []; Having = None; OrderBy = []; Limit = None; Offset = None; Distinct = false }
-                PackedValue(SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }, QueryTranslatorSerialization.rebaseSerializationInput selected.Input)) produced
-        | OfShape1 null null "get_Item" null (o, propExpr) when typeof<ICollection>.IsAssignableFrom o.Type || typeof<Array>.IsAssignableFrom o.Type || typeof<JsonSerializator.JsonValue>.IsAssignableFrom o.Type ->
-            visitPropertyDu o (propExpr :?> ConstantExpression).Value m qb
-        | OfShape1 null null "Dyn" (OfPropInfo) (o, propExpr) ->
-            visitPreparedPropertyDu o propExpr (fun value -> box((unbox<PropertyInfo> value).Name)) m qb
-        | OfShape1 null null "Dyn" null (o, propExpr) ->
-            if typeof<string>.Equals(propExpr.Type) || isIntegerBasedType propExpr.Type then visitPreparedPropertyDu o propExpr id m qb
-            else raise(NotSupportedException(sprintf "Cannot access dynamic property of %A" o))
         | OfShape0 null null "ToObject" o when typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.Method.DeclaringType || m.Method.DeclaringType.FullName = "SoloDatabase.MongoDB.BsonDocument" ->
             castToDu qb (m.Method.GetGenericArguments()[0]) o
         | OfShape0 null null "CastTo" arg -> castToDu qb (m.Method.GetGenericArguments()[0]) arg

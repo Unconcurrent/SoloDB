@@ -414,6 +414,23 @@ type JsonValue =
     static member internal ReadRawRuntime(context: byref<JsonReadContext<Utf16Reader>>, targetType: Type): obj =
         JsonRawReadMetadata<JsonStoredContract>.Runtime<Utf16Reader>(&context,targetType)
 
+    /// Runtime callers use the same key conversions as typed dictionary readers.
+    static member internal ReadDictionaryKey(targetType: Type, text: string): obj =
+        match targetType with
+        | OfType string -> box text
+        | OfType int8 -> box(ConvertStringTo<int8>.Convert text)
+        | OfType int16 -> box(ConvertStringTo<int16>.Convert text)
+        | OfType int32 -> box(ConvertStringTo<int32>.Convert text)
+        | OfType int64 -> box(ConvertStringTo<int64>.Convert text)
+        | OfType uint8 -> box(ConvertStringTo<uint8>.Convert text)
+        | OfType uint16 -> box(ConvertStringTo<uint16>.Convert text)
+        | OfType uint32 -> box(ConvertStringTo<uint32>.Convert text)
+        | OfType uint64 -> box(ConvertStringTo<uint64>.Convert text)
+        | OfType float32 -> box(ConvertStringTo<float32>.Convert text)
+        | OfType float -> box(ConvertStringTo<float>.Convert text)
+        | OfType decimal -> box(ConvertStringTo<decimal>.Convert text)
+        | other -> failwithf "Cannot convert string to %s" other.FullName
+
     static member internal ReadRawPhysicalId<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): int64 =
         JsonRawRead<JsonNativeContract>.PhysicalId<'R> &context
 

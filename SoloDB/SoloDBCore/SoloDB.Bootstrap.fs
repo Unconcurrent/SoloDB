@@ -65,6 +65,7 @@ module internal Bootstrap =
                 (json.ToObject(target)).ToString()), true)
             QueryOrderingPrimitives.register connection
             QueryTranslatorSpanSource.register connection
+            QueryTranslatorIndex.register connection
             connection.RegisterManagedScalar(JsonFunctions.rowErrorFunction, 1,
                 RawSqliteFunctions.RawScalarFunc(fun _ arguments ->
                     JsonFunctions.raiseRowError (arguments[0].CopyToString())),

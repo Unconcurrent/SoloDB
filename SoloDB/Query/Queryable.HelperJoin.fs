@@ -322,7 +322,7 @@ module internal QueryableHelperJoin =
                 // emits Id=NULL and Value=typed-payload JSON object {"kind":"CardinalityError",
                 // "msg":errorMsg}. JsonFunctions.fromSQLite dispatches by kind to
                 // InvalidOperationException matching .NET LINQ Min/Max/Avg-on-empty contract.
-                let typedPayload = QueryableHelperBase.runtimeErrorPayload RuntimeErrorKind.CardinalityError errorMsg
+                let typedPayload = QueryTranslatorBaseTypes.runtimeErrorPayload RuntimeErrorKind.CardinalityError errorMsg
                 struct([{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.Null)), [], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
                         { Alias = Some "Value"; Expr = SqlExpr.CaseExpr((isNullCheck, typedPayload), [], Some(SqlExpr.Column(None, "Value"))) }], input.SerializationInput)
             ))

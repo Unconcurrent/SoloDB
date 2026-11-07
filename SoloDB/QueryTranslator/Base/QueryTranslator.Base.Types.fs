@@ -15,6 +15,31 @@ module internal QueryTranslatorBaseTypes =
         "Reason: This expression composition does not make progress toward SQL.\n" +
         "Fix: Remove the recursive query or expression reference."
 
+    /// Map the closed-enum RuntimeErrorKind to its string name embedded in the
+    /// typed-payload JSON object. Adding a new kind requires updates here AND at
+    /// JsonFunctions.raiseRowError in lockstep.
+    let internal runtimeErrorKindName (kind: RuntimeErrorKind) =
+        match kind with
+        | CardinalityError -> "CardinalityError"
+        | CastError -> "CastError"
+        | RangeError -> "RangeError"
+        | IndexError -> "IndexError"
+        | NullReferenceError -> "NullReferenceError"
+        | MissingKeyError -> "MissingKeyError"
+        | NullArgumentError -> "NullArgumentError"
+        | ArgumentError -> "ArgumentError"
+
+    /// Build a typed-payload SqlExpr that encodes a runtime error as a JSON object:
+    /// {"kind": "<kind-name>", "msg": "<message>"}. Used as the Value column on
+    /// Id=NULL rows or passed to ROW_ERROR at a consumed expression.
+    let internal runtimeErrorPayload (kind: RuntimeErrorKind) (message: string) : SqlExpr =
+        SqlExpr.FunctionCall("json_object", [
+            SqlExpr.Literal(SqlLiteral.String "kind")
+            SqlExpr.Literal(SqlLiteral.String (runtimeErrorKindName kind))
+            SqlExpr.Literal(SqlLiteral.String "msg")
+            SqlExpr.Literal(SqlLiteral.String message)
+        ])
+
     /// <summary>
     /// Represents a member access expression in a more abstract way.
     /// This private type simplifies handling different forms of member access.

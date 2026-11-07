@@ -160,10 +160,15 @@ module internal JsonFunctions =
             | "CardinalityError" -> raise (InvalidOperationException msg)
             | "CastError" -> raise (InvalidCastException msg)
             | "RangeError" -> raise (ArgumentOutOfRangeException(null, msg))
+            | "IndexError" -> raise (IndexOutOfRangeException msg)
+            | "NullReferenceError" -> raise (NullReferenceException msg)
+            | "MissingKeyError" -> raise (Collections.Generic.KeyNotFoundException msg)
+            | "NullArgumentError" -> raise (ArgumentNullException(null, msg))
+            | "ArgumentError" -> raise (ArgumentException msg)
             | _ ->
                 // Internal invariant violation: Id=NULL row carried an unrecognized
                 // kind. All translator emit sites must use the closed
-                // RuntimeErrorKind enum (CardinalityError | CastError | RangeError).
+                // RuntimeErrorKind enum and its canonical payload producer.
                 raise (InvalidOperationException msg)
         | _ ->
             // Internal invariant violation: Id=NULL row payload is not a JSON object.

@@ -76,4 +76,10 @@ For direct native rows, use `rows.Row.GetDecimal(ordinal, keys)` or `rows.Row.Ge
 
 Existing implicit numerical text in concatenation, composite formatting and public JSON output keeps its invariant policy. This addition does not admit other `ToString` format/provider overloads, boxed Object or Nullable calls. Exact numerical casts retain their existing conversion and overflow behavior.
 
+## Numerical dictionary keys
+
+Dictionary lookups in queries can take a captured, compiled or row-derived key, such as `rows.Select(row => row.Prices[row.Code])`. Numerical keys use the same conversion as typed dictionary reads. Decimal keys compare by value regardless of scale, and unsigned keys retain their full range.
+
+A missing key raises `KeyNotFoundException`. A malformed stored key raises its conversion error; two stored names that convert to the same numerical key raise `ArgumentException`. String keys keep their complete contents, including embedded NUL characters.
+
 See [numerical migration](numeric-migration.md) for format admission and historical data conversion.

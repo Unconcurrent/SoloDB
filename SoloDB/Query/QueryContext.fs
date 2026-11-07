@@ -4,15 +4,19 @@ open System.Collections.Generic
 open NativeSQLiteTools
 open SoloDatabase.SqlModel
 
-/// Closed-enum kinds for translator-emitted runtime errors. The kind is encoded
-/// into the typed-payload JSON object on Id=NULL rows; the materializer dispatches
-/// by kind to the matching .NET exception type. Adding a new kind requires
-/// JsonFunctions.fromSQLite (Id=NULL dispatch arm) and runtimeErrorPayload (kind name)
+/// Translator errors use ROW_ERROR at the consumed expression or Id=NULL rows.
+/// The closed kind identifies the matching .NET exception. Adding a kind requires
+/// JsonFunctions.raiseRowError and runtimeErrorPayload (kind name)
 /// updates in lockstep.
 type internal RuntimeErrorKind =
     | CardinalityError
     | CastError
     | RangeError
+    | IndexError
+    | NullReferenceError
+    | MissingKeyError
+    | NullArgumentError
+    | ArgumentError
 
 /// Layout constants are sampled once at their original producer position.
 type internal QueryPreparedConstant =
