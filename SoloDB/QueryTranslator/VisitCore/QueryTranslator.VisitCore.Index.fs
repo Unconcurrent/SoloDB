@@ -49,11 +49,11 @@ module internal QueryTranslatorIndex =
                 else
                     let expected =
                         if serializedKey then key
-                        else SqlExpr.FunctionCall("json",[QueryProduced.treeToken nextName (fst parts[1]) keyInput])
-                    let expected =
-                        if typeof<float>.Equals keyType || typeof<float32>.Equals keyType then
-                            SqlExpr.Coalesce(expected,[literal "null"])
-                        else expected
+                        else
+                            let token = keyInput.Source |> ValueOption.defaultWith(fun () -> canonicalToken keyInput.Carrier (fst parts[1]))
+                            let fallback = QueryProduced.consume nextName (fun value input ->
+                                SqlExpr.FunctionCall("json",[input.Source |> ValueOption.defaultWith(fun () -> canonicalToken input.Carrier value)])) (createDefault keyType)
+                            SqlExpr.Coalesce(SqlExpr.FunctionCall("json",[token]),[fallback])
                     SqlExpr.FunctionCall("DICTIONARY_KEY_EQUALS",[literal(TypeMetadataCache.RegisterExactName keyType);storedKey;expected])
             let embeddedNul = SqlExpr.Binary(SqlExpr.FunctionCall("instr",[storedKey;SqlExpr.FunctionCall("char",[SqlExpr.Literal(SqlLiteral.Integer 0L)])]),
                                              BinaryOperator.Gt,SqlExpr.Literal(SqlLiteral.Integer 0L))
