@@ -157,6 +157,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
             .Where(type => type != null).Cast<ITypeSymbol>().ToArray();
         var roots = selectedRoots.Concat(QueryRegistrations.InferredRoots(facts,sites,selectedRoots));
         var models = DescribeRoots(context,compilation,roots);
+        if (models == null) return;
         const string registrationType = "MetadataOperations";
         const string queryRegistration = "MetadataOperationsQueries";
         var queryCode = QueryRegistrations.Collect(facts,models.Select(model => model.TypeName),sites,queryRegistration);
@@ -186,19 +187,97 @@ public sealed class MetadataGenerator : IIncrementalGenerator
     private static readonly SymbolDisplayFormat TypeDisplay = SymbolDisplayFormat.FullyQualifiedFormat.WithMiscellaneousOptions(
         SymbolDisplayFormat.FullyQualifiedFormat.MiscellaneousOptions | SymbolDisplayMiscellaneousOptions.ExpandValueTuple);
 
-    private static List<Model> DescribeRoots(SourceProductionContext context, Compilation compilation, IEnumerable<ITypeSymbol> roots)
+    private sealed class ModelDependencies
     {
-        var queue = new Queue<ITypeSymbol>();
-        foreach (var root in roots) queue.Enqueue(root);
+        internal readonly List<(ITypeSymbol Type,ITypeSymbol? Template,bool Element)> Items = new();
+        internal void Enqueue(ITypeSymbol type,ITypeSymbol? template = null) => Items.Add((type,template,false));
+        internal void ArrayElement(ITypeSymbol type) => Items.Add((type,null,true));
+    }
+
+    private sealed class ModelFrame
+    {
+        internal readonly INamedTypeSymbol Definition;
+        internal readonly ITypeSymbol Expression;
+        internal ModelFrame(INamedTypeSymbol definition,ITypeSymbol expression) { Definition = definition; Expression = expression; }
+    }
+
+    private static ITypeSymbol[] ModelArguments(INamedTypeSymbol type) =>
+        (type.ContainingType == null ? Array.Empty<ITypeSymbol>() : ModelArguments(type.ContainingType)).Concat(type.TypeArguments).ToArray();
+
+    // A return to the same declaration gives a substitution on its formal parameters.
+    // Only a dependency cycle containing a constructor grows on repeated traversal.
+    // Permutations, fixed arguments and transient growth followed by a constant remain finite.
+    private static bool ExpandingModel(INamedTypeSymbol definition,INamedTypeSymbol expression)
+    {
+        var parameters = ModelArguments(definition);
+        var arguments = ModelArguments(expression);
+        var edges = new bool[parameters.Length,parameters.Length];
+        var growing = new List<(int From,int To)>();
+        void Visit(int output,ITypeSymbol type,bool nested)
+        {
+            if (type is ITypeParameterSymbol)
+            {
+                for (var input = 0; input < parameters.Length; input++)
+                    if (SymbolEqualityComparer.Default.Equals(type,parameters[input]))
+                    {
+                        edges[output,input] = true;
+                        if (nested) growing.Add((output,input));
+                    }
+            }
+            else if (type is IArrayTypeSymbol array) Visit(output,array.ElementType,true);
+            else if (type is INamedTypeSymbol named)
+                foreach (var argument in ModelArguments(named)) Visit(output,argument,true);
+        }
+        for (var index = 0; index < arguments.Length; index++) Visit(index,arguments[index],false);
+        for (var index = 0; index < parameters.Length; index++) edges[index,index] = true;
+        for (var via = 0; via < parameters.Length; via++)
+            for (var from = 0; from < parameters.Length; from++)
+                for (var to = 0; to < parameters.Length; to++)
+                    edges[from,to] |= edges[from,via] && edges[via,to];
+        return growing.Any(edge => edges[edge.To,edge.From]);
+    }
+
+    private static List<Model>? DescribeRoots(SourceProductionContext context, Compilation compilation, IEnumerable<ITypeSymbol> roots)
+    {
+        var queue = new Queue<(ITypeSymbol Type,ModelFrame[] Frames)>();
+        foreach (var root in roots) queue.Enqueue((root,Array.Empty<ModelFrame>()));
         var visited = new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
         var models = new List<Model>();
         var sources = new List<(Model Model,ITypeSymbol Type)>();
         while (queue.Count != 0)
         {
-            var type = queue.Dequeue().WithNullableAnnotation(NullableAnnotation.NotAnnotated);
+            context.CancellationToken.ThrowIfCancellationRequested();
+            var request = queue.Dequeue();
+            var type = request.Type.WithNullableAnnotation(NullableAnnotation.NotAnnotated);
             if (!visited.Add(type) || type is ITypeParameterSymbol || type.TypeKind == TypeKind.Error) continue;
             if (type is INamedTypeSymbol open && open.IsUnboundGenericType) continue;
-            var model = Describe(context, compilation, type, queue);
+            foreach (var frame in request.Frames)
+                if (type is INamedTypeSymbol current && frame.Expression is INamedTypeSymbol expression &&
+                    SymbolEqualityComparer.Default.Equals(current.OriginalDefinition,frame.Definition) &&
+                    SymbolEqualityComparer.Default.Equals(expression.OriginalDefinition,frame.Definition) && ExpandingModel(frame.Definition,expression))
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(Unsupported,type.Locations.FirstOrDefault(),type.ToDisplayString(),
+                        "a recursive model dependency expands its generic arguments indefinitely; a finite generated registration is required"));
+                    return null;
+                }
+            var dependencies = new ModelDependencies();
+            var model = Describe(context, compilation, type, dependencies);
+            var lineage = request.Frames.AsEnumerable();
+            if (type is INamedTypeSymbol parent && ModelArguments(parent).Length != 0)
+                lineage = lineage.Append(new ModelFrame(parent.OriginalDefinition,parent.OriginalDefinition));
+            var frames = lineage.ToArray();
+            foreach (var dependency in dependencies.Items)
+            {
+                var next = new List<ModelFrame>();
+                foreach (var frame in frames)
+                {
+                    ITypeSymbol? expression = dependency.Element && frame.Expression is IArrayTypeSymbol array
+                        ? array.ElementType : dependency.Template != null && frame.Expression is INamedTypeSymbol named
+                            ? new QueryRegistrations.Symbols(compilation).WithOwner(named).Type(dependency.Template) : null;
+                    if (expression != null) next.Add(new ModelFrame(frame.Definition,expression));
+                }
+                queue.Enqueue((dependency.Type,next.ToArray()));
+            }
             if (model != null)
             {
                 var symbols = new Dictionary<string,ITypeSymbol>(StringComparer.Ordinal);
@@ -263,7 +342,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
         return models;
     }
 
-    private static Model? Describe(SourceProductionContext context, Compilation compilation, ITypeSymbol type, Queue<ITypeSymbol> dependencies)
+    private static Model? Describe(SourceProductionContext context, Compilation compilation, ITypeSymbol type, ModelDependencies dependencies)
     {
         var name = type.ToDisplayString(TypeDisplay);
         string Definition(ITypeSymbol value) => value is INamedTypeSymbol symbol
@@ -280,15 +359,20 @@ public sealed class MetadataGenerator : IIncrementalGenerator
         foreach (var child in TypeSupport.OptionalChildren(decision.Shape))
             if (compilation.GetTypeByMetadataName(child) is { } resolved) dependencies.Enqueue(resolved);
         if (decision.GenericChildren && type is INamedTypeSymbol genericFact)
-            foreach (var child in genericFact.TypeArguments) dependencies.Enqueue(child);
+            for (var index = 0; index < genericFact.TypeArguments.Length; index++)
+                dependencies.Enqueue(genericFact.TypeArguments[index],genericFact.OriginalDefinition.TypeArguments[index]);
         var contractArguments = decision.Contract.Length == 0 ? Array.Empty<ITypeSymbol>() : Contract(decision.Contract)!.TypeArguments.ToArray();
-        foreach (var child in contractArguments) dependencies.Enqueue(child);
+        var declaredContracts = type is INamedTypeSymbol declaredNamed
+            ? declaredNamed.OriginalDefinition.AllInterfaces.Concat(new[] { declaredNamed.OriginalDefinition }).ToArray() : Array.Empty<INamedTypeSymbol>();
+        var declaredArguments = decision.Contract.Length == 0 ? Array.Empty<ITypeSymbol>()
+            : declaredContracts.First(contract => Definition(contract) == decision.Contract).TypeArguments.ToArray();
+        for (var index = 0; index < contractArguments.Length; index++) dependencies.Enqueue(contractArguments[index],declaredArguments[index]);
         var bsonDocument = decision.Shape == TypeShape.BsonDocument;
         if (decision.Shape is TypeShape.Scalar or TypeShape.DynamicObject || decision.NamedChildren.Length != 0)
             return New(decision.Shape);
         if (arrayFact != null)
         {
-            dependencies.Enqueue(arrayFact.ElementType);
+            dependencies.ArrayElement(arrayFact.ElementType);
             var model = New(decision.Shape,arrayFact.ElementType);
             model.NonGenericEnumerable = arrayFact.Rank != 1;
             model.SupportsValuesWrapper = TypeSupport.SupportsValuesWrapper(Definition(arrayFact.ElementType));
@@ -306,9 +390,9 @@ public sealed class MetadataGenerator : IIncrementalGenerator
         var unionType = Kind(named,"SumType");
         if (unionType) {
             foreach (var method in named.GetMembers().OfType<IMethodSymbol>().Where(method => Kind(method,"UnionCase")))
-                foreach (var parameter in method.Parameters) dependencies.Enqueue(parameter.Type);
+                foreach (var parameter in method.Parameters) dependencies.Enqueue(parameter.Type,parameter.OriginalDefinition.Type);
             foreach (var nested in named.GetTypeMembers())
-                foreach (var property in nested.GetMembers().OfType<IPropertySymbol>().Where(property => Kind(property,"Field"))) dependencies.Enqueue(property.Type);
+                foreach (var property in nested.GetMembers().OfType<IPropertySymbol>().Where(property => Kind(property,"Field"))) dependencies.Enqueue(property.Type,property.OriginalDefinition.Type);
         }
         if (named.IsAnonymousType) return Reject("anonymous carriers require inferred registration in their declaring scope");
         if (decision.Shape == TypeShape.Enum)
@@ -321,7 +405,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
             var arguments = named.TypeArguments;
             var tupleMembers = arguments.Select((argument,index) => new Member(index == 7 ? "Rest" : "Item" + (index + 1),
                 argument.ToDisplayString(TypeDisplay), named.IsValueType, true, false, false)).ToArray();
-            foreach (var argument in arguments) dependencies.Enqueue(argument);
+            for (var index = 0; index < arguments.Length; index++) dependencies.Enqueue(arguments[index],named.OriginalDefinition.TypeArguments[index]);
             return new Model(name,named.MetadataName,TypeShape.Tuple,named.IsValueType,true,false,null,tupleMembers) { TypeArguments = Arguments(type) };
         }
         if (decision.RegistrationKind != CodecRegistrationKind.Model)
@@ -337,7 +421,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
         if (decision.Contract.Length != 0 || decision.Shape == TypeShape.NonGenericDictionary)
         {
             var arguments = decision.Contract.Length == 0 ? Array.Empty<ITypeSymbol>() : Contract(decision.Contract)!.TypeArguments.ToArray();
-            foreach (var argument in arguments) dependencies.Enqueue(argument);
+            for (var index = 0; index < arguments.Length; index++) dependencies.Enqueue(arguments[index],declaredArguments[index]);
             var model = New(decision.Shape,arguments.LastOrDefault());
             model.AbstractType = abstractType;
             model.CollectionArguments = arguments.Select(argument => argument.ToDisplayString(TypeDisplay)).ToArray();
@@ -368,8 +452,9 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                     }
             }
         }
-        for (INamedTypeSymbol? current = named; current != null; current = current.BaseType)
+        for (INamedTypeSymbol? current = named, declared = named.OriginalDefinition; current != null; current = current.BaseType, declared = declared?.BaseType)
         {
+            var memberSymbols = new QueryRegistrations.Symbols(compilation).WithOwner(declared!);
             foreach (var member in current.GetMembers())
             {
                 if (member is IPropertySymbol staticProperty && staticProperty.IsStatic && !staticProperty.IsIndexer &&
@@ -379,7 +464,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                     {
                         members.Add(new Member(staticProperty.Name,staticProperty.Type.ToDisplayString(TypeDisplay),false,false,false,false)
                         { DeclaringType = staticProperty.ContainingType.ToDisplayString(TypeDisplay) });
-                        dependencies.Enqueue(staticProperty.Type);
+                        dependencies.Enqueue(staticProperty.Type,memberSymbols.Type(staticProperty.OriginalDefinition.Type));
                     }
                     continue;
                 }
@@ -403,7 +488,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                         members.Add(new Member(property.MetadataName, property.Type.ToDisplayString(TypeDisplay), false, false, false, false)
                         { DeclaringType = property.ContainingType.ToDisplayString(TypeDisplay) });
                         PropertyPolicy(property,members[members.Count - 1]);
-                        dependencies.Enqueue(property.Type);
+                        dependencies.Enqueue(property.Type,memberSymbols.Type(property.OriginalDefinition.Type));
                         continue;
                     }
                     var read = property.GetMethod != null;
@@ -416,13 +501,13 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                         HelperWrite = write && (!SymbolEqualityComparer.Default.Equals(property.ContainingType, named) || property.SetMethod!.IsInitOnly || !compilation.IsSymbolAccessibleWithin(property.SetMethod, compilation.Assembly))
                     });
                     PropertyPolicy(property,members[members.Count - 1]);
-                    dependencies.Enqueue(property.Type);
+                    dependencies.Enqueue(property.Type,memberSymbols.Type(property.OriginalDefinition.Type));
                 }
                 else if (member is IFieldSymbol field)
                 {
                     members.Add(new Member(field.Name, field.Type.ToDisplayString(TypeDisplay), true, true, named.IsValueType && !field.IsReadOnly && !field.IsConst, false)
                     { DeclaringType = field.ContainingType.ToDisplayString(TypeDisplay) });
-                    dependencies.Enqueue(field.Type);
+                    dependencies.Enqueue(field.Type,memberSymbols.Type(field.OriginalDefinition.Type));
                 }
             }
         }
@@ -435,7 +520,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
         if (TypeSupport.SqlRowFieldFallback(named.IsValueType,recordType,sqlProperties))
             foreach (var field in named.GetMembers().OfType<IFieldSymbol>().Where(field => !field.IsStatic &&
                 field.DeclaredAccessibility != Accessibility.Public && field.DeclaredAccessibility != Accessibility.Private))
-                dependencies.Enqueue(field.Type);
+                dependencies.Enqueue(field.Type,field.OriginalDefinition.Type);
         var recordFields = recordType ? named.GetMembers().OfType<IPropertySymbol>()
             .Select(property => (property, mapping: property.GetAttributes().FirstOrDefault(attribute =>
                 attribute.AttributeClass?.ToDisplayString() == "Microsoft.FSharp.Core.CompilationMappingAttribute")))

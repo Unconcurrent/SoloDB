@@ -107,6 +107,8 @@ On .NET 8 linux-x64 with FSharp.Core 8.0.403, formatted `printfn` can fail with 
 
 The generator follows the concrete types used by collection, JSON and query calls, including closed generic helpers. If a type is chosen only at runtime, it may need an explicit `[SoloDBAOT]` model declaration or a concrete query signature. Follow `SOLO003` warnings at the reported call.
 
+Fixed recursive models, such as `Node<T>` containing another `Node<T>`, are supported. A model that requires infinitely many closed types, such as `Node<T>` containing `Node<List<T>>`, reports `SOLO001`; use a finite model for generated registration.
+
 Raw SQL parameter objects have [separate argument capture](native-sql.md#typed-arguments-and-direct-mapping); they do not need JSON model declarations.
 
 Each consuming project registers its own operations. A library can expose an initialization method that calls its project-local registration. Call it before using that library's generated operations. Successful repeated calls, including concurrent calls, are no-ops; a failed call can be retried. Registration does not run model constructors or getters.
