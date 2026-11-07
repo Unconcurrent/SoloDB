@@ -205,7 +205,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS SoloDBRelation_Declaration ON SoloDBRelation(O
     let mutable statement = connection.OpenStatement("""
 CREATE TABLE IF NOT EXISTS SoloDBFileSystemReference (
     OwnerCollection TEXT NOT NULL,
-    OwnerId INTEGER NOT NULL CHECK(OwnerId > 0),
+    OwnerId INTEGER NOT NULL CHECK(OwnerId <> 0),
     Property TEXT NOT NULL,
     RefKind TEXT NOT NULL CHECK(RefKind IN ('Single','Many')),
     FileId INTEGER REFERENCES SoloDBFileHeader(Id) ON DELETE RESTRICT CHECK(FileId > 0),

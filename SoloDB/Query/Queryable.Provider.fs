@@ -54,32 +54,32 @@ module internal QueryableExecution =
             statement
         with error -> statement.Abort(error); reraise()
 
-    let private readDocument owned (statement: byref<NativeStatementScope>) : struct(Types.DbObjectRow * int * int) voption =
+    let private readDocument (statement: byref<NativeStatementScope>) : struct(Types.DbObjectRow * int * int) voption =
         try
             if statement.Step() then
                 let row=statement.Row
                 let storageClass=row.StorageClass(1)
-                let owner = if owned then row.GetInt32 3 else -1
+                let owner = if row.FieldCount > 3 then row.GetInt32 3 else -1
                 ValueSome(struct(SqlRowValue.Document(row),storageClass,owner))
             else ValueNone
         with error -> statement.Abort(error); reraise()
 
-    let private readEntity<'Elem> owned (statement: byref<NativeStatementScope>) =
+    let private readEntity<'Elem> (statement: byref<NativeStatementScope>) =
         try
             if statement.Step() then
                 let row = statement.Row
-                let struct(document, entity) = JsonFunctions.fromSQLiteRow<'Elem> row
-                let owner = if owned then row.GetInt32 3 else -1
+                let owner = if row.FieldCount > 3 then row.GetInt32 3 else -1
+                let struct(document, entity) = JsonFunctions.fromSQLiteResultRow<'Elem> (owner >= 0) row
                 ValueSome(struct(document, entity, owner))
             else ValueNone
         with error -> statement.Abort(error); reraise()
 
-    let private queryRows<'Elem> (connection: NativeSqliteConnection) query parameters owned = seq {
+    let private queryRows<'Elem> (connection: NativeSqliteConnection) query parameters = seq {
         let mutable statement = openQuery connection query parameters
         try
             let mutable reading = true
             while reading do
-                match readEntity<'Elem> owned &statement with
+                match readEntity<'Elem> &statement with
                 | ValueSome row -> yield row
                 | ValueNone -> reading <- false
         finally statement.Dispose()
@@ -111,7 +111,7 @@ module internal QueryableExecution =
                 let hydration = Array.init plan.Owners.Length (fun _ -> Dictionary<int64, string>())
                 let () =
                     try
-                        for struct(row, entity, position) in queryRows<'Elem> connection query par batchCtx.IsSome do
+                        for struct(row, entity, position) in queryRows<'Elem> connection query par do
                             buffer.Add entity
                             if position >= 0 && position < owners.Length && row.Id.HasValue && not(isNull(box entity))
                                && plan.Owners[position].OwnerType.IsInstanceOfType(box entity) then
@@ -124,7 +124,7 @@ module internal QueryableExecution =
                         reraiseAnywhere error
                 yield! buffer
             | _ ->
-                for struct(_, entity, _) in queryRows<'Elem> connection query par batchCtx.IsSome do
+                for struct(_, entity, _) in queryRows<'Elem> connection query par do
                     yield entity
         }
 
@@ -160,10 +160,10 @@ module internal QueryableExecution =
         try
             let row =
                 try
-                    let row = readDocument batchCtx.IsSome &statement
+                    let row = readDocument &statement
                     match methodName, row with
                     | ("Single" | "SingleOrDefault"), ValueSome _ ->
-                        if (readDocument batchCtx.IsSome &statement).IsSome then
+                        if (readDocument &statement).IsSome then
                             raise (InvalidOperationException("Sequence contains more than one element"))
                     | _ -> ()
                     statement.Dispose()
@@ -171,7 +171,7 @@ module internal QueryableExecution =
                 with error -> statement.Abort(error); reraise()
             match row with
             | ValueSome struct(row,storageClass,position) ->
-                let entity = JsonFunctions.fromSQLiteCaptured<'TResult> storageClass row
+                let entity = JsonFunctions.fromSQLiteCaptured<'TResult> (position >= 0) storageClass row
                 batchLoadSingle connection row position entity
             | ValueNone when methodName.EndsWith("OrDefault", StringComparison.Ordinal) -> getTerminalDefaultValue()
             | ValueNone when methodName = "MinBy" || methodName = "MaxBy" ->

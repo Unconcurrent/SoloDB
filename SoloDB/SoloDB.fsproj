@@ -424,6 +424,7 @@
 	    <Compile Include="SoloDBCore/SoloDB.Location.fs" />
     <Compile Include="SoloDBCore/SoloDB.ToCollectionData.fs" />
     <Compile Include="SoloDBCore/SoloDB.SchemaMigration.fs" />
+    <Compile Include="SoloDBCore/SoloDB.FileSystemReferenceSchema.fs" />
     <Compile Include="SoloDBCore/SoloDB.CollectionTypeInformation.fs" />
     <Compile Include="Events/FileSystemEvents.Schema.fs" />
     <Compile Include="SoloDBCore/SoloDB.NumericalFunctions.fs" />

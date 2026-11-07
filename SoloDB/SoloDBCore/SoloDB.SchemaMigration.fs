@@ -130,7 +130,7 @@ module internal SchemaMigration =
     /// remainder is prepared again. Text the parser consumes without producing a statement is
     /// whitespace or comment and is skipped.
     /// </summary>
-    let private executeStatements (connection: NativeSqliteConnection) (label: string) (sql: string) =
+    let internal executeStatements (connection: NativeSqliteConnection) (label: string) (sql: string) =
         if not (String.IsNullOrWhiteSpace sql) then
             try
                 let mutable script = connection.AcquireScript(NativeStatementSource.Text (sql), null)
@@ -220,7 +220,7 @@ module internal SchemaMigration =
     /// Takes the pooled connection itself rather than a callback. Declaring it unfit is a field set,
     /// which cannot fail, so there is no recovery path to model and none is pretended.
     /// </remarks>
-    let internal run (pooled: NativeCachingDbConnection) (plan: Plan) =
+    let internal runWith (pooled: NativeCachingDbConnection) (plan: Plan) apply =
         let connection = pooled.Inner
         let handle =
             match connection.InternalHandle with
@@ -254,7 +254,7 @@ module internal SchemaMigration =
          try
             executeBoundary connection plan.Label "BEGIN EXCLUSIVE;"
 
-            applyInTransaction connection plan
+            apply()
 
             executeBoundary connection plan.Label "COMMIT TRANSACTION;"
          with ex ->
@@ -294,3 +294,6 @@ module internal SchemaMigration =
         match composeOutcome plan.Label primary [ transactionCleanup; restorationCleanup ] with
         | ValueNone -> ()
         | ValueSome report -> report.Throw()
+
+    let internal run (pooled: NativeCachingDbConnection) (plan: Plan) =
+        runWith pooled plan (fun () -> applyInTransaction pooled.Inner plan)

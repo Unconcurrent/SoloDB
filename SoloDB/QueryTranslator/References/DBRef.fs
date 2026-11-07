@@ -75,11 +75,11 @@ type DBRef<'T> =
     // ─── Public factory methods ───────────────────────────────────────────────
 
     /// <summary>Create a reference to an existing entity by its database Id.</summary>
-    /// <param name="id">The database Id of the target entity. Must be greater than 0.</param>
+    /// <param name="id">The nonzero database Id of the target entity.</param>
     static member To(id: int64) =
-        if id <= 0L then
+        if id = 0L then
             raise (ArgumentOutOfRangeException(nameof id, id,
-                "Error: DBRef.To requires a positive Id (> 0).\nReason: Id 0 represents an empty reference.\nFix: Use DBRef.None for empty or supply a positive Id."))
+                "Error: DBRef.To requires a nonzero Id.\nReason: Id 0 represents an empty reference.\nFix: Use DBRef.None for empty or supply a nonzero Id."))
         DBRef<'T>(id, Unchecked.defaultof<'T>, false)
 
     /// <summary>
@@ -225,8 +225,8 @@ type DBRef<'TTarget, 'TId> =
         DBRef<'TTarget, 'TId>(id, Unchecked.defaultof<'TId>, false, Unchecked.defaultof<'TTarget>, false)
 
     static member internal Resolved(id: int64, typedId: 'TId) =
-        if id <= 0L then
-            raise (ArgumentOutOfRangeException(nameof id, id, "Resolved DBRef id must be > 0."))
+        if id = 0L then
+            raise (ArgumentOutOfRangeException(nameof id, id, "Resolved DBRef id must be nonzero."))
         DBRef<'TTarget, 'TId>(id, typedId, true, Unchecked.defaultof<'TTarget>, false)
 
     /// <summary>Creates a reference to an existing entity by its typed Id.</summary>

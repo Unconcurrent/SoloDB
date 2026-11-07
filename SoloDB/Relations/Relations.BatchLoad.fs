@@ -64,7 +64,7 @@ let private loadSingleProperties
         for (ownerId, ownerObj) in ownerEntities do
             let dbRefObj = propGetter.Invoke(ownerObj)
             let targetId = readDbRefId dbRefObj
-            if targetId > 0L then
+            if targetId <> 0L then
                 ownerTargets.Add(ownerId, ownerObj, targetId)
                 distinctTargetIds.Add(targetId) |> ignore
 
@@ -243,7 +243,7 @@ let private hydrateDescendants tx excluded included whitelist entities initialKi
                     let children = ResizeArray<HydrationNode>()
                     let add (parent: HydrationNode) id entity =
                         let key = struct(descriptor.TargetTable, descriptor.TargetType, id)
-                        if id > 0L && not (isNull entity) && not (List.contains key parent.Ancestors) then
+                        if id <> 0L && not (isNull entity) && not (List.contains key parent.Ancestors) then
                             children.Add { Id = id; Entity = entity; Ancestors = key :: parent.Ancestors }
                     for node in nodes do
                         let reference = getter.Invoke(node.Entity)

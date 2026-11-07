@@ -170,17 +170,18 @@ module internal JsonFunctions =
             raise (InvalidOperationException text)
 
 
-    let private needsPhysicalTreeId id isObject hasId = isObject && not hasId && id >= 0L
+    let private needsPhysicalTreeId isObject hasId = isObject && not hasId
 
     /// Member identity shares the tree reader policy; original child tokens remain unconverted.
-    let internal physicalTreeSubject (id: int64) (text: string) =
-        if id < 0L then text
+    let internal physicalTreeSubject (identity: int64 voption) (text: string) =
+        if identity.IsNone then text
         else
+            let id = identity.Value
             let mutable input = JsonReadContext(JsonLexer.fromString text, { Start = 0; Length = text.Length; Depth = 0 })
             JsonReadCursor.scan &input
             let isObject = not(isNull input.Properties)
             let hasId = isObject && input.Properties.ContainsKey "Id"
-            if not(needsPhysicalTreeId id isObject hasId) then text
+            if not(needsPhysicalTreeId isObject hasId) then text
             else
                 let output = System.Text.StringBuilder(text.Length + 32)
                 output.Append('{') |> ignore
@@ -195,23 +196,26 @@ module internal JsonFunctions =
         if typeof<JsonValue>.Equals(typeof<'R>) then
             let json = value :> obj :?> JsonValue
             let isObject = json.JsonType = JsonValueType.Object
-            if needsPhysicalTreeId id isObject (isObject && json.Contains "Id") then json.["Id"] <- id
+            if needsPhysicalTreeId isObject (isObject && json.Contains "Id") then json.["Id"] <- id
             value
-        elif not(isNull(box value)) && id <> -1 && EntityDocumentId<'R>.Value then
+        elif not(isNull(box value)) && EntityDocumentId<'R>.Value then
             EntityDocumentId<'R>.WithId value id
         else value
 
     /// Materializes complete stored JSON after its producing statement has completed.
-    let internal fromSQLiteDocument<'R when 'R :> obj> (row: DbObjectRow) : 'R =
+    let private fromSQLiteDocumentCore<'R when 'R :> obj> physical (row: DbObjectRow) : 'R =
         if typeof<JsonValue>.Equals(typeof<'R>) then
             // A requested JsonValue is the explicit tree boundary, including physical Id injection.
             let json = JsonValue.Parse row.ValueJSON
-            withPhysicalId row.Id.Value (json :> obj :?> 'R)
+            if physical then withPhysicalId row.Id.Value (json :> obj :?> 'R) else json :> obj :?> 'R
         else
-            withPhysicalId row.Id.Value (JsonValue.ParseStored<'R>(row.ValueJSON))
+            let value = JsonValue.ParseStored<'R>(row.ValueJSON)
+            if physical then withPhysicalId row.Id.Value value else value
+
+    let internal fromSQLiteDocument<'R when 'R :> obj> row = fromSQLiteDocumentCore<'R> true row
 
     [<MethodImpl(MethodImplOptions.NoInlining)>]
-    let private fromSQLiteValue<'R when 'R :> obj> (row: DbObjectRow) : 'R =
+    let private fromSQLiteValue<'R when 'R :> obj> physical (row: DbObjectRow) : 'R =
         let inline genericReinterpret (a: 'a) =
             // No allocations.
             Unsafe.As<'a, 'R>(&Unsafe.AsRef(&a))
@@ -246,19 +250,21 @@ module internal JsonFunctions =
         | OfType unativeint -> (genericReinterpret << unativeint) row.ValueJSON
 
         | _ ->
-        fromSQLiteDocument<'R> row
+        fromSQLiteDocumentCore<'R> physical row
 
-    let internal fromSQLite<'R when 'R :> obj> (row: DbObjectRow) : 'R =
+    let private fromSQLiteCore<'R when 'R :> obj> physical (row: DbObjectRow) : 'R =
         if isNull (row :> obj) then Unchecked.defaultof<'R>
         else
             if not row.Id.HasValue then raiseRowError row.ValueJSON
             if typeof<'R>.Equals(typeof<string>) then row.ValueJSON :> obj :?> 'R
-            elif typeof<'R>.IsValueType then fromSQLiteValue<'R> row
+            elif typeof<'R>.IsValueType then fromSQLiteValue<'R> physical row
             elif isNull row.ValueJSON && DBRefTypeHelpers.isFileRefManyType typeof<'R> then fromJson<'R> JsonValue.Null
             elif isNull row.ValueJSON then Unchecked.defaultof<'R>
-            else fromSQLiteDocument<'R> row
+            else fromSQLiteDocumentCore<'R> physical row
 
-    let internal fromSQLiteCaptured<'R when 'R :> obj> storageClass (row: DbObjectRow): 'R =
+    let internal fromSQLite<'R when 'R :> obj> row = fromSQLiteCore<'R> true row
+
+    let internal fromSQLiteCaptured<'R when 'R :> obj> physical storageClass (row: DbObjectRow): 'R =
         let resultType=typeof<'R>
         if row.Id.HasValue && not(isNull row.ValueJSON) && storageClass<>SQLitePCL.raw.SQLITE_TEXT &&
            (typeof<decimal>.Equals(resultType) || typeof<BigInteger>.Equals(resultType) ||
@@ -276,10 +282,10 @@ module internal JsonFunctions =
                     if UIntPtr.Size=4 then unativeint(ExactNumber.toUInt32 exact)
                     else unativeint(ExactNumber.toUInt64 exact)
                 Unsafe.As<unativeint,'R>(&unsigned)
-        else fromSQLite<'R> row
+        else fromSQLiteCore<'R> physical row
 
     /// Materializes inside a private producer; only owning values leave this call.
-    let internal fromSQLiteRow<'R when 'R :> obj> (row: SqlRow) : struct(DbObjectRow * 'R) =
+    let internal fromSQLiteResultRow<'R when 'R :> obj> physical (row: SqlRow) : struct(DbObjectRow * 'R) =
         // Deferred hydration keeps its established post-root callback order.
         let id = if row.IsDBNull(0) then Nullable() else Nullable(row.GetInt64(0))
         let hydration = if row.FieldCount > 2 && not(row.IsDBNull(2)) then row.GetString(2) else null
@@ -292,7 +298,7 @@ module internal JsonFunctions =
                 { Id = id
                   ValueJSON = if missing then null else row.GetString(1)
                   HydrationJSON = hydration }
-            struct(document, fromSQLiteCaptured<'R> storageClass document)
+            struct(document, fromSQLiteCaptured<'R> physical storageClass document)
         else
             // Stored materialization preserves the established UTF16 numeric policy.
             // SQLite may convert its text representation before any model callback.
@@ -303,4 +309,6 @@ module internal JsonFunctions =
                 elif row.CanBorrowUtf16 then JsonValue.ParseStored<'R>(row.TextUtf16(1))
                 else JsonValue.ParseStored<'R>(row.GetString(1))
             let document = { Id = id; ValueJSON = null; HydrationJSON = hydration }
-            struct(document, withPhysicalId id.Value value)
+            struct(document, if physical then withPhysicalId id.Value value else value)
+
+    let internal fromSQLiteRow<'R when 'R :> obj> row = fromSQLiteResultRow<'R> true row

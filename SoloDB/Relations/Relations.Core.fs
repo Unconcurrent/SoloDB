@@ -18,21 +18,12 @@ open RelationsEntityCascade
 open RelationsEntityApplyOps
 open RelationsDelete
 open RelationsBatchLoad
-let private relationSqlWrapKey = "relation-sql-boundary-operation-failed"
-
-let private isWrappedRelationSqlBoundaryError (ex: InvalidOperationException) =
-    not (isNull ex)
-    && not (isNull ex.Message)
-    && ex.Message.IndexOf(relationSqlWrapKey, StringComparison.Ordinal) >= 0
-
 let internal withRelationSqliteWrap (phase: string) (operation: string) (fn: unit -> 'T) : 'T =
     if String.IsNullOrWhiteSpace phase then nullArg "phase"
     if String.IsNullOrWhiteSpace operation then nullArg "operation"
     try
         fn()
     with
-    | :? InvalidOperationException as ex when isWrappedRelationSqlBoundaryError ex ->
-        raise ex
     | :? NativeSqliteException as ex when ex.SqliteErrorCode = 19 && ex.SqliteExtendedErrorCode = 2067 ->
         // SQLITE_CONSTRAINT_UNIQUE on a typed-relation INSERT/UPDATE means two rows share
         // the same [<SoloId>] typed-id value. The outer wrapper line keeps the existing
@@ -174,7 +165,7 @@ let internal applyResetMapIfAny (owner: obj) (resetMap: Dictionary<string, int64
         resetDbRefManyTrackers owner (asReadOnlyDict resetMap)
 
 let internal readPersistedManyTargetIds (tx: RelationTxContext) (descriptor: RelationDescriptor) (ownerId: int64) =
-    if ownerId <= 0L then
+    if ownerId = 0L then
         [||]
     else
         let ownerColumn, targetColumn =

@@ -29,8 +29,8 @@ let internal hasOutgoingRestrictLinkToGuardedEntity (deleteCtx: DeleteTraversalC
     ensureTransaction tx
     if String.IsNullOrWhiteSpace tableName then
         raise (ArgumentException("tableName is required.", "tableName"))
-    if entityId <= 0L then
-        raise (ArgumentOutOfRangeException("entityId", entityId, "entityId must be > 0."))
+    if entityId = 0L then
+        raise (ArgumentOutOfRangeException("entityId", entityId, "entityId must be nonzero."))
 
     let ownerTable = formatName tableName
     let rows = readMetadataByOwner tx.Connection ownerTable
@@ -130,8 +130,8 @@ let rec private applyOwnerDeletePoliciesFromRows (deleteCtx: DeleteTraversalCont
     ensureTransaction tx
     if String.IsNullOrWhiteSpace ownerTable then
         raise (ArgumentException("ownerTable is required.", "ownerTable"))
-    if ownerId <= 0L then
-        raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
+    if ownerId = 0L then
+        raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be nonzero."))
 
     ensureRelationCatalogTable tx.Connection
     let ownerTable = formatName ownerTable
@@ -202,8 +202,8 @@ and private applyTargetDeletePoliciesFromRows (deleteCtx: DeleteTraversalContext
     ensureTransaction tx
     if String.IsNullOrWhiteSpace targetTable then
         raise (ArgumentException("targetTable is required.", "targetTable"))
-    if targetId <= 0L then
-        raise (ArgumentOutOfRangeException("targetId", targetId, "targetId must be > 0."))
+    if targetId = 0L then
+        raise (ArgumentOutOfRangeException("targetId", targetId, "targetId must be nonzero."))
 
     ensureRelationCatalogTable tx.Connection
     let targetTable = formatName targetTable
@@ -279,8 +279,8 @@ and internal globalRefCountCore (tx: RelationTxContext) (targetTable: string) (t
     ensureTransaction tx
     if String.IsNullOrWhiteSpace targetTable then
         raise (ArgumentException("targetTable is required.", "targetTable"))
-    if targetId <= 0L then
-        raise (ArgumentOutOfRangeException("targetId", targetId, "targetId must be > 0."))
+    if targetId = 0L then
+        raise (ArgumentOutOfRangeException("targetId", targetId, "targetId must be nonzero."))
 
     ensureRelationCatalogTable tx.Connection
     let targetTable = formatName targetTable
