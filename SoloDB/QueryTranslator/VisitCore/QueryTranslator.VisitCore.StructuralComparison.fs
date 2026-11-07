@@ -70,7 +70,7 @@ module internal QueryStructuralRelations =
             let prepareScalar t operand value =
                 if typeof<string>.Equals t then
                     match operand with Bound _ -> value | Stored _ -> QueryTranslatorCharacters.ordinalKey value
-                elif DateTimeFunctions.isDateTimeLikeType t then DateTimeFunctions.canonicalizeForCompareOrOrder t value
+                elif DateTimeSql.isDateTimeLikeType t then DateTimeSql.canonicalizeForCompareOrOrder t value
                 else value
             let preparedScalar t operand = prepareScalar t operand (scalar t operand)
             let necessaryRange (t: Type) reversed raw bound =
@@ -79,7 +79,7 @@ module internal QueryStructuralRelations =
                     if (relation = BinaryOperator.Lt || relation = BinaryOperator.Le) <> reversed then BinaryOperator.Le
                     else BinaryOperator.Ge
                 let raw = match raw with SqlExpr.Coalesce(value,_) -> value | value -> value
-                let canonical value = if DateTimeFunctions.isDateTimeLikeType t then DateTimeFunctions.canonicalizeForCompareOrOrder t value else value
+                let canonical value = if DateTimeSql.isDateTimeLikeType t then DateTimeSql.canonicalizeForCompareOrOrder t value else value
                 let raw = canonical raw
                 ValueSome(binary BinaryOperator.Or (sqlNull raw) (binary direction raw (canonical bound)))
             let rec render shape left right onEqual =

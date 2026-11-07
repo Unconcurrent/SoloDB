@@ -119,7 +119,7 @@ module internal QueryableHelperBase =
                     [],
                     Some (SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%!.17g"); value])))
             elif JsonFunctions.consumesSqlScalar x then value
-            elif input.Carrier = SqlScalar && DateTimeFunctions.isDateTimeLikeType payload then
+            elif input.Carrier = SqlScalar && DateTimeSql.isDateTimeLikeType payload then
                 SqlExpr.FunctionCall("NULLIF", [SqlExpr.FunctionCall("json_quote", [value]); SqlExpr.Literal(SqlLiteral.String "null")])
             else jsonValue ()
         else

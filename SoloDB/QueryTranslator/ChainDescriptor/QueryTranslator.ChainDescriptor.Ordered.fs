@@ -91,10 +91,10 @@ module internal OrderedChain =
         | :? MemberExpression as memberAccess when not (isNull memberAccess.Expression) ->
             tryBuildCore adapter memberAccess.Expression
             |> Option.map (fun value ->
-                if DateTimeFunctions.isDateTimeLikeType (Utils.unwrapNullableType memberAccess.Expression.Type) then
+                if DateTimeSql.isDateTimeLikeType (Utils.unwrapNullableType memberAccess.Expression.Type) then
                     QueryProduced.consume adapter.Alias (fun value input ->
                         let value = QueryProduced.scalarValue memberAccess.Expression.Type value input
-                        DateTimeFunctions.translateGroupKeyMemberAccess value memberAccess.Expression.Type memberAccess.Member.Name) value
+                        DateTimeMembers.translateGroupKeyMemberAccess value memberAccess.Expression.Type memberAccess.Member.Name) value
                     |> QueryProduced.typed memberAccess.Type
                 else
                     match TypeSupport.OptionalMember(memberAccess.Expression.Type, memberAccess.Member.Name) with

@@ -63,7 +63,7 @@ module internal QueryStructuralShape =
         if not(payload.Equals t) then ValueSome(Payload payload)
         elif typeof<string>.Equals t || typeof<char>.Equals t || typeof<bool>.Equals t ||
              t.IsEnum || (QueryTranslatorNumeric.nativeCastType t).IsSome ||
-             (QueryTranslatorNumeric.domain t).IsSome || DateTimeFunctions.isDateTimeLikeType t then ValueSome Scalar
+             (QueryTranslatorNumeric.domain t).IsSome || DateTimeSql.isDateTimeLikeType t then ValueSome Scalar
         elif tuple t then
             let arguments = t.GetGenericArguments()
             ValueSome(Members(Array.init arguments.Length (fun index ->

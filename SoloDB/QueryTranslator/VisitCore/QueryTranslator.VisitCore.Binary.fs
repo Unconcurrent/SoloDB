@@ -106,9 +106,9 @@ module internal QueryTranslatorVisitCoreBinary =
                 let leftValue = comparable leftType left leftInput
                 let rightValue = comparable rightType right rightInput
                 let struct(leftValue, rightValue) =
-                    if DateTimeFunctions.isDateTimeLikeType leftType || DateTimeFunctions.isDateTimeLikeType rightType then
-                        DateTimeFunctions.ensureComparableDateTimeLikeTypes leftType rightType
-                        struct(DateTimeFunctions.canonicalizeForCompareOrOrder leftType leftValue, DateTimeFunctions.canonicalizeForCompareOrOrder rightType rightValue)
+                    if DateTimeSql.isDateTimeLikeType leftType || DateTimeSql.isDateTimeLikeType rightType then
+                        DateTimeSql.ensureComparableDateTimeLikeTypes leftType rightType
+                        struct(DateTimeSql.canonicalizeForCompareOrOrder leftType leftValue, DateTimeSql.canonicalizeForCompareOrOrder rightType rightValue)
                     else
                         match QueryTranslatorNumericMethods.comparison b.NodeType (if optionComparison then null else b.Method) leftType rightType with
                         | ValueSome comparison -> QueryTranslatorNumericMethods.comparableOperands comparison leftType rightType leftValue rightValue
@@ -149,13 +149,13 @@ module internal QueryTranslatorVisitCoreBinary =
             else ValueNone
         let leftDu = visitOperand left qb
         let rightDu = visitOperand right qb
-        let leftType = DateTimeFunctions.unwrapNullable left.Type
-        let rightType = DateTimeFunctions.unwrapNullable right.Type
+        let leftType = DateTimeSql.unwrapNullable left.Type
+        let rightType = DateTimeSql.unwrapNullable right.Type
         let struct(leftDu, rightDu) =
             if relationalOperator.IsSome then
-                if DateTimeFunctions.isDateTimeLikeType leftType || DateTimeFunctions.isDateTimeLikeType rightType then
-                    DateTimeFunctions.ensureComparableDateTimeLikeTypes left.Type right.Type
-                    struct(DateTimeFunctions.canonicalizeForCompareOrOrder left.Type leftDu, DateTimeFunctions.canonicalizeForCompareOrOrder right.Type rightDu)
+                if DateTimeSql.isDateTimeLikeType leftType || DateTimeSql.isDateTimeLikeType rightType then
+                    DateTimeSql.ensureComparableDateTimeLikeTypes left.Type right.Type
+                    struct(DateTimeSql.canonicalizeForCompareOrOrder left.Type leftDu, DateTimeSql.canonicalizeForCompareOrOrder right.Type rightDu)
                 elif not isAnyNull then
                     match numericalComparison with
                     | ValueSome comparison -> QueryTranslatorNumericMethods.comparableOperands comparison left.Type right.Type leftDu rightDu

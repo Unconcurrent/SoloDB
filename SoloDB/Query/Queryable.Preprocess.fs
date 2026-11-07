@@ -24,7 +24,7 @@ module internal QueryableHelperPreprocess =
     open QueryableHelperBase
 
     let private normalizeOrderKeyExpr (expr: SqlExpr) (clrType: Type) =
-        DateTimeFunctions.canonicalizeForCompareOrOrder clrType expr
+        DateTimeSql.canonicalizeForCompareOrOrder clrType expr
     let internal preprocessQuery (expression: Expression) : PreprocessedQuery array =
         let queries = ResizeArray<PreprocessedQuery>()
         let mutable expression = expression

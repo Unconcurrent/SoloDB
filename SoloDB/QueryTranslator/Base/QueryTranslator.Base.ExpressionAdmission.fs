@@ -16,5 +16,5 @@ module internal QueryTranslatorExpressionAdmission =
         expression.NodeType <> ExpressionType.Lambda && expression.NodeType <> ExpressionType.Quote
         && not(isByRefLikeType expression.Type)
         && QueryTranslatorBaseHelpers.isFullyConstant expression
-        && (match expression with :? NewExpression as created when DateTimeFunctions.isDateTimeLikeType created.Type -> false | _ -> true)
+        && (match expression with :? NewExpression as created when DateTimeSql.isDateTimeLikeType created.Type -> false | _ -> true)
         && (match expression with :? ConstantExpression as constant when isNull constant.Value -> false | _ -> true)

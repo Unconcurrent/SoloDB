@@ -17,7 +17,7 @@ module internal QueryOrderingPolicy =
     let scalar role target value =
         if typeof<string>.Equals target then
             if role = FSharp then QueryTranslatorCharacters.ordinalKey value else QueryOrderingPrimitives.cultureString (role=ObjectDefault) value
-        elif DateTimeFunctions.isDateTimeLikeType target then DateTimeFunctions.canonicalizeForCompareOrOrder target value
+        elif DateTimeSql.isDateTimeLikeType target then DateTimeSql.canonicalizeForCompareOrOrder target value
         else value
     let private normalized expression =
         SqlExpr.map (function
@@ -48,7 +48,7 @@ module internal QueryOrderingPolicy =
         let bytes =
             if typeof<string>.Equals target then prepared
             elif (QueryTranslatorNumeric.domain target).IsSome then SqlExpr.Cast(prepared,"BLOB")
-            elif binaryCarrier || (QueryTranslatorNumeric.nativeCastType target).IsSome || typeof<char>.Equals target || DateTimeFunctions.isDateTimeLikeType target then
+            elif binaryCarrier || (QueryTranslatorNumeric.nativeCastType target).IsSome || typeof<char>.Equals target || DateTimeSql.isDateTimeLikeType target then
                 QueryOrderingPrimitives.number binaryCarrier prepared
             else SqlExpr.Cast(prepared,"BLOB")
         let present = SqlExpr.FunctionCall("concat",[text "1";call "hex" bytes;text "/"])

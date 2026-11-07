@@ -13,7 +13,7 @@ module internal QueryTranslatorVisitCorePreparedCall =
             if typeof<string>.Equals m.Method.DeclaringType then
                 m.Arguments |> Seq.tryFindIndex (fun argument -> typeof<StringComparison>.Equals(argument.Type))
             elif m.Method.Name = "ToString" && not(isNull m.Object) && m.Arguments.Count > 0 &&
-                 DateTimeFunctions.supportsTemporalToStringTranslationType m.Object.Type then Some 0
+                 DateTimeSql.supportsTemporalToStringTranslationType m.Object.Type then Some 0
             else None
         match layout, qb.SourceContext.BindQueryValue with
         | Some index, ValueSome binder when isFullyConstant m.Arguments[index] && not(m.Arguments[index] :? ConstantExpression) ->

@@ -137,14 +137,14 @@ module internal QueryTranslatorVisitCoreMemberAccess =
                 if typeof<DateTimeOffset>.Equals(m.InputType) then
                     match m.Expression with
                     | :? NewExpression as ne ->
-                        match DateTimeFunctions.tryTranslateDateTimeOffsetConstructorMember m.MemberName ne (fun expr -> visitDu expr qb) with
+                        match DateTimeConstruction.tryTranslateDateTimeOffsetConstructorMember m.MemberName ne (fun expr -> visitDu expr qb) with
                         | Some value -> value
-                        | None -> DateTimeFunctions.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
-                    | _ -> DateTimeFunctions.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
-                elif typeof<DateTime>.Equals(m.InputType) then DateTimeFunctions.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
-                elif typeof<DateOnly>.Equals(m.InputType) then DateTimeFunctions.translateDateOnlyMember m.MemberName (visitDu m.Expression qb)
-                elif typeof<TimeOnly>.Equals(m.InputType) then DateTimeFunctions.translateTimeOnlyMember m.MemberName (visitDu m.Expression qb)
-                else DateTimeFunctions.translateTimeSpanMember m.MemberName (visitDu m.Expression qb)
+                        | None -> DateTimeMembers.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
+                    | _ -> DateTimeMembers.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
+                elif typeof<DateTime>.Equals(m.InputType) then DateTimeMembers.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
+                elif typeof<DateOnly>.Equals(m.InputType) then DateTimeMembers.translateDateOnlyMember m.MemberName (visitDu m.Expression qb)
+                elif typeof<TimeOnly>.Equals(m.InputType) then DateTimeMembers.translateTimeOnlyMember m.MemberName (visitDu m.Expression qb)
+                else DateTimeMembers.translateTimeSpanMember m.MemberName (visitDu m.Expression qb)
             scalar translated
         elif (typeof<int64>.Equals(m.ReturnType) && m.MemberName = "Id" && isRootParameter m.Expression)
               || (m.MemberName = "Id" && m.Expression.NodeType = ExpressionType.Parameter && (typeof<JsonSerializator.JsonValue>.Equals(m.Expression.Type) || m.Expression.Type.FullName = "SoloDatabase.MongoDB.BsonDocument")) then

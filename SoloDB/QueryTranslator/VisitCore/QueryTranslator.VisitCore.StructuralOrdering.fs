@@ -46,7 +46,7 @@ module internal QueryStructuralOrdering =
             | Unsupported custom -> QueryStructuralShape.unsupported custom
             | Available { Root = { Kind = ScalarNode } }
             | Unavailable ->
-                [{Expr=QueryProduced.value nextName produced |> DateTimeFunctions.canonicalizeForCompareOrOrder target;Direction=direction}],[]
+                [{Expr=QueryProduced.value nextName produced |> DateTimeSql.canonicalizeForCompareOrOrder target;Direction=direction}],[]
             | Available graph ->
                 let joins=ResizeArray<JoinShape>()
                 let active=HashSet<struct(int*QueryOrderingPolicy.Role)>()

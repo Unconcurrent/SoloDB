@@ -190,8 +190,8 @@ module internal QueryTranslatorVisitCoreMethodCall =
                 let token = input.Source |> ValueOption.defaultWith (fun () -> QueryProduced.treeToken qb.SourceContext.NextAlias value input)
                 SqlExpr.FunctionCall("ENUM_TO_STRING", [qb.AllocateParamExpr(TypeMetadataCache.RegisterExactName m.Object.Type); SqlExpr.FunctionCall("json", [token])]))
         | _ when m.Method.Name = "ToString" && not (isNull m.Object)
-                 && DateTimeFunctions.supportsTemporalToStringTranslationType m.Object.Type ->
-            DateTimeFunctions.translateDateTimeToStringCall
+                 && DateTimeSql.supportsTemporalToStringTranslationType m.Object.Type ->
+            DateTimeFormatting.translateDateTimeToStringCall
                 (visitDu m.Object qb)
                 m.Object
                 m.Arguments.Count

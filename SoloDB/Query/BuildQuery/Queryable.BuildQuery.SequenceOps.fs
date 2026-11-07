@@ -27,7 +27,7 @@ module internal QueryableBuildQuerySequenceOps =
     open QueryableHelperBase
 
     let private normalizeOrderKeyExpr (expr: SqlExpr) (clrType: Type) =
-        DateTimeFunctions.canonicalizeForCompareOrOrder clrType expr
+        DateTimeSql.canonicalizeForCompareOrOrder clrType expr
     let private applySelect (statements: ResizeArray<SQLSubquery>) (pendingDistinctByScalarReuse: byref<LoweredKeySelector option>) (isPostScalarProjection: byref<bool>) (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) =
         match pendingDistinctByScalarReuse with
         | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = expressionFingerprint m.Expressions.[0] ->

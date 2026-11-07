@@ -182,7 +182,7 @@ module internal QueryableBuildQueryGroupByOps =
 
     let private nullSensitiveKeyLeaf (expr: Expression) =
         let isNullable = expr.Type.IsGenericType && typedefof<Nullable<_>>.Equals(expr.Type.GetGenericTypeDefinition())
-        if isNullable || DateTimeFunctions.isDateTimeLikeType expr.Type then [expr] else []
+        if isNullable || DateTimeSql.isDateTimeLikeType expr.Type then [expr] else []
 
     let rec private collectNullSensitiveKeyParts (expr: Expression) : Expression list =
         let expr =
@@ -197,7 +197,7 @@ module internal QueryableBuildQueryGroupByOps =
             | ValueNone -> nullSensitiveKeyLeaf expr
         | :? BoundValueCallExpression as call when not(isNull call.ProjectionNames) ->
             call.Inputs |> Array.toList |> List.collect collectNullSensitiveKeyParts
-        | :? NewExpression as ne when not (DateTimeFunctions.isDateTimeLikeType ne.Type) ->
+        | :? NewExpression as ne when not (DateTimeSql.isDateTimeLikeType ne.Type) ->
             ne.Arguments |> Seq.toList |> List.collect collectNullSensitiveKeyParts
         | :? MemberInitExpression as mi ->
             let fromNew = collectNullSensitiveKeyParts mi.NewExpression
