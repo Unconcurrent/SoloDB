@@ -194,7 +194,7 @@ module internal QueryableTranslationCore =
             )
 
         // Build the inner query as a SqlSelect DU.
-        let completed = translateQuery<'T> (ref 0) ctx variables expression
+        let completed = translateQuery<'T> (HashSet<Expression>(HashIdentity.Reference)) ctx variables expression
         let innerSelect = completed.Query |> acquire
         let ownerInput = QueryTranslatorSerialization.scopeSerializationInput (Some "o") OuterLayer completed.SerializationInput
         let owner = ownerInput.PhysicalOwner

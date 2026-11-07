@@ -10,11 +10,10 @@ open Utils
 open SoloDatabase.SqlModel
 
 module internal QueryTranslatorBaseTypes =
-    let internal maxTranslationSteps = 10000
-    let internal translationStepLimitMessage =
-        "Error: Query too complex for SQL translation.\n" +
-        "Reason: Expression translation exceeded the internal step limit and may be non-terminating on this composition.\n" +
-        "Fix: Simplify the LINQ chain, split it into smaller queries, or call .AsEnumerable() before the unsupported composition."
+    let internal translationCycleMessage =
+        "Error: Query translation re-entered an unfinished expression.\n" +
+        "Reason: This expression composition does not make progress toward SQL.\n" +
+        "Fix: Remove the recursive query or expression reference."
 
     /// <summary>
     /// Represents a member access expression in a more abstract way.
@@ -230,8 +229,8 @@ module internal QueryTranslatorBaseTypes =
             AllowStringFormat: bool
             /// Original source binding for captured parameters, including carrier position.
             ParameterSources: Dictionary<ParameterExpression, ParameterSource>
-            /// <summary>Shared translation step counter for hard fail-closed non-termination protection.</summary>
-            TranslationStepCounter: int ref
+            /// Expressions on the current lowering path; completed siblings may repeat.
+            ActiveExpressions: HashSet<Expression>
             /// <summary>True when translating a WHERE predicate expression.
             /// Min/Max aggregates skip the CASE WHEN sentinel in this context,
             /// allowing SQL-native NULL propagation for owner exclusion.</summary>
@@ -249,7 +248,7 @@ module internal QueryTranslatorBaseTypes =
             | true, source -> source
             | _ -> { Alias = this.SourceAlias; Context = this.SourceContext; Value = SourceParameter }
 
-        /// Share parameters and counters while isolating subquery aliases and joins.
+        /// Share parameters and the active lowering path while isolating subquery aliases and joins.
         member internal this.ForSubquery(tableName: string, parameters: ReadOnlyCollection<ParameterExpression>, inputPosition: LayerPosition, input: QuerySerializationInput, ?subqueryRootTable: string) =
             // Record current scope's parameters with their alias before creating child scope.
             let outerAliases = Dictionary<ParameterExpression, ParameterSource>(this.ParameterSources)
@@ -271,12 +270,6 @@ module internal QueryTranslatorBaseTypes =
                 IdParameterIndex = -1
                 ParameterSources = outerAliases
                 SourceContext = context }
-
-        member internal this.StepTranslation() =
-            let next = this.TranslationStepCounter.Value + 1
-            this.TranslationStepCounter.Value <- next
-            if next > maxTranslationSteps then
-                raise (NotSupportedException translationStepLimitMessage)
 
         // Whitelisted internal accessors for cross-file visitor split boundary.
         /// Allocate a DU parameter: stores value in Variables dict, returns SqlExpr.Parameter or FunctionCall("jsonb", [Parameter]).
@@ -350,6 +343,6 @@ module internal QueryTranslatorBaseTypes =
                 ProducedHandler = ValueNone
                 AllowStringFormat = false
                 ParameterSources = sources
-                TranslationStepCounter = ref 0
+                ActiveExpressions = HashSet<Expression>(HashIdentity.Reference)
                 InPredicateContext = false
             }

@@ -70,7 +70,6 @@ module internal QueryTranslatorVisitDbRef =
                     MembershipContext = ReceiverScopedEntityMembership
                     LambdaContext = "relation-backed DBRefMany"
                     Validate = fun plan ->
-                        qb.StepTranslation()
                         if countDbRefManyDepth actualExp > Utils.maxRelationDepth then
                             raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
                         let mutable ordered = DBRefManyBuilderCore.tryGetRelationOrderByForTakeWhile sources.[plan.Root] "" "" |> ValueOption.isSome

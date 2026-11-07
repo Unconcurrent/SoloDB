@@ -34,11 +34,7 @@ module internal QueryableBuildQueryMain =
                 call.Update(null,[|call.Arguments.[0];Expression.Constant(table) :> Expression|]) :> Expression
             else base.VisitMethodCall call
 
-    let rec internal buildQuery<'T> (translationStepCounter: int ref) (sourceCtx: QueryContext) (statements: SQLSubquery ResizeArray) (e: Expression) =
-        let next = translationStepCounter.Value + 1
-        translationStepCounter.Value <- next
-        if next > maxTranslationSteps then
-            raise (NotSupportedException translationStepLimitMessage)
+    let rec internal buildQuery<'T> (activeQueries: HashSet<Expression>) (sourceCtx: QueryContext) (statements: SQLSubquery ResizeArray) (e: Expression) =
         statements.Add (emptySQLStatement () |> Simple)
 
         let mutable tableName = ""
@@ -282,7 +278,7 @@ module internal QueryableBuildQueryMain =
                             sourceCtx
                             tableName
                             statements
-                            (fun innerCtx vars expression -> translateQuery<'T> translationStepCounter innerCtx vars expression)
+                            (fun innerCtx vars expression -> translateQuery<'T> activeQueries innerCtx vars expression)
                             m |> ignore
                     | SupportedLinqMethods.All
                     | SupportedLinqMethods.Any
@@ -306,7 +302,7 @@ module internal QueryableBuildQueryMain =
                             sourceCtx
                             tableName
                             statements
-                            (fun innerCtx vars expression -> translateQuery<'T> translationStepCounter innerCtx vars expression)
+                            (fun innerCtx vars expression -> translateQuery<'T> activeQueries innerCtx vars expression)
                             m |> ignore
 
             idx <- idx + 1
@@ -331,7 +327,10 @@ module internal QueryableBuildQueryMain =
             raise (NotSupportedException("The query must contain a typed collection root."))
         rootElementType
 
-    and internal translateQuery<'T> (translationStepCounter: int ref) (sourceCtx: QueryContext) (vars: Dictionary<string, obj>) (expression: Expression) : TranslatedQuery =
-        let statements = ResizeArray<SQLSubquery>()
-        let rootElementType = buildQuery<'T> translationStepCounter sourceCtx statements expression
-        buildLayersDu rootElementType sourceCtx vars statements
+    and internal translateQuery<'T> (activeQueries: HashSet<Expression>) (sourceCtx: QueryContext) (vars: Dictionary<string, obj>) (expression: Expression) : TranslatedQuery =
+        if not(activeQueries.Add expression) then raise(NotSupportedException translationCycleMessage)
+        try
+            let statements = ResizeArray<SQLSubquery>()
+            let rootElementType = buildQuery<'T> activeQueries sourceCtx statements expression
+            buildLayersDu rootElementType sourceCtx vars statements
+        finally activeQueries.Remove expression |> ignore

@@ -210,11 +210,13 @@ module internal QueryTranslatorVisitCore =
         QueryTranslatorVisitCoreConstruction.tuple visitProduced expression qb
 
     and private visitValueCoreDu valueUse (exp: Expression) (qb: QueryBuilder) : QueryProducedValue =
-        qb.StepTranslation()
         let exp = unwrapStructCopy exp
-        match qb.ProducedHandler |> ValueOption.bind (fun handler -> handler exp) with
-        | ValueSome produced -> produced
-        | ValueNone -> visitUnhandledCoreDu valueUse exp qb
+        if not(qb.ActiveExpressions.Add exp) then raise(NotSupportedException translationCycleMessage)
+        try
+            match qb.ProducedHandler |> ValueOption.bind (fun handler -> handler exp) with
+            | ValueSome produced -> produced
+            | ValueNone -> visitUnhandledCoreDu valueUse exp qb
+        finally qb.ActiveExpressions.Remove exp |> ignore
 
     and private visitUnhandledCoreDu valueUse (exp: Expression) (qb: QueryBuilder) : QueryProducedValue =
         // Pre-expression handlers (DBRef etc.) — return DU directly via DuHandlerResult

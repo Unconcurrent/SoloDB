@@ -33,7 +33,6 @@ module internal QueryTranslatorVisitPostJoin =
     /// Indexed placement consumes the already prepared owner/property occurrence.
     let internal ensurePreparedDBRefJoin (qb: QueryBuilder) (referenceExpr: Expression) pathKey
         (prepared: struct(QueryProducedValue * JsonSerializator.JsonEqualitySupport.PathSegment list * bool)) : JoinEdge =
-        qb.StepTranslation()
         let targetType = referenceTargetType referenceExpr.Type
         let struct(reference, referencePath, onOwnerRoot) = prepared
         let relation = reference.Input.ReferenceOwner.Value
