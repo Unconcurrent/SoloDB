@@ -57,56 +57,53 @@ module internal CollectionTypeInformation =
             result
         with error -> statement.Abort(error); reraise()
 
-    // Equal encodings prove equal values; different encodings say nothing.
-    // Short-circuit the common positive case, then compare decoded JSON. The
-    // structural fallback below also handles equivalent escaped/object forms.
+    // Encoding equality is a positive shortcut; the existing tree owner
+    // compares escaped strings and object order on a semantic miss.
     let private present = "CASE WHEN jsonb_extract(value,'$.Shape')=@shape THEN 1 ELSE json_extract(value,'$.Shape')=json(@shape) END"
+    let private semantic value = JsonFunctions.treeValueFunction + "(json_extract(" + value + "),NULL,1)"
     let private equalContract left right =
-        "CASE WHEN jsonb_extract(" + left + ")=jsonb_extract(" + right + ") THEN 1 ELSE json_extract(" + left + ")=json_extract(" + right + ") END"
-    let private alternative value =
-        "json_extract(" + value + ",'$.For'),json_extract(" + value + ",'$.Identity'),json_extract(" + value + ",'$.Contract')"
+        let name value = "json_extract(jsonb_extract(" + value + "),'$.FullName')"
+        "CASE WHEN " + name left + " IS NOT " + name right + " THEN 0 WHEN jsonb_extract(" + left + ")=jsonb_extract(" + right + ") THEN 1 WHEN json_extract(" + left + ")=json_extract(" + right + ") THEN 1 ELSE " + semantic left + "=@contract END"
+    let private alternative canonical value =
+        "json_extract(" + value + ",'$.For'),json_extract(" + value + ",'$.Identity')," +
+        (if canonical then semantic(value + ",'$.Contract'") else "json_extract(" + value + ",'$.Contract')")
     let private lookupSql iterator =
-        "SELECT EXISTS(SELECT 1 FROM " + iterator + "(TypeInformation) AS saved WHERE (" + present + ") OR (" +
-        equalContract "saved.value,'$.Shape.Contract'" "@shape,'$.Contract'" +
-        " AND NOT EXISTS(SELECT " + alternative "proposed.value" + " FROM " + iterator +
-        "(@shape,'$.Alternatives') AS proposed EXCEPT SELECT " + alternative "candidate.value" + " FROM " +
-        iterator + "(saved.value,'$.Shape.Alternatives') AS candidate))) FROM SoloDBCollections WHERE Name=@name LIMIT 1"
+        let subset canonical =
+            "NOT EXISTS(SELECT " + alternative canonical "proposed.value" + " FROM " + iterator +
+            "(@shape,'$.Alternatives') AS proposed EXCEPT SELECT " + alternative canonical "candidate.value" + " FROM " +
+            iterator + "(saved.value,'$.Shape.Alternatives') AS candidate)"
+        "SELECT EXISTS(SELECT 1 FROM " + iterator + "(TypeInformation) AS saved WHERE CASE WHEN " + present +
+        " THEN 1 WHEN NOT(" + equalContract "saved.value,'$.Shape.Contract'" "@shape,'$.Contract'" +
+        ") THEN 0 ELSE CASE WHEN " + subset false + " THEN 1 ELSE " + subset true +
+        " END END) FROM SoloDBCollections WHERE Name=@name LIMIT 1"
     // JSONB iteration is optional, not a higher engine admission floor.
     let private lookupText = lookupSql "json_each"
     let private lookupBinary = lookupSql "jsonb_each"
     let private encoded (connection: NativeSqliteConnection) (description: CollectionTypeDescription) =
         let saved = Threading.Volatile.Read(&description.EncodedShape)
-        if not(isNull saved) then saved else
-        let mutable statement = connection.OpenStatement("SELECT jsonb(@shape)")
+        if not(Object.ReferenceEquals(saved,null)) then saved else
+        let mutable statement = connection.OpenStatement("SELECT jsonb(@shape)," + semantic "@shape,'$.Contract'")
         try
             statement.BindText(1,description.Shape)
             statement.StepMaintenance() |> ignore
-            let bytes = statement.Row.GetBlob(0)
+            let bytes = statement.Row.GetBlob(0),statement.Row.GetBlob(1)
             statement.Dispose()
-            let previous = Threading.Interlocked.CompareExchange(&description.EncodedShape,bytes,null)
-            if isNull previous then bytes else previous
+            let previous = Threading.Interlocked.CompareExchange(&description.EncodedShape,bytes,Unchecked.defaultof<_>)
+            if Object.ReferenceEquals(previous,null) then bytes else previous
         with error -> statement.Abort(error); reraise()
 
     let lookup (connection: NativeSqliteConnection) name (description: CollectionTypeDescription) =
         let sql = if SQLitePCL.raw.sqlite3_libversion_number() >= 3051000 then lookupBinary else lookupText
-        let bytes = encoded connection description
+        let bytes,contract = encoded connection description
         let mutable statement = connection.OpenStatement(sql)
-        let struct(exists,recorded) =
-            try
-                statement.BindBlob(1,bytes,bytes.Length)
-                statement.BindText(2,name)
-                let result = if statement.StepMaintenance() then struct(true,statement.Row.GetBoolean(0)) else struct(false,false)
-                statement.Dispose()
-                result
-            with error -> statement.Abort(error); reraise()
-        if not exists || recorded then struct(exists,recorded)
-        else
-            // Alternate legal JSON encodings and partial discovery sets take a
-            // bounded read-only semantic check through the existing JSON owner.
-            let proposed = JsonValue.Parse description.Shape
-            struct(true,read connection name |> Seq.exists(fun entry ->
-                let saved = shape entry
-                sameDeclaration proposed saved && contains proposed saved))
+        try
+            statement.BindBlob(1,bytes,bytes.Length)
+            statement.BindBlob(2,contract,contract.Length)
+            statement.BindText(3,name)
+            let result = if statement.StepMaintenance() then struct(true,statement.Row.GetBoolean(0)) else struct(false,false)
+            statement.Dispose()
+            result
+        with error -> statement.Abort(error); reraise()
 
     let private copy value = Dictionary<string,JsonValue>(fields value,StringComparer.Ordinal)
     let private pairs entry =

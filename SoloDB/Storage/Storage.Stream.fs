@@ -11,6 +11,8 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
         if isNull stream then nullArg "stream"
         StorageObjects.get stream
     let gate = state.Gate
+    let memory = stream.GetType().Equals(typeof<MemoryStream>)
+    let directRead = memory || stream.GetType().Equals(typeof<FileStream>)
     let mutable disposed = false
     let mutable zeros = Array.empty<byte>
 #if NETSTANDARD2_0
@@ -55,7 +57,9 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
                 try
                     check()
                     StorageValidation.bounds position destination.Length
-                    if destination.IsEmpty || position >= length() then StorageReadResult(0, null)
+                    // Standard streams own EOF reads. Custom streams retain their
+                    // length-before-seek contract; MemoryStream also bounds Position.
+                    if destination.IsEmpty || ((not directRead || memory && position > int64 Int32.MaxValue) && position >= length()) then StorageReadResult(0, null)
                     else
                         stream.Position <- position
 #if NETSTANDARD2_0

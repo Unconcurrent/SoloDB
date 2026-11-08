@@ -125,7 +125,8 @@ module internal QueryableHelperJoin =
                                   typeof<IQueryable>.IsAssignableFrom(expression.Type) && QueryTranslatorBaseHelpers.isFullyConstant expression ->
             queryValue(ExpressionEvaluation.evaluateExpr<obj> expression)
         | :? MethodCallExpression as call when call.Arguments.Count > 0 &&
-                                              (typeof<Queryable>.Equals(call.Method.DeclaringType) || typeof<Enumerable>.Equals(call.Method.DeclaringType)) ->
+                                              (typeof<Queryable>.Equals(call.Method.DeclaringType) || typeof<Enumerable>.Equals(call.Method.DeclaringType) ||
+                                               typeof<SearchMarker>.Equals(call.Method.DeclaringType)) ->
             nativeSequence call.Arguments[0] |> Option.map(fun source ->
                 let arguments = call.Arguments |> Seq.toArray
                 arguments[0] <- source

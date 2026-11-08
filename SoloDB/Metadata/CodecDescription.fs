@@ -52,7 +52,8 @@ type internal CollectionTypeDescription = {
     Contract: string
     Alternatives: string
     Shape: string
-    mutable EncodedShape: byte[]
+    // Immutable native shape encoding and canonical contract comparison key.
+    mutable EncodedShape: byte[] * byte[]
 }
 
 /// Shared projection for runtime discovery and compiler-supplied descriptions.

@@ -228,7 +228,8 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                         Marshal.WriteIntPtr(file, ptr, 0n)
                         Marshal.WriteIntPtr(file, 0n)
                         Interlocked.Decrement(&files) |> ignore)))
-            methodAt 1 (Io(fun file data count position -> protect 266 (fun () ->
+            methodAt 1 (Io(fun file data count position ->
+              try
                 if count < 0 then 266 else
                 StorageValidation.bounds position count
                 let state = handle file
@@ -236,26 +237,35 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                 // captured by a closure or copied through a per-handle byte array.
                 lock state.Node.Gate (fun () ->
                     let actual = StorageFiles.read state.Node position (Span<byte>(data.ToPointer(), count))
-                    if actual = count then 0 else 522))))
-            methodAt 2 (Io(fun file data count position -> protect 778 (fun () ->
+                    if actual = count then 0 else 522)
+              with error -> fail 266 error))
+            methodAt 2 (Io(fun file data count position ->
+              try
                 if count < 0 then 778 else
                 StorageValidation.bounds position count
                 let state = handle file
                 if state.Flags &&& 2 = 0 then 8 else
                 lock state.Node.Gate (fun () ->
                     state.Node.File.WriteAt(position, ReadOnlySpan<byte>(data.ToPointer(), count)) |> StorageFiles.check
-                    0))))
-            methodAt 3 (Resize(fun file length -> protect 1546 (fun () ->
+                    0)
+              with error -> fail 778 error))
+            methodAt 3 (Resize(fun file length ->
+              try
                 if length < 0L then 1546 else
                 let state = handle file
                 if state.Flags &&& 2 = 0 then 8 else
-                lock state.Node.Gate (fun () -> state.Node.File.SetLength(length) |> StorageFiles.check; 0))))
-            methodAt 4 (IntArg(fun file _ -> protect 1034 (fun () ->
+                lock state.Node.Gate (fun () -> state.Node.File.SetLength(length) |> StorageFiles.check; 0)
+              with error -> fail 1546 error))
+            methodAt 4 (IntArg(fun file _ ->
+              try
                 let state = handle file
-                lock state.Node.Gate (fun () -> state.Node.File.Flush() |> StorageFiles.check; 0))))
-            methodAt 5 (Output(fun file output -> protect 1802 (fun () ->
+                lock state.Node.Gate (fun () -> state.Node.File.Flush() |> StorageFiles.check; 0)
+              with error -> fail 1034 error))
+            methodAt 5 (Output(fun file output ->
+              try
                 let state = handle file
-                lock state.Node.Gate (fun () -> Marshal.WriteInt64(output, StorageFiles.length state.Node); 0))))
+                lock state.Node.Gate (fun () -> Marshal.WriteInt64(output, StorageFiles.length state.Node); 0)
+              with error -> fail 1802 error))
             methodAt 6 (IntArg(fun file level -> protect 3850 (fun () -> StorageFiles.lockFile (handle file) level)))
             methodAt 7 (IntArg(fun file level -> protect 2058 (fun () -> StorageFiles.unlock (handle file) level)))
             methodAt 8 (Output(fun file output -> protect 3594 (fun () -> StorageFiles.reserved (handle file) output)))
