@@ -301,7 +301,7 @@ module internal QueryTranslatorVisitCore =
                             QuerySerializationInput.Positions(array.Type, components |> Array.map snd))) components
         | ExpressionType.New ->
             let m = exp :?> NewExpression
-            match DateTimeConstruction.translateDateTimeLikeConstructor m (fun arg -> visitDu arg qb) with
+            match DateTimeConstruction.translateDateTimeLikeConstructor m qb (fun arg -> visitDu arg qb) with
             | Some translated -> QueryProduced.typed m.Type translated
             | None when isTuple m.Type -> tupleProduced m qb
             | None ->

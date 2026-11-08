@@ -313,6 +313,7 @@
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.DateTimeConstruction.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.DateTimeMembers.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.DateTimeFormatting.fs" />
+    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.DateTimeRuntime.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.MemberAccess.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Index.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.StructuralClosure.fs" />

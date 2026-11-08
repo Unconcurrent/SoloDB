@@ -158,6 +158,10 @@ module internal QueryTranslatorVisitCoreMethodCall =
         | OfShape2 null OfString "IndexOf" null OfStringComparison (arg, v, comparisonExpr) ->
             let ic = isIgnoreCase (ExpressionEvaluation.evaluateExpr<StringComparison> comparisonExpr)
             SqlExpr.Binary(SqlExpr.FunctionCall("INSTR", [emitStringOperandDu qb ic arg; emitStringOperandDu qb ic v]), BinaryOperator.Sub, SqlExpr.Literal(SqlLiteral.Integer 1L))
+        | _ when m.Method.IsStatic && m.Method.Name = "Parse" && m.Arguments.Count = 1 &&
+                 typeof<string>.Equals m.Arguments[0].Type &&
+                 (DateTimeSql.isDateTimeLikeType m.Method.DeclaringType || typeof<decimal>.Equals m.Method.DeclaringType) ->
+            SqlExpr.FunctionCall("TEMPORAL_PARSE",[SqlExpr.Literal(SqlLiteral.Integer(DateTimeSql.scalarKind m.Method.DeclaringType));visitDu m.Arguments[0] qb])
         | OfShape0 null null "Parse" arg when
             typeof<SByte>.Equals(m.Method.DeclaringType) || typeof<Byte>.Equals(m.Method.DeclaringType) || typeof<Int16>.Equals(m.Method.DeclaringType) || typeof<UInt16>.Equals(m.Method.DeclaringType) ||
             typeof<Int32>.Equals(m.Method.DeclaringType) || typeof<UInt32>.Equals(m.Method.DeclaringType) || typeof<Int64>.Equals(m.Method.DeclaringType) || typeof<UInt64>.Equals(m.Method.DeclaringType) ||
@@ -191,11 +195,36 @@ module internal QueryTranslatorVisitCoreMethodCall =
                 SqlExpr.FunctionCall("ENUM_TO_STRING", [qb.AllocateParamExpr(TypeMetadataCache.RegisterExactName m.Object.Type); SqlExpr.FunctionCall("json", [token])]))
         | _ when m.Method.Name = "ToString" && not (isNull m.Object)
                  && DateTimeSql.supportsTemporalToStringTranslationType m.Object.Type ->
-            DateTimeFormatting.translateDateTimeToStringCall
-                (visitDu m.Object qb)
-                m.Object
-                m.Arguments.Count
-                (if m.Arguments.Count >= 1 then Some m.Arguments.[0] else None)
+            let format () =
+                if m.Arguments.Count = 0 then SqlExpr.Literal SqlLiteral.Null
+                elif m.Arguments.Count >= 1 && typeof<string>.Equals m.Arguments[0].Type then visitDu m.Arguments[0] qb
+                else raise(NotSupportedException "This temporal formatting overload needs its actual format-provider operation.")
+            let constructed =
+                match m.Object with
+                | :? NewExpression as created -> DateTimeConstruction.tryTranslateDateTimeOffsetFormat created format qb (fun value -> visitDu value qb)
+                | :? MethodCallExpression as parsed when typeof<DateTimeOffset>.Equals parsed.Type &&
+                      parsed.Method.Name = "Parse" && parsed.Arguments.Count = 1 && typeof<string>.Equals parsed.Arguments[0].Type ->
+                    Some(SqlExpr.FunctionCall("DTO_PARSE_FORMAT",[visitDu parsed.Arguments[0] qb;format()]))
+                | _ -> None
+            let scalarFormat =
+                if typeof<TimeSpan>.Equals m.Object.Type then true
+                elif typeof<DateOnly>.Equals m.Object.Type || typeof<TimeOnly>.Equals m.Object.Type then
+                    if m.Arguments.Count = 0 then true else
+                    match m.Arguments[0] with
+                    | :? ConstantExpression as value when typeof<string>.Equals value.Type ->
+                        let text = value.Value :?> string
+                        String.IsNullOrEmpty text || text = "o" || text = "O" || text = "r" || text = "R"
+                    | _ -> false
+                else false
+            match constructed with
+            | Some formatted -> formatted
+            | None when not scalarFormat &&
+                        (m.Arguments.Count = 0 || m.Arguments[0] :? ConstantExpression) ->
+                DateTimeFormatting.translateDateTimeToStringCall
+                    (visitDu m.Object qb) m.Object m.Arguments.Count (if m.Arguments.Count = 0 then None else Some m.Arguments[0])
+            | None ->
+                let receiver = visitDu m.Object qb
+                SqlExpr.FunctionCall("TEMPORAL_FORMAT",[SqlExpr.Literal(SqlLiteral.Integer(DateTimeSql.scalarKind m.Object.Type));receiver;format();SqlExpr.Literal SqlLiteral.Null])
         | _ when m.Method.Name = "ToUnixTimeMilliseconds" && not (isNull m.Object) && typeof<DateTimeOffset>.Equals(m.Object.Type) ->
             visitDu m.Object qb
         | _ ->

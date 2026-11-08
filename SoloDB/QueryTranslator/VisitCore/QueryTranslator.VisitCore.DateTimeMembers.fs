@@ -28,6 +28,14 @@ module internal DateTimeMembers =
         | "Millisecond" -> castInt (SqlExpr.Binary(ms, BinaryOperator.Mod, ms1000))
         | "DayOfWeek"   -> strftimeInt "%w"
         | "DayOfYear"   -> strftimeInt "%j"
+        | "Ticks" | "Kind" | "Date" | "TimeOfDay" when typeof<DateTime>.Equals clrType ->
+            SqlExpr.FunctionCall("TEMPORAL_PART",[intLit 0L;SqlExpr.Literal(SqlLiteral.String memberName);rawExpr])
+        | "UtcTicks" | "UtcDateTime" | "LocalDateTime" when typeof<DateTimeOffset>.Equals clrType ->
+            SqlExpr.FunctionCall("TEMPORAL_PART",[intLit 1L;SqlExpr.Literal(SqlLiteral.String memberName);rawExpr])
+        | "Microsecond" when typeof<DateTime>.Equals clrType ->
+            div (modExpr (SqlExpr.Binary(rawExpr,BinaryOperator.BitwiseAnd,mask)) ticksMs) (intLit 10L)
+        | "Nanosecond" when typeof<DateTime>.Equals clrType ->
+            mul (modExpr (SqlExpr.Binary(rawExpr,BinaryOperator.BitwiseAnd,mask)) (intLit 10L)) (intLit 100L)
         | other ->
             raise (NotSupportedException(
                 $"DateTime/DateTimeOffset member access '.{other}' is not supported in SQL translation. " +
@@ -68,6 +76,8 @@ module internal DateTimeMembers =
         | "Minute"      -> modInt (divInt rawExpr ms60000) ms60
         | "Second"      -> modInt (divInt rawExpr ms1000) ms60
         | "Millisecond" -> modInt rawExpr ms1000
+        | "Ticks" -> mul rawExpr ticksMs
+        | "Microsecond" | "Nanosecond" -> zero
         | _ ->
             raise (NotSupportedException(
                 $"TimeOnly member access '.{memberName}' is not supported in SQL translation. " +
@@ -86,6 +96,10 @@ module internal DateTimeMembers =
         | "Minutes"           -> modInt (divInt rawExpr ms60000) ms60
         | "Seconds"           -> modInt (divInt rawExpr ms1000) ms60
         | "Milliseconds"      -> modInt rawExpr ms1000
+        | "Ticks"             -> mul rawExpr ticksMs
+        | "Microseconds" | "Nanoseconds" -> zero
+        | "TotalMicroseconds" -> mul (castReal rawExpr) (intLit 1000L)
+        | "TotalNanoseconds" -> mul (castReal rawExpr) (intLit 1000000L)
         | _ ->
             raise (NotSupportedException(
                 $"TimeSpan member access '.{memberName}' is not supported in SQL translation. " +

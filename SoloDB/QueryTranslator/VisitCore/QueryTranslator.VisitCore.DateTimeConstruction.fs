@@ -6,20 +6,13 @@ open SoloDatabase.SqlModel
 open SoloDatabase.QueryTranslatorBaseHelpers
 open Utils
 open DateTimeSql
+open SoloDatabase.QueryTranslatorBaseTypes
 
 /// Temporal construction preserves the established stored scalar representation.
 module internal DateTimeConstruction =
 
-    let private tryEval<'T> (expr: Expression) =
-        if isFullyConstant expr then Some(ExpressionEvaluation.evaluateExpr<'T> expr) else None
-
     let private unsupported (typeName: string) (argCount: int) =
         raise (NotSupportedException($"new {typeName} with signature of {argCount} argument(s) is not supported in SQL translation."))
-
-    let private constKind (expr: Expression) =
-        match tryEval<DateTimeKind> expr with
-        | Some k -> k
-        | None -> raise (NotSupportedException("DateTime constructor DateTimeKind argument must be a compile-time constant."))
 
     let private kindFlag (kind: DateTimeKind) =
         match kind with
@@ -38,17 +31,6 @@ module internal DateTimeConstruction =
             SqlExpr.CaseExpr((eq kind zero,zero),
                 [eq kind (intLit 1L),intLit(kindFlag DateTimeKind.Utc)
                  eq kind (intLit 2L),intLit(kindFlag DateTimeKind.Local)],Some nullLit)
-
-    let private dtoDateTimeMessage =
-        "DateTimeOffset(DateTime[, offset]) supported only for UTC DateTime with zero offset, or constant Unspecified DateTime with TimeSpan.Zero."
-
-    let private requireZeroOffset (offsetExpr: Expression option) =
-        match offsetExpr with
-        | None -> ()
-        | Some e ->
-            match tryEval<TimeSpan> e with
-            | Some ts when ts = TimeSpan.Zero -> ()
-            | _ -> raise (NotSupportedException(dtoDateTimeMessage))
 
     let private translateDateTimeConstructorToTicks (ne: NewExpression) (visitArg: Expression -> SqlExpr) =
         let arg i = visitArg ne.Arguments.[i]
@@ -85,35 +67,54 @@ module internal DateTimeConstruction =
     let private unixMsFromDateTimeTicks (ticks: SqlExpr) =
         div (sub (SqlExpr.Binary(ticks, BinaryOperator.BitwiseAnd, mask)) epochTk) ticksMs
 
-    let private translateDateTimeOffsetConstructor (ne: NewExpression) (visitArg: Expression -> SqlExpr) =
+    let private literalZeroOffset (value: Expression option) =
+        match value with
+        | None -> true
+        | Some(:? ConstantExpression as value) -> unbox<TimeSpan> value.Value = TimeSpan.Zero
+        | Some(:? MemberExpression as value) -> isNull value.Expression && value.Member.DeclaringType = typeof<TimeSpan> && value.Member.Name = "Zero"
+        | _ -> false
+
+    let private literalUtc (value: Expression) =
+        match value with
+        | :? NewExpression as created when typeof<DateTime>.Equals created.Type && created.Arguments.Count > 1 ->
+            match created.Arguments[created.Arguments.Count-1] with
+            | :? ConstantExpression as kind when typeof<DateTimeKind>.Equals kind.Type -> unbox<DateTimeKind> kind.Value = DateTimeKind.Utc
+            | _ -> false
+        | :? ConstantExpression as value when typeof<DateTime>.Equals value.Type -> (unbox<DateTime> value.Value).Kind = DateTimeKind.Utc
+        | _ -> false
+
+    let internal usesStoredOffsetFormat (created: NewExpression) =
+        typeof<DateTimeOffset>.Equals created.Type &&
+        (created.Arguments.Count = 1 || created.Arguments.Count = 2 && literalZeroOffset(Some created.Arguments[1])) &&
+        literalUtc created.Arguments[0]
+
+    let private utcDateArgument (value: Expression) visitArg =
+        match value with
+        | :? NewExpression as created -> unixMsFromDateTimeTicks(translateDateTimeConstructorToTicks created visitArg)
+        | :? ConstantExpression as value -> intLit(DateTimeOffset(unbox<DateTime> value.Value).ToUnixTimeMilliseconds())
+        | _ -> invalidOp "A literal UTC constructor argument is required."
+
+    let private originalOffset (qb: QueryBuilder) (visitArg: Expression -> SqlExpr) (expression: Expression) =
+        match expression with
+        | :? NewExpression as created when typeof<TimeSpan>.Equals created.Type && created.Arguments.Count = 1 && typeof<int64>.Equals created.Arguments[0].Type ->
+            visitArg created.Arguments[0]
+        | _ when isFullyConstant expression || (qb.SourceContext.BindQueryValue |> ValueOption.exists(fun binder -> binder.IsValue expression)) ->
+            let ticks = BoundValueCallExpression([|expression|],typeof<int64>,Func<obj array,obj>(fun values -> box((unbox<TimeSpan> values[0]).Ticks)))
+            visitArg ticks
+        | _ -> mul (visitArg expression) ticksMs
+
+    let private translateDateTimeOffsetConstructor (ne: NewExpression) (qb: QueryBuilder) (visitArg: Expression -> SqlExpr) =
         let arg i = visitArg ne.Arguments.[i]
         let dtoFromParts y m d h mi s ms offsetExpr =
             let dtTicks = add (dateTicksUnchecked y m d) (timeTicks h mi s ms)
             let offsetMs = offsetMsFromTimeSpanExpr offsetExpr visitArg
             whenValid (all [ validDate y m d; validTimeOfDay h mi s ms; validOffsetMs offsetMs ]) (sub (unixMsFromDateTimeTicks dtTicks) offsetMs)
-        let dtoFromDateTimeArg (dtArg: Expression) (offsetArg: Expression option) =
-            match dtArg with
-            | :? NewExpression as dtNe when typeof<DateTime>.Equals(dtNe.Type) ->
-                let explicitKind =
-                    if dtNe.Arguments.Count >= 2 && typeof<DateTimeKind>.Equals(dtNe.Arguments.[dtNe.Arguments.Count - 1].Type) then
-                        Some (constKind dtNe.Arguments.[dtNe.Arguments.Count - 1])
-                    else None
-                match explicitKind with
-                | Some DateTimeKind.Utc ->
-                    requireZeroOffset offsetArg
-                    unixMsFromDateTimeTicks (translateDateTimeConstructorToTicks dtNe visitArg)
-                | _ ->
-                    raise (NotSupportedException(dtoDateTimeMessage))
-            | _ ->
-                match tryEval<DateTime> dtArg with
-                | Some dt when dt.Kind = DateTimeKind.Utc ->
-                    requireZeroOffset offsetArg
-                    intLit (DateTimeOffset(dt).ToUnixTimeMilliseconds())
-                | Some dt when dt.Kind = DateTimeKind.Unspecified ->
-                    requireZeroOffset offsetArg
-                    intLit (DateTimeOffset(dt, TimeSpan.Zero).ToUnixTimeMilliseconds())
-                | _ ->
-                    raise (NotSupportedException(dtoDateTimeMessage))
+        let dtoFromDateTimeArg dtArg offsetArg =
+            if literalUtc dtArg && literalZeroOffset offsetArg then utcDateArgument dtArg visitArg else
+            let raw = visitArg dtArg
+            let offset = offsetArg |> Option.map (originalOffset qb visitArg) |> Option.defaultValue zero
+            let mode = if offsetArg.IsSome then 1L else 0L
+            SqlExpr.FunctionCall("DTO_CLOCK_PART",[intLit mode;raw;offset;SqlExpr.Literal(SqlLiteral.String "Value")])
 
         match ne.Arguments.Count with
         | 1 when typeof<DateTime>.Equals(ne.Arguments.[0].Type) -> dtoFromDateTimeArg ne.Arguments.[0] None
@@ -125,7 +126,7 @@ module internal DateTimeConstruction =
         | 8 -> dtoFromParts (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5) (arg 6) ne.Arguments.[7]
         | n -> unsupported "DateTimeOffset" n
 
-    let internal tryTranslateDateTimeOffsetConstructorMember (memberName: string) (ne: NewExpression) (visitArg: Expression -> SqlExpr) : SqlExpr option =
+    let internal tryTranslateDateTimeOffsetConstructorMember (memberName: string) (ne: NewExpression) (qb: QueryBuilder) (visitArg: Expression -> SqlExpr) : SqlExpr option =
         let arg i = visitArg ne.Arguments.[i]
         let translateOffsetMemberFromUnixMs unixMs =
             let sec = unixSec unixMs
@@ -144,39 +145,52 @@ module internal DateTimeConstruction =
         let fromLocalTicks localTicks = translateOffsetMemberFromUnixMs (unixMsFromDateTimeTicks localTicks)
         let fromDateParts y m d h mi s ms offsetExpr =
             let localTicks = add (dateTicksUnchecked y m d) (timeTicks h mi s ms)
-            let offsetMs = offsetMsFromTimeSpanExpr offsetExpr visitArg
-            whenValid (all [ validDate y m d; validTimeOfDay h mi s ms; validOffsetMs offsetMs ]) (fromLocalTicks localTicks)
-        let fromDateTimeArg (dtArg: Expression) (offsetArg: Expression option) =
-            match dtArg with
-            | :? NewExpression as dtNe when typeof<DateTime>.Equals(dtNe.Type) ->
-                let explicitKind =
-                    if dtNe.Arguments.Count >= 2 && typeof<DateTimeKind>.Equals(dtNe.Arguments.[dtNe.Arguments.Count - 1].Type) then
-                        Some (constKind dtNe.Arguments.[dtNe.Arguments.Count - 1])
-                    else None
-                match explicitKind with
-                | Some DateTimeKind.Utc ->
-                    requireZeroOffset offsetArg
-                    fromLocalTicks (translateDateTimeConstructorToTicks dtNe visitArg)
-                | _ -> raise (NotSupportedException(dtoDateTimeMessage))
-            | _ ->
-                match tryEval<DateTime> dtArg with
-                | Some dt when dt.Kind = DateTimeKind.Utc ->
-                    requireZeroOffset offsetArg
-                    translateOffsetMemberFromUnixMs (intLit (DateTimeOffset(dt).ToUnixTimeMilliseconds()))
-                | Some dt when dt.Kind = DateTimeKind.Unspecified ->
-                    requireZeroOffset offsetArg
-                    translateOffsetMemberFromUnixMs (intLit (DateTimeOffset(dt, TimeSpan.Zero).ToUnixTimeMilliseconds()))
-                | _ -> raise (NotSupportedException(dtoDateTimeMessage))
+            if List.contains memberName ["Year";"Month";"Day";"Hour";"Minute";"Second";"Millisecond";"DayOfWeek";"DayOfYear"] then
+                let offsetMs = offsetMsFromTimeSpanExpr offsetExpr visitArg
+                whenValid (all [ validDate y m d; validTimeOfDay h mi s ms; validOffsetMs offsetMs ]) (fromLocalTicks localTicks)
+            else
+                let offset = originalOffset qb visitArg offsetExpr
+                let clock = whenValid (andAlso (validDate y m d) (validTimeOfDay h mi s ms)) localTicks
+                SqlExpr.FunctionCall("DTO_CLOCK_PART",[intLit 2L;clock;offset;SqlExpr.Literal(SqlLiteral.String memberName)])
+        let fromDateTimeArg dtArg offsetArg =
+            if literalUtc dtArg && literalZeroOffset offsetArg &&
+               List.contains memberName ["Year";"Month";"Day";"Hour";"Minute";"Second";"Millisecond";"DayOfWeek";"DayOfYear"] then
+                translateOffsetMemberFromUnixMs(utcDateArgument dtArg visitArg)
+            else
+            let raw = visitArg dtArg
+            let offset = offsetArg |> Option.map (originalOffset qb visitArg) |> Option.defaultValue zero
+            SqlExpr.FunctionCall("DTO_CLOCK_PART",[intLit(if offsetArg.IsSome then 1L else 0L);raw;offset;SqlExpr.Literal(SqlLiteral.String memberName)])
 
         match ne.Arguments.Count with
         | 1 when typeof<DateTime>.Equals(ne.Arguments.[0].Type) -> Some (fromDateTimeArg ne.Arguments.[0] None)
         | 2 when typeof<DateTime>.Equals(ne.Arguments.[0].Type) -> Some (fromDateTimeArg ne.Arguments.[0] (Some ne.Arguments.[1]))
         | 2 when typeof<int64>.Equals(ne.Arguments.[0].Type) ->
-            let offsetMs = offsetMsFromTimeSpanExpr ne.Arguments.[1] visitArg
-            Some (whenValid (validOffsetMs offsetMs) (fromLocalTicks (arg 0)))
+            if List.contains memberName ["Year";"Month";"Day";"Hour";"Minute";"Second";"Millisecond";"DayOfWeek";"DayOfYear"] then
+                let ticks = arg 0
+                let offset = arg 1
+                Some(whenValid (validOffsetMs offset) (fromLocalTicks ticks))
+            else Some(SqlExpr.FunctionCall("DTO_CLOCK_PART",[intLit 2L;arg 0;originalOffset qb visitArg ne.Arguments[1];SqlExpr.Literal(SqlLiteral.String memberName)]))
         | 7 -> Some (fromDateParts (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5) zero ne.Arguments.[6])
         | 8 ->
             Some (fromDateParts (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5) (arg 6) ne.Arguments.[7])
+        | _ -> None
+
+    let internal tryTranslateDateTimeOffsetFormat (ne: NewExpression) (format: unit -> SqlExpr) (qb: QueryBuilder) visitArg =
+        if not(typeof<DateTimeOffset>.Equals ne.Type) || usesStoredOffsetFormat ne then None else
+        match ne.Arguments.Count with
+        | 1 when typeof<DateTime>.Equals ne.Arguments[0].Type ->
+            Some(SqlExpr.FunctionCall("DTO_CLOCK_FORMAT",[zero;visitArg ne.Arguments[0];zero;format()]))
+        | 2 when typeof<DateTime>.Equals ne.Arguments[0].Type ->
+            Some(SqlExpr.FunctionCall("DTO_CLOCK_FORMAT",[intLit 1L;visitArg ne.Arguments[0];originalOffset qb visitArg ne.Arguments[1];format()]))
+        | 2 when typeof<int64>.Equals ne.Arguments[0].Type ->
+            Some(SqlExpr.FunctionCall("DTO_CLOCK_FORMAT",[intLit 2L;visitArg ne.Arguments[0];originalOffset qb visitArg ne.Arguments[1];format()]))
+        | 7 | 8 ->
+            let args = ne.Arguments |> Seq.mapi(fun index expression ->
+                if index = ne.Arguments.Count-1 then originalOffset qb visitArg expression else visitArg expression) |> Seq.toArray
+            let ms = if args.Length = 8 then args[6] else zero
+            let clock = add (dateTicksUnchecked args[0] args[1] args[2]) (timeTicks args[3] args[4] args[5] ms)
+            let clock = whenValid (andAlso (validDate args[0] args[1] args[2]) (validTimeOfDay args[3] args[4] args[5] ms)) clock
+            Some(SqlExpr.FunctionCall("DTO_CLOCK_FORMAT",[intLit 2L;clock;args[args.Length-1];format()]))
         | _ -> None
 
     let private translateDateOnlyConstructor (ne: NewExpression) (visitArg: Expression -> SqlExpr) =
@@ -209,9 +223,9 @@ module internal DateTimeConstruction =
         | 5 -> add (add (mul (arg 0) ms86400000) (add (add (mul (arg 1) ms3600000) (mul (arg 2) ms60000)) (mul (arg 3) ms1000))) (arg 4)
         | n -> unsupported "TimeSpan" n
 
-    let internal translateDateTimeLikeConstructor (ne: NewExpression) (visitArg: Expression -> SqlExpr) : SqlExpr option =
+    let internal translateDateTimeLikeConstructor (ne: NewExpression) (qb: QueryBuilder) (visitArg: Expression -> SqlExpr) : SqlExpr option =
         if typeof<DateTime>.Equals(ne.Type) then Some (translateDateTimeConstructorToTicks ne visitArg)
-        elif typeof<DateTimeOffset>.Equals(ne.Type) then Some (translateDateTimeOffsetConstructor ne visitArg)
+        elif typeof<DateTimeOffset>.Equals(ne.Type) then Some (translateDateTimeOffsetConstructor ne qb visitArg)
         elif typeof<DateOnly>.Equals(ne.Type) then Some (translateDateOnlyConstructor ne visitArg)
         elif typeof<TimeOnly>.Equals(ne.Type) then Some (translateTimeOnlyConstructor ne visitArg)
         elif typeof<TimeSpan>.Equals(ne.Type) then Some (translateTimeSpanConstructor ne visitArg)

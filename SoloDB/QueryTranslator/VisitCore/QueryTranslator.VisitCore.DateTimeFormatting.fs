@@ -36,13 +36,25 @@ module internal DateTimeFormatting =
                 // 1. Backslash escape: next char is literal
                 tokens.Add(Literal(string fmt.[pos + 1]))
                 pos <- pos + 2
-            elif ch = '\'' then
-                // 2. Quoted literal block
-                let close =
-                    let idx = fmt.IndexOf('\'', pos + 1)
-                    if idx < 0 then fmt.Length else idx
-                tokens.Add(Literal(fmt.Substring(pos + 1, close - (pos + 1))))
-                pos <- close + 1
+            elif ch = '\'' || ch = '"' then
+                let quote = ch
+                let text = System.Text.StringBuilder()
+                pos <- pos + 1
+                let mutable closed = false
+                while pos < fmt.Length && not closed do
+                    if fmt[pos] = quote then
+                        closed <- true
+                        pos <- pos + 1
+                    elif fmt[pos] = '\\' then
+                        if pos + 1 >= fmt.Length then raise(FormatException "The quoted format literal is incomplete.")
+                        text.Append(fmt[pos+1]) |> ignore
+                        pos <- pos + 2
+                    else
+                        text.Append(fmt[pos]) |> ignore
+                        pos <- pos + 1
+                if not closed then raise(FormatException "The quoted format literal is incomplete.")
+                tokens.Add(Literal(text.ToString()))
+            elif ch = '\\' then raise(FormatException "The format escape is incomplete.")
             elif ch = '/' || ch = ':' then
                 // 3. Culture separators → literal
                 tokens.Add(Literal(string ch))
@@ -278,7 +290,7 @@ module internal DateTimeFormatting =
 
     /// Translate DateTime/DateTimeOffset .ToString(fmt) to a SQL string expression.
     /// rawExpr: the raw stored SqlExpr for the DateTime/DateTimeOffset column.
-    /// mode: FromEpoch (with CLR type) or FromIsoString (for new DateTime(y,m,d) receiver).
+    /// mode selects the stored epoch, day number or time-of-day scalar.
     /// fmt: the resolved format string (null/empty treated as "G").
     let internal translateDateTimeToString (rawExpr: SqlExpr) (mode: DateTimeTranslationMode) (fmt: string) : SqlExpr =
         // null/empty format → treat as "G" (matches .NET .ToString("", InvariantCulture) = general format)
@@ -308,6 +320,22 @@ module internal DateTimeFormatting =
             Some(ExpressionEvaluation.evaluateExpr<string> fmtExpr)
         else
             None
+
+    /// Dynamic formats share the literal formatter's invariant scalar policy.
+    let internal runtimeFormat mode fmt hasOffset =
+        let fmt = if String.IsNullOrEmpty fmt then "G" else fmt
+        let tokens =
+            if fmt.Length = 1 && standardSpecifierSet.Contains fmt[0] then tokenize(expandStandardSpecifier fmt[0])
+            else tokenize fmt
+        validateTemporalFormatTokens fmt tokens mode
+        tokens |> List.map(function
+            | Specifier('z',count) when not hasOffset ->
+                dispatchToken (Specifier('z',count)) nullLit mode |> ignore
+                ""
+            | Specifier(character,1) -> "%" + string character
+            | Specifier(character,count) -> System.String(character,count)
+            | Literal text -> "'" + text.Replace("\\","\\\\").Replace("'","\\'") + "'")
+        |> String.concat ""
 
     /// Unified DateTime.ToString→SQL translation shared by MethodCall.fs and GroupByOps.fs.
     let internal translateDateTimeToStringCall

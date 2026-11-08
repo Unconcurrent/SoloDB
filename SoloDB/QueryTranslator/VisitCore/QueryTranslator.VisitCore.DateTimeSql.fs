@@ -108,7 +108,16 @@ module internal DateTimeSql =
 
     let internal supportsTemporalToStringTranslationType (t: Type) =
         let u = unwrapNullable t
-        typeof<DateTime>.Equals(u) || typeof<DateTimeOffset>.Equals(u) || typeof<DateOnly>.Equals(u) || typeof<TimeOnly>.Equals(u)
+        typeof<DateTime>.Equals(u) || typeof<DateTimeOffset>.Equals(u) || typeof<DateOnly>.Equals(u) || typeof<TimeOnly>.Equals(u) || typeof<TimeSpan>.Equals(u)
+
+    let internal scalarKind (target: Type) =
+        if typeof<DateTime>.Equals target then 0L
+        elif typeof<DateTimeOffset>.Equals target then 1L
+        elif typeof<DateOnly>.Equals target then 2L
+        elif typeof<TimeOnly>.Equals target then 3L
+        elif typeof<TimeSpan>.Equals target then 4L
+        elif typeof<decimal>.Equals target then 5L
+        else invalidArg "target" "The type has no temporal scalar representation."
 
     let internal daysBeforeMonth (month: SqlExpr) =
         let branch m days = eq month (intLit m), intLit days
