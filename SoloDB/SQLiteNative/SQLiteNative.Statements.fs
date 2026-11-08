@@ -147,9 +147,19 @@ type internal NativePreparedStatement(database: NativeDatabase, handle: sqlite3_
         capture.Capture(input)
         capture :> INativeArgumentBinding
     member _.ClearCapture() =
+        if not(isNull(box bindingTarget)) then bindingTarget.ClearOperations()
         if not (isNull (box compiledCapture)) then (compiledCapture :> INativeArgumentBinding).Clear()
         if not (isNull (box dynamicCapture)) then dynamicCapture.Clear()
         match typedCapture with :? INativeArgumentBinding as capture -> capture.Clear() | _ -> ()
+    member _.QueryFrame = if isNull(box bindingTarget) then null else bindingTarget.QueryFrame
+    member _.BeginValueBinding() =
+        if not(isNull(box bindingTarget)) then bindingTarget.ClearOperations()
+    member _.BindValue(ordinal,value: obj) =
+        match value with
+        | :? NativeQueryEquality ->
+            if isNull slots then initializeParameters()
+            bindingTarget.BindValue(ordinal,value)
+        | _ -> database.Check(NativeParameterBinding.bind handle ordinal value)
     member _.RowVersion = rowVersion
     member _.AdvanceRow() = rowVersion <- rowVersion + 1L
     member _.ObserveResultShape() =

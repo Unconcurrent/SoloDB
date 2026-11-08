@@ -3,12 +3,26 @@ namespace SoloDatabase
 open System
 open System.Buffers
 open System.Globalization
+open System.Linq.Expressions
 open System.Runtime.Serialization
 open Microsoft.FSharp.NativeInterop
 open SoloDatabase.RawSqliteFunctions
 open SoloDatabase.SqlModel
 
 #nowarn "9"
+
+[<Sealed>]
+type internal FixedStringOrderKeyExpression(value: Expression, ordinal: Expression) =
+    inherit Expression()
+    member _.Value = value
+    member _.Ordinal = ordinal
+    override _.NodeType = ExpressionType.Extension
+    override _.Type = typeof<string>
+    override this.VisitChildren(visitor: ExpressionVisitor) =
+        let selected = visitor.Visit value
+        let operation = visitor.Visit ordinal
+        if Object.ReferenceEquals(selected,value) && Object.ReferenceEquals(operation,ordinal) then this :> Expression
+        else FixedStringOrderKeyExpression(selected,operation) :> Expression
 
 /// Unary primitive sort bytes never inspect a model or compare a pair of values.
 module internal QueryOrderingPrimitives =
@@ -37,6 +51,9 @@ module internal QueryOrderingPrimitives =
         finally ArrayPool<char>.Shared.Return chars
 
     let register (connection: NativeSqliteConnection) =
+        connection.RegisterManagedScalar(NativeQueryEquality.FunctionName,3,RawScalarFunc(fun context values ->
+            let text (value: SqliteRawValue) = if value.IsNull then "null" else value.CopyToString()
+            context.SetInt32(if connection.StatementCache.QueryEqual(values[0].GetInt32(),text values[1],text values[2]) then 1 else 0)),SqliteFunctionFlags.None)
         connection.RegisterScalar("ORDER_NUMBER",2,RawScalarFunc(fun context values ->
             let floating = values[0].GetInt32() = 1
             let encoded =

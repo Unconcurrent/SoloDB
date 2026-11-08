@@ -58,7 +58,10 @@ type internal ModelMetadata private () =
         TypeMetadataCache.Register(owner,fun metadata -> { metadata with SequenceElement = MetadataValue.generated element })
 
     static member RegisterComparer<'T>() =
-        TypeMetadataCache.Register(typeof<'T>,fun metadata -> { metadata with EqualityComparer = MetadataValue.generated (box EqualityComparer<'T>.Default) })
+        TypeMetadataCache.Register(typeof<'T>,fun metadata ->
+            { metadata with EqualityComparer = MetadataValue.generated (box EqualityComparer<'T>.Default)
+                            OrderingComparer = MetadataValue.generated (box Comparer<'T>.Default)
+                            EqualityOperation = MetadataValue.generated (ModelMetadata.Equality<'T>()) })
 
     static member private Members(owner: Type) =
         TypeMetadataCache.Discover(owner,(fun metadata -> metadata.MemberTypes),
@@ -167,11 +170,27 @@ type internal ModelMetadata private () =
             struct(valueType,read))
 
     static member private Comparer<'T>() = box EqualityComparer<'T>.Default
+    static member private Ordering<'T>() = box Comparer<'T>.Default
+    static member private Equality<'T>() : Func<obj,obj,obj,bool> =
+        Func<obj,obj,obj,bool>(fun comparer left right ->
+            let comparer = if isNull comparer then EqualityComparer<'T>.Default :> IEqualityComparer<'T> else comparer :?> IEqualityComparer<'T>
+            comparer.Equals(unbox<'T> left,unbox<'T> right))
+    static member EqualityOperation(owner: Type) =
+        TypeMetadataCache.Discover(owner,(fun metadata -> metadata.EqualityOperation),
+            (fun value metadata -> { metadata with EqualityOperation = ValueSome value }),Func<Func<obj,obj,obj,bool>>(fun () ->
+                if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "typed equality operation" owner
+                typeof<ModelMetadata>.GetMethod("Equality",BindingFlags.NonPublic ||| BindingFlags.Static).MakeGenericMethod(owner).Invoke(null,null) :?> Func<obj,obj,obj,bool>))
     static member DefaultComparer(owner: Type) =
         TypeMetadataCache.Discover(owner,(fun metadata -> metadata.EqualityComparer),
             (fun value metadata -> { metadata with EqualityComparer = ValueSome value }),Func<obj>(fun () ->
                 if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "default comparer" owner
                 typeof<ModelMetadata>.GetMethod("Comparer",BindingFlags.NonPublic ||| BindingFlags.Static).MakeGenericMethod(owner).Invoke(null,null)))
+
+    static member DefaultOrderingComparer(owner: Type) =
+        TypeMetadataCache.Discover(owner,(fun metadata -> metadata.OrderingComparer),
+            (fun value metadata -> { metadata with OrderingComparer = ValueSome value }),Func<obj>(fun () ->
+                if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "default ordering comparer" owner
+                typeof<ModelMetadata>.GetMethod("Ordering",BindingFlags.NonPublic ||| BindingFlags.Static).MakeGenericMethod(owner).Invoke(null,null)))
 
     static member SequenceElement(owner: Type) =
         if owner.IsArray then owner.GetElementType() else

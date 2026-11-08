@@ -25,7 +25,7 @@ module internal QueryableHelperPreprocess =
 
     let private normalizeOrderKeyExpr (expr: SqlExpr) (clrType: Type) =
         DateTimeSql.canonicalizeForCompareOrOrder clrType expr
-    let internal preprocessQuery (expression: Expression) : PreprocessedQuery array =
+    let internal preprocessQuery (context: QueryContext) (expression: Expression) : PreprocessedQuery array =
         let queries = ResizeArray<PreprocessedQuery>()
         let mutable expression = expression
 
@@ -42,6 +42,7 @@ module internal QueryableHelperPreprocess =
                 queries.Add(Search(mce.Arguments.[1],mce.Arguments.[2],mce.Arguments.[3]))
                 expression <- mce.Arguments.[0]
             | :? MethodCallExpression as mce ->
+                let mce = ChainExpr.normalizeComparer context mce
                 match parseSupportedMethod mce.Method.Name with
                 | Some SupportedLinqMethods.SelectMany when mce.Arguments.Count = 3 ->
                     match mce.Arguments.[0] with

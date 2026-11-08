@@ -64,17 +64,27 @@ module internal QueryableBuildQuerySetAndTypeOps =
 
 
                 | SupportedLinqMethods.Contains ->
-                    if m.Expressions.Length <> 1 then
-                        raise (NotSupportedException("Custom query comparers cannot be translated to SQL. Use the default comparer overload or call AsEnumerable() first."))
+                    if m.Expressions.Length <> 1 && m.Expressions.Length <> 2 then
+                        raise (NotSupportedException(sprintf "Invalid number of arguments in Contains: %d" m.Expressions.Length))
                     let value = m.Expressions[0]
                     let elementType = m.OriginalMethod.GetGenericArguments()[0]
                     addComplexFinal statements (fun ctx ->
                         let alias = "contains_input"
                         let current = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input }
-                        let receiver = QueryTranslator.translateComparisonProduced current alias (Expression.Parameter(elementType)) ctx.Vars
+                        let receiver =
+                            if m.Expressions.Length = 2 then QueryTranslator.translateProduced current alias (Expression.Parameter(elementType)) ctx.Vars
+                            else QueryTranslator.translateComparisonProduced current alias (Expression.Parameter(elementType)) ctx.Vars
                         let detached = QueryTranslatorBaseHelpers.isFullyConstant value ||
                                        (sourceCtx.BindQueryValue |> ValueOption.exists (fun binder -> binder.IsValue value))
-                        let comparison = QueryDefaultEquality.contains sourceCtx.NextAlias elementType RootValueMembership detached receiver
+                        let comparison =
+                            if m.Expressions.Length = 2 then
+                                let probe = if detached then Some value else None
+                                let operation = QueryComparers.prepareWithProbe sourceCtx ctx.Vars elementType m.Expressions[1] probe
+                                let right =
+                                    if detached then SqlExpr.Literal SqlLiteral.Null
+                                    else QueryTranslator.translateProduced current alias value ctx.Vars |> QueryComparers.key sourceCtx.NextAlias
+                                QueryComparers.equal operation (QueryComparers.key sourceCtx.NextAlias receiver) right
+                            else QueryDefaultEquality.contains sourceCtx.NextAlias elementType RootValueMembership detached receiver
                                              (fun () -> QueryTranslator.translateComparisonProduced current alias value ctx.Vars)
                                              (fun () -> invalidOp "Root membership does not infer a detached entity source.")
                                              (fun left -> QueryTranslator.translateValueMembership current alias elementType left value ctx.Vars)

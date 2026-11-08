@@ -16,19 +16,30 @@ open SoloDatabase.QueryTranslatorVisitPost
 /// that both need it.
 module internal ChainExpr =
     /// The framework default is immutable structural comparer material.
-    let rec isDefaultEqualityComparer (expression: Expression) =
+    let rec isDefaultComparer (expression: Expression) =
         match expression with
-        | :? UnaryExpression as conversion when isReferenceUpcast conversion -> isDefaultEqualityComparer conversion.Operand
+        | :? UnaryExpression as conversion when isReferenceUpcast conversion -> isDefaultComparer conversion.Operand
         | :? MemberExpression as access when isNull access.Expression ->
             match access.Member with
             | :? PropertyInfo as property ->
                 let owner = property.DeclaringType
                 not(isNull owner) && owner.IsGenericType
-                && typedefof<System.Collections.Generic.EqualityComparer<_>>.Equals(owner.GetGenericTypeDefinition())
+                && (typedefof<System.Collections.Generic.EqualityComparer<_>>.Equals(owner.GetGenericTypeDefinition()) ||
+                    typedefof<System.Collections.Generic.Comparer<_>>.Equals(owner.GetGenericTypeDefinition()))
                 && property.Name = "Default" && property.PropertyType.Equals owner
                 && not(isNull property.GetMethod) && property.GetMethod.IsStatic
             | _ -> false
         | _ -> false
+
+    let rec private ordinalComparer (expression: Expression) =
+        match expression with
+        | :? UnaryExpression as conversion when isReferenceUpcast conversion -> ordinalComparer conversion.Operand
+        | :? ConstantExpression as constant -> Object.ReferenceEquals(constant.Value,StringComparer.Ordinal)
+        | :? MemberExpression as access when isNull access.Expression ->
+            typeof<StringComparer>.Equals(access.Member.DeclaringType) && access.Member.Name = "Ordinal"
+        | _ -> false
+
+    let isImmutableComparer expression = isDefaultComparer expression || ordinalComparer expression
 
     /// Grouping must use the same supported comparer contract at every chain depth.
     let validateGroupingComparer (operation: string) (keyType: Type) (expression: Expression) =
@@ -44,6 +55,80 @@ module internal ChainExpr =
             let defaultComparer = ModelMetadata.DefaultComparer keyType
             if isNull defaultComparer || not (obj.ReferenceEquals(value, defaultComparer) || value.GetType().Equals(defaultComparer.GetType())) then
                 raise (unsupported ())
+
+    /// Resolve the real default operation before selecting its comparer-free SQL shape.
+    let defaultComparerOverload (call: MethodCallExpression) =
+        let method = call.Method
+        let parameters = method.GetParameters()
+        let owner = method.DeclaringType
+        if not(typeof<Queryable>.Equals owner || typeof<Enumerable>.Equals owner) || parameters.Length = 0 then call,None else
+        let comparerType = parameters[parameters.Length-1].ParameterType
+        let equality = comparerType.IsGenericType && typedefof<System.Collections.Generic.IEqualityComparer<_>>.Equals(comparerType.GetGenericTypeDefinition())
+        let ordering = comparerType.IsGenericType && typedefof<System.Collections.Generic.IComparer<_>>.Equals(comparerType.GetGenericTypeDefinition())
+        if not(equality || ordering) then call,None else
+        let keyType = comparerType.GetGenericArguments()[0]
+        let comparer = call.Arguments[call.Arguments.Count-1]
+        let ordinal = typeof<string>.Equals keyType && ordinalComparer comparer
+        let nullComparer = match comparer with :? ConstantExpression as value -> isNull value.Value | _ -> false
+        if equality && (method.Name = "Join" || method.Name = "GroupJoin" || method.Name = "Contains") &&
+           not(isImmutableComparer comparer || nullComparer) && QueryComparers.scalar keyType then call,None else
+        let stringOrdering = ordering && typeof<string>.Equals keyType
+        let validate value =
+            let fixedOrdinal = typeof<string>.Equals keyType && Object.ReferenceEquals(value,StringComparer.Ordinal)
+            if not(isNull value) &&
+               not(Object.ReferenceEquals(value,(if equality then ModelMetadata.DefaultComparer keyType else ModelMetadata.DefaultOrderingComparer keyType))) &&
+               not(fixedOrdinal && (equality || stringOrdering)) then
+                raise(NotSupportedException("This comparer requires its own query comparison operation."))
+            box (if stringOrdering && fixedOrdinal then 1 else 0)
+        let operation =
+            if isDefaultComparer comparer then Expression.Constant(0) :> Expression
+            elif ordinal then Expression.Constant(1) :> Expression
+            else BoundValueCallExpression([|comparer|],typeof<int>,Func<obj array,obj>(fun values -> validate values[0])) :> Expression
+        let check =
+            if stringOrdering || isImmutableComparer comparer || nullComparer then None else Some operation
+        let arguments = call.Arguments |> Seq.take (call.Arguments.Count-1) |> Seq.toArray
+        let generic = method.GetGenericArguments()
+        let replacement =
+            owner.GetMethods(BindingFlags.Public ||| BindingFlags.Static)
+            |> Array.tryPick(fun candidate ->
+                if candidate.Name <> method.Name || candidate.GetParameters().Length <> arguments.Length ||
+                   candidate.GetGenericArguments().Length <> generic.Length then None else
+                let closed = if candidate.IsGenericMethodDefinition then candidate.MakeGenericMethod generic else candidate
+                let expected = closed.GetParameters()
+                if closed.ReturnType.Equals(method.ReturnType) &&
+                   Array.forall2 (fun (parameter: ParameterInfo) (original: ParameterInfo) -> parameter.ParameterType.Equals original.ParameterType)
+                       expected parameters[0..parameters.Length-2] then Some closed else None)
+        let normalized =
+            match replacement with
+            | Some replacement -> Expression.Call(replacement,arguments)
+            | None -> call.Update(call.Object,Array.append arguments [|Expression.Constant(null,comparerType) :> Expression|])
+        let normalized =
+            if not stringOrdering then normalized else
+            let key (lambda: LambdaExpression) =
+                Expression.Lambda(lambda.Type,FixedStringOrderKeyExpression(lambda.Body,operation),lambda.Name,lambda.TailCall,lambda.Parameters)
+            let argument lambda = if typeof<Queryable>.Equals owner then Expression.Quote(lambda) :> Expression else lambda :> Expression
+            if arguments.Length = 1 then
+                let parameter = Expression.Parameter(typeof<string>,"value")
+                let selector = Expression.Lambda<Func<string,string>>(parameter,parameter) |> key
+                let name = if method.Name = "OrderDescending" then "OrderByDescending" else "OrderBy"
+                let ordered = owner.GetMethods(BindingFlags.Public ||| BindingFlags.Static)
+                              |> Array.find(fun candidate -> candidate.Name = name && candidate.GetGenericArguments().Length = 2 && candidate.GetParameters().Length = 2)
+                Expression.Call(ordered.MakeGenericMethod(typeof<string>,typeof<string>),arguments[0],argument selector)
+            else
+                let selector = tryExtractLambdaExpression arguments[1]
+                               |> ValueOption.defaultWith(fun () -> raise(NotSupportedException("An ordinal order key requires its original selector expression.")))
+                normalized.Update(normalized.Object,[|arguments[0];argument(key selector)|])
+        normalized,check
+
+    let normalizeComparer (context: QueryContext) call =
+        let call,check = defaultComparerOverload call
+        match check with
+        | Some check ->
+            match context.BindQueryValue with
+            | ValueSome binder when binder.IsValue check -> binder.Scalar check |> ignore
+            | _ -> ExpressionEvaluation.evaluateExpr<obj> check |> ignore
+        | None -> ()
+        call
 
     let sequenceElementType (sequenceType: Type) = ModelMetadata.SequenceElement sequenceType
 

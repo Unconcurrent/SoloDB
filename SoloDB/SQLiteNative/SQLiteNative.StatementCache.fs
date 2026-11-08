@@ -87,6 +87,7 @@ type internal NativeStatementCache(database: NativeDatabase) as this =
     let mutable closing = false
     let mutable schemaProbeCount = 0
     let mutable schemaProbeBorrows = 0L
+    let mutable queryFrame: NativeQueryFrame = null
     let dispose (statement: NativePreparedStatement) =
         try statement.Dispose()
         finally if statement.Cached then disposed <- disposed + 1
@@ -95,6 +96,21 @@ type internal NativeStatementCache(database: NativeDatabase) as this =
         if not statement.InUse then dispose statement
     do database.SetStatementRetirement(Action(fun () -> this.Retire()))
     member _.Database = database
+    member _.QueryEqual(index,left,right) =
+        if isNull queryFrame then invalidOp "There is no executing query operation."
+        queryFrame.Equal(database,index,left,right)
+    member private _.Progress(statement: NativePreparedStatement, reset: bool) =
+        Monitor.Enter(gate)
+        let previous = queryFrame
+        try
+            if not reset then database.EnsureGeneration(statement.Generation)
+            queryFrame <- statement.QueryFrame
+            if reset then raw.sqlite3_reset(statement.Handle) else raw.sqlite3_step(statement.Handle)
+        finally
+            queryFrame <- previous
+            Monitor.Exit(gate)
+    member this.Step(statement) = this.Progress(statement,false)
+    member this.Reset(statement) = this.Progress(statement,true)
     member _.Reopen() = lock gate (fun () -> closing <- false)
     member _.BeginSchemaProbe() = lock gate (fun () -> schemaProbeCount <- schemaProbeCount + 1; schemaProbeBorrows)
     member _.EndSchemaProbe() = lock gate (fun () -> schemaProbeCount <- schemaProbeCount - 1)

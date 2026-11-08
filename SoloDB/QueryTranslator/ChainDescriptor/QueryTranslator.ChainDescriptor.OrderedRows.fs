@@ -134,6 +134,7 @@ module internal OrderedChainRows =
                     let ranked = QueryDefaultEquality.firstRows adapter.Alias { baseCore with Joins = joins } key [col a "__ord", SortDirection.Asc]
                     lower ranked input [] rest
                 match stage with
+                | CheckComparer check -> value check |> ignore; lower source input keys rest
                 | Filter l ->
                     let pred, joins = translate plan.Root input a l
                     let pred = FlattenTransform.normalizeExprQuoting pred

@@ -43,7 +43,7 @@ module internal QueryableBuildQueryMain =
         // Set when Select consumes a carried scalar slot (SupportedLinqMethods.DistinctBy → Select reuse path).
         // Terminal zero-arg aggregates use this to consume Value directly instead of retranslating.
         let mutable isPostScalarProjection = false
-        let preprocessed = preprocessQuery e
+        let preprocessed = preprocessQuery sourceCtx e
 
         // Register Include/Exclude/ThenInclude/ThenExclude paths up-front so behavior is deterministic regardless method-call order.
         // Process in expression-tree order: root → Include → ThenInclude → ThenExclude

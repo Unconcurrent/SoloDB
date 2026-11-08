@@ -182,6 +182,7 @@
     <Compile Include="Storage/Storage.Vfs.fs" />
     <Compile Include="Storage/Storage.Source.fs" />
     <Compile Include="SQLiteNative/SQLiteNative.Engine.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.QueryFrame.fs" />
     <Compile Include="Events/CallbackSlots.fs" />
     <Compile Include="SQLiteNative/SQLiteNative.TextEncoding.fs" />
     <Compile Include="RawSqliteFunctions/RawSqliteFunctions.Native.fs" />
@@ -307,6 +308,7 @@
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.SpanSource.fs" />
     <Compile Include="Query/BuildQuery/Queryable.BuildQuery.WindowHelpers.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.ProducedValue.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Comparers.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.DefaultValue.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.DateTimeSql.fs" />

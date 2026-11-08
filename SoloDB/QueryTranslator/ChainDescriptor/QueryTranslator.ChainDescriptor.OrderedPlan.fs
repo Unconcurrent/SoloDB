@@ -11,6 +11,7 @@ open SoloDatabase.ChainExpr
 /// and the existing expression translator. No stage is reconstructed from accumulated flags.
 module internal OrderedChainPlan =
     type Stage =
+        | CheckComparer of Expression
         | Filter of Selector
         | Project of Selector
         | Expand of Selector
@@ -40,6 +41,7 @@ module internal OrderedChainPlan =
         Variables: System.Collections.Generic.Dictionary<string,obj>
         DefaultValue: Type -> QueryProducedValue
         Comparison: Expression -> QueryProducedValue
+        PrepareEquality: Type -> Expression -> Expression option -> SqlExpr
         Alias: unit -> string
     }
     let lambda e =
@@ -57,7 +59,8 @@ module internal OrderedChainPlan =
     let validateOverload (call: MethodCallExpression) =
         if call.Method.Name = "CountBy" && call.Arguments.Count = 3 then
             validateGroupingComparer "CountBy" (call.Method.GetGenericArguments().[1]) call.Arguments.[2]
-        validateDefaultComparerArity call.Method.Name call.Arguments.Count
+        if not(call.Method.Name = "Contains" && call.Arguments.Count = 3 && QueryComparers.scalar(call.Method.GetGenericArguments()[0])) then
+            validateDefaultComparerArity call.Method.Name call.Arguments.Count
     let parse isRoot (expr: Expression) =
         let rec loop (expr: Expression) stages =
             if isRoot expr then Some { Root = expr; Stages = stages } else
@@ -79,6 +82,7 @@ module internal OrderedChainPlan =
                                                     && (identitySelectorForSequence (getSource c)).ReturnType.Equals(c.Method.GetGenericArguments().[0]) ->
                 loop (getSource c) stages
             | :? MethodCallExpression as c when typeof<Enumerable>.Equals(c.Method.DeclaringType) || typeof<Queryable>.Equals(c.Method.DeclaringType) ->
+                let c,check = defaultComparerOverload c
                 validateOverload c
                 let arg = getArg c
                 let mutable following = []
@@ -112,7 +116,9 @@ module internal OrderedChainPlan =
                         Some(Default(Some(a |> Option.defaultWith (fun () -> Expression.Constant((if elementType.IsValueType then RelationsAccessorCache.activateDefault elementType else null),elementType) :> Expression))))
                     | _ -> None
                 match stage with
-                | Some s -> loop (getSource c) (s :: (following @ stages))
+                | Some s ->
+                    let stages = s :: (following @ stages)
+                    loop (getSource c) (match check with Some check -> CheckComparer check :: stages | None -> stages)
                 | None -> None
             | _ -> None
         loop expr []

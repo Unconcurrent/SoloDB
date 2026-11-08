@@ -195,6 +195,8 @@ type internal TypeMetadataRecord = {
     StringIndexer: MetadataValue<StringIndexerOperations> voption
     SequenceElement: MetadataValue<Type> voption
     EqualityComparer: MetadataValue<obj> voption
+    OrderingComparer: MetadataValue<obj> voption
+    EqualityOperation: MetadataValue<Func<obj,obj,obj,bool>> voption
     ObjectModel: MetadataValue<CodecModel<Type,MethodBase,FieldInfo>> voption
     JsonDefaultMethods: Dictionary<struct(Type * Type * string), MetadataValue<JsonDefaultMethod>> option
     JsonUtf8Read: MetadataValue<JsonRawReadOperations> voption
@@ -283,7 +285,7 @@ type internal TypeMetadataCache private () =
         TypeDescriptionFacts = ValueNone
         DescriptionDependencies = [||]; DescriptionBases = [||]; DescriptionKnown = false
         MemberTypes = ValueNone; MemberTemplates = None; DefinitionRepresentative = ValueNone
-        StringIndexer = ValueNone; SequenceElement = ValueNone; EqualityComparer = ValueNone
+        StringIndexer = ValueNone; SequenceElement = ValueNone; EqualityComparer = ValueNone; OrderingComparer = ValueNone; EqualityOperation = ValueNone
         ObjectModel = ValueNone; JsonDefaultMethods = None; JsonUtf8Read = ValueNone; JsonUtf16Read = ValueNone; JsonWrites = None; PhysicalIdentity = ValueNone
         StoredJsonUtf8Read = ValueNone; StoredJsonUtf16Read = ValueNone
         JsonReader = ValueNone; JsonWriter = ValueNone

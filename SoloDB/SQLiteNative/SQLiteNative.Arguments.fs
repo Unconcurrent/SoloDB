@@ -147,10 +147,28 @@ type internal NativeBindingTarget(database: NativeDatabase, statement: sqlite3_s
     let mutable session = 0L
     let mutable active = false
     let mutable thread = 0
+    let mutable operations: NativeQueryEquality[] = null
+    let mutable frame: NativeQueryFrame = null
+    let mutable hasOperations = false
+    member _.ClearOperations() =
+        if hasOperations then Array.Clear(operations,0,operations.Length)
+        hasOperations <- false
+    member _.QueryFrame = if hasOperations then frame else null
+    member _.BindValue(ordinal,value: obj) =
+        match value with
+        | :? NativeQueryEquality as operation ->
+            if isNull operations then operations <- Array.zeroCreate count
+            if isNull frame then
+                frame <- NativeQueryFrame(database,Func<int,string,string,bool>(fun index left right -> operations[index-1].Equal(left,right)))
+            operations[ordinal-1] <- operation
+            hasOperations <- true
+            database.Check(raw.sqlite3_bind_int(statement,ordinal,ordinal))
+        | _ -> database.Check(NativeParameterBinding.bind statement ordinal value)
     member _.Session = session
     member _.Statement = statement
     member _.Check(result) = database.Check(result)
-    member _.Begin(layout: int[]) =
+    member this.Begin(layout: int[]) =
+        this.ClearOperations()
         database.EnsureGeneration(generation)
         session <- session + 1L
         active <- true
@@ -284,10 +302,10 @@ type internal NativeCompiledArguments() =
         member _.Bind(target) =
             for i = 0 to constants.Length - 1 do
                 let ordinal = target.Ordinal(i, target.Session)
-                if ordinal > 0 then target.Check(NativeParameterBinding.bind target.Statement ordinal constants.[i].Value)
+                if ordinal > 0 then target.BindValue(ordinal,constants.[i].Value)
             for i = 0 to count - 1 do
                 let ordinal = target.Ordinal(constants.Length + i, target.Session)
-                if ordinal > 0 then target.Check(NativeParameterBinding.bind target.Statement ordinal values.[offset + i])
+                if ordinal > 0 then target.BindValue(ordinal,values.[offset + i])
         member _.Clear() =
             constants <- Array.empty
             values <- Array.empty

@@ -70,5 +70,5 @@ type internal NativeArgumentCapture() =
         member _.Bind(target) =
             for i = 0 to count - 1 do
                 let ordinal = target.Ordinal(i, target.Session)
-                if ordinal > 0 then target.Check(NativeParameterBinding.bind target.Statement ordinal values.[i])
+                if ordinal > 0 then target.BindValue(ordinal,values.[i])
         member this.Clear() = this.Clear()

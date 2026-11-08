@@ -19,7 +19,7 @@ module internal QueryableBuildQueryGroupJoinElements =
                    { Alias = Some "Value"; Expr = SqlExpr.Column(Some alias, "Value") }]
                   @ QueryTranslatorSerialization.companionProjections (Some alias) rt.InnerCtx.SerializationInput)
                  (Some(DerivedTable(rt.InnerSelect, alias))) with
-            Where = Some(SqlExpr.Binary(rt.OuterKeyExpr, BinaryOperator.Eq, QueryableHelperJoinBindings.keyColumns alias rt.InnerKeyNames)) }
+            Where = Some(rt.MatchKey(QueryableHelperJoinBindings.keyColumns alias rt.InnerKeyNames)) }
         |> QueryProduced.withPosition "__ord"
 
     let tryMatchGroupElementCall (rt: GroupJoinRuntime) (expr: Expression) =

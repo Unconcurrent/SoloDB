@@ -22,6 +22,23 @@ module internal QueryStructuralOrdering =
         match expression with
         | :? UnaryExpression as quote when quote.NodeType=ExpressionType.Quote -> translate visitProduced quote.Operand qb
         | :? LambdaExpression as lambda -> translate visitProduced lambda.Body {qb with Parameters=lambda.Parameters}
+        | :? FixedStringOrderKeyExpression as selected ->
+            let operation =
+                match selected.Ordinal with
+                | :? ConstantExpression as constant -> SqlExpr.Literal(SqlLiteral.Integer(int64(unbox<int> constant.Value)))
+                | _ ->
+                    match qb.SourceContext.BindQueryValue with
+                    | ValueSome binder when binder.IsValue selected.Ordinal -> binder.Scalar selected.Ordinal
+                    | _ -> SqlExpr.Literal(SqlLiteral.Integer(int64(ExpressionEvaluation.evaluateExpr<int> selected.Ordinal)))
+            visitProduced selected.Value qb
+            |> QueryProduced.consume qb.SourceContext.NextAlias (fun value input ->
+                let value = QueryProduced.scalarValue typeof<string> value input
+                match operation with
+                | SqlExpr.Literal(SqlLiteral.Integer 1L) -> QueryTranslatorCharacters.ordinalKey value
+                | SqlExpr.Literal(SqlLiteral.Integer 0L) -> QueryOrderingPrimitives.cultureString false value
+                | _ -> SqlExpr.CaseExpr((SqlExpr.Binary(operation,BinaryOperator.Eq,SqlExpr.Literal(SqlLiteral.Integer 1L)),QueryTranslatorCharacters.ordinalKey value),
+                                       [],Some(QueryOrderingPrimitives.cultureString false value)))
+            |> QueryProduced.typed typeof<string> |> Selected
         | _ ->
             QueryStructuralShape.requireComparison expression.Type
             match qb.SourceContext.BindQueryValue,QueryStructuralShape.tryCreate expression.Type with

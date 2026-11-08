@@ -31,11 +31,12 @@ module internal QueryableBuildQueryGroupJoinOps =
         (translateQueryFn: QueryContext -> Dictionary<string, obj> -> Expression -> TranslatedQuery)
         (expressions: Expression array) =
         match expressions.Length with
-        | 4 ->
+        | 4 | 5 ->
             let prepareInner = prepareInnerJoinSource "GroupJoin" sourceCtx translateQueryFn expressions.[0]
             let outerKeySelector = unwrapLambdaExpressionOrThrow "GroupJoin outer key selector" expressions.[1]
             let innerKeySelector = unwrapLambdaExpressionOrThrow "GroupJoin inner key selector" expressions.[2]
             let resultSelector = unwrapLambdaExpressionOrThrow "GroupJoin result selector" expressions.[3]
+            let custom = expressions.Length = 5
 
             let keyShape = joinKeyShape outerKeySelector innerKeySelector
             if (match keyShape with AtomicKey _ -> true | _ -> false) &&
@@ -55,6 +56,12 @@ module internal QueryableBuildQueryGroupJoinOps =
             let groupParam = resultSelector.Parameters.[1]
 
             addComplexFinal statements (fun ctx ->
+                let operation = if custom then Some(QueryComparers.prepare sourceCtx ctx.Vars outerKeySelector.ReturnType expressions[4]) else None
+                let key produced = if custom then QueryProduced.typed typeof<string> (QueryComparers.key sourceCtx.NextAlias produced) else produced
+                let predicate left right =
+                    match operation with
+                    | Some operation -> QueryComparers.join outerKeySelector.ReturnType operation left right
+                    | None -> SqlExpr.Binary(left,BinaryOperator.Eq,right)
                 let outerAlias = "o"
                 let innerAlias = "gj"
                 let completion = QueryGroupCompletion("_groups" + sourceCtx.NextAlias(), sourceCtx.NextAlias)
@@ -89,7 +96,7 @@ module internal QueryableBuildQueryGroupJoinOps =
                     match tryTranslateDbRefValueIdKey rowOuterCtx outerKeySelector.Parameters.[0] outerAlias outerKeySelector.Body with
                     | Some translated -> QueryProduced.typed outerKeySelector.ReturnType translated
                     | None -> translateJoinSingleSourceProduced rowOuterCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
-                let outerTerms,keyEdges = prepareJoinKey keyShape rowOuterCtx ctx.Vars outerKey
+                let outerTerms,keyEdges = prepareJoinKey keyShape rowOuterCtx ctx.Vars (key outerKey)
                 let outerKeyExpr = keyExpression outerTerms
 
                 let outerInput = QueryTranslatorSerialization.scopeSerializationInput (Some outerAlias) OuterLayer ctx.Input
@@ -106,8 +113,8 @@ module internal QueryableBuildQueryGroupJoinOps =
                 let struct(innerSelect, keyName) =
                     publishInnerJoinKey keyShape ctx.Vars innerCtx innerInput innerAlias (fun context alias ->
                         match tryTranslateDbRefValueIdKey context innerKeySelector.Parameters.[0] alias innerKeySelector.Body with
-                        | Some value -> QueryProduced.typed innerKeySelector.ReturnType value
-                        | None -> translateJoinSingleSourceProduced context alias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body)
+                        | Some value -> QueryProduced.typed innerKeySelector.ReturnType value |> key
+                        | None -> translateJoinSingleSourceProduced context alias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body |> key)
                 let innerSource = DerivedTable(innerSelect, innerAlias)
                 let innerJoinKeyExpr = keyColumns innerAlias keyName
 
@@ -124,7 +131,7 @@ module internal QueryableBuildQueryGroupJoinOps =
                     { InnerCtx = innerCtx
                       InnerSelect = innerSelect
                       GroupParam = groupParam
-                      OuterKeyExpr = completedKey
+                      MatchKey = predicate completedKey
                       InnerParameter = innerKeySelector.Parameters.[0]
                       InnerKeyNames = keyName
                       Vars = ctx.Vars
@@ -149,6 +156,7 @@ module internal QueryableBuildQueryGroupJoinOps =
                     IsValue = fun e -> QueryTranslatorBaseHelpers.isFullyConstant e || (innerCtx.BindQueryValue |> ValueOption.exists (fun b -> b.IsValue e))
                     Alias = fun () -> GroupJoinAliases.nextRowset innerCtx
                     Variables = ctx.Vars
+                    PrepareEquality = QueryComparers.prepareWithProbe sourceCtx ctx.Vars
                     DefaultValue = QueryDefault.value ctx.Vars
                     Value = fun e -> translateJoinSingleSourceProduced outerCtx completion.Alias ctx.Vars (Some outerParam) e
                     Comparison = fun e -> QueryTranslator.translateComparisonScopedBody outerCtx completion.Alias e
@@ -218,7 +226,7 @@ module internal QueryableBuildQueryGroupJoinOps =
                     @ [ConditionedJoin(
                         JoinKind.Left,
                         innerSource,
-                        SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerJoinKeyExpr))]
+                        predicate outerKeyExpr innerJoinKeyExpr)]
                     @ discoveredJoins
                 let grouped =
                     { mkCore
