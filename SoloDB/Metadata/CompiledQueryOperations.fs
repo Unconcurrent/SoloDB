@@ -271,7 +271,7 @@ module internal CompiledQueries =
                                 for i = 1 to args.Length - 1 do
                                     let value = args.[i]
                                     if not (typeof<Expression>.IsAssignableFrom value.Type) && isValue value
-                                       && not(ChainExpr.isImmutableComparer value) then
+                                       && not(ChainExpr.isDeclaredComparer value) then
                                         args.[i] <- local value
                                 call.Update(call.Object, args) :> Expression
                             else base.VisitMethodCall call }

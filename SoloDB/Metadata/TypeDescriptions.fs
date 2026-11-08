@@ -58,8 +58,14 @@ type internal TypeDescriptions private () =
                 { facts with Alternatives = alternatives }
             else facts
         | ValueNone ->
-            let shape = JsonValue.SerializedValueFacts target
             let definition = if target.IsGenericType then target.GetGenericTypeDefinition().FullName elif target.IsArray then "System.Array" else target.FullName
+            let shape =
+                if dynamic then JsonValue.SerializedValueFacts target else
+                let original = TypeSupport.RuntimeFacts target
+                let intrinsic = TypeSupport.Select { original with Enum = false; Dictionary = false; ReadOnlyDictionary = false
+                                                                   NonGenericDictionary = false; Enumerable = false; Grouping = false }
+                if intrinsic.Shape = TypeShape.Object then JsonValue.SerializedValueFacts target
+                else (JsonCodecShape.ForValueType target).Shape
             let decision =
                 if dynamic then TypeSupport.Runtime target
                 else

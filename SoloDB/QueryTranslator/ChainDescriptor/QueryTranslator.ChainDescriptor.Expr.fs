@@ -41,6 +41,12 @@ module internal ChainExpr =
 
     let isImmutableComparer expression = isDefaultComparer expression || ordinalComparer expression
 
+    let rec isDeclaredComparer (expression: Expression) =
+        match expression with
+        | :? UnaryExpression as conversion when isReferenceUpcast conversion -> isDeclaredComparer conversion.Operand
+        | :? MemberExpression as access when isNull access.Expression && typeof<StringComparer>.Equals(access.Member.DeclaringType) -> true
+        | _ -> isImmutableComparer expression
+
     /// Grouping must use the same supported comparer contract at every chain depth.
     let validateGroupingComparer (operation: string) (keyType: Type) (expression: Expression) =
         let unsupported () =
@@ -86,10 +92,20 @@ module internal ChainExpr =
                not(fixedOrdinal && (equality || stringOrdering)) then
                 raise(NotSupportedException("This comparer requires its own query comparison operation."))
             box (if stringOrdering && fixedOrdinal then 1 else 0)
+        let rec fixedValue (expression: Expression) =
+            match expression with
+            | :? UnaryExpression as conversion when isReferenceUpcast conversion -> fixedValue conversion.Operand
+            | :? ConstantExpression as constant -> Some(validate constant.Value)
+            | :? MemberExpression as access when isNull access.Expression && typeof<StringComparer>.Equals(access.Member.DeclaringType) ->
+                raise(NotSupportedException("This comparer requires its own query comparison operation."))
+            | _ -> None
         let operation =
             if isDefaultComparer comparer then Expression.Constant(0) :> Expression
             elif ordinal then Expression.Constant(1) :> Expression
-            else BoundValueCallExpression([|comparer|],typeof<int>,Func<obj array,obj>(fun values -> validate values[0])) :> Expression
+            else
+                match fixedValue comparer with
+                | Some value -> Expression.Constant(unbox<int> value) :> Expression
+                | None -> BoundValueCallExpression([|comparer|],typeof<int>,Func<obj array,obj>(fun values -> validate values[0])) :> Expression
         let check =
             if stringOrdering || isImmutableComparer comparer || nullComparer then None else Some operation
         let arguments = call.Arguments |> Seq.take (call.Arguments.Count-1) |> Seq.toArray

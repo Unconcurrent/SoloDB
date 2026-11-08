@@ -25,7 +25,7 @@ open SoloDatabase.Attributes
 /// </summary>
 module internal Helper =
     let internal listCollectionNamesSnapshot (connection: NativeSqliteConnection) : string array =
-        let mutable statement = connection.OpenStatement("SELECT Name FROM SoloDBCollections")
+        let mutable statement = connection.OpenStatement("SELECT Name FROM SoloDBCollections ORDER BY rowid")
         try
             let names = ResizeArray<string>()
             while statement.Step() do names.Add(statement.Row.GetString(0))
