@@ -99,8 +99,7 @@ module internal QueryableBuildQueryGroupJoinOps =
                     { rowOuterCtx with
                         SerializationInput = QueryTranslatorSerialization.scopeSerializationInput (Some completion.Alias) OuterLayer publishedOuter
                         Joins = completion.SelectorJoins }
-                let completedKey = outerTerms |> List.map(fun value ->
-                    completion.Bind(QueryProduced.typed typeof<obj> value) |> QueryProduced.value sourceCtx.NextAlias) |> keyExpression
+                let completedKey = outerTerms |> List.map completion.Bind |> keyExpression
 
                 // Lower the actual inner key once; reference edges stay beside that occurrence.
                 let struct(innerSelect, keyName) =

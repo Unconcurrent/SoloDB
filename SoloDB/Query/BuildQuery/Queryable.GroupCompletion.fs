@@ -11,21 +11,25 @@ type internal QueryGroupCompletion(alias: string, nextName: unit -> string) =
     let rowJoins = ResizeArray<JoinEdge>()
     let selectorJoins = ResizeArray<JoinEdge>()
     let orderBindings = ResizeArray<JoinShape>()
+    let bind value =
+        let name = "_group" + nextName()
+        projections.Add { Alias = Some name; Expr = value }
+        SqlExpr.Column(Some alias, name)
 
     member _.Alias = alias
     member _.RowJoins = rowJoins
     member _.SelectorJoins = selectorJoins
     member _.OrderBindings = orderBindings
 
+    member _.Bind(value: SqlExpr) = bind value
+
     /// Actual group producers supply both their value and their original input.
     member _.Bind(produced: QueryProducedValue) =
         match produced with
         | DirectValue(value, input) ->
-            let name = "_group" + nextName()
-            projections.Add { Alias = Some name; Expr = value }
+            let value = bind value
             let companions, published = publishInput (fun () -> "_input" + nextName()) input
             projections.AddRange companions
-            let value = SqlExpr.Column(Some alias, name)
             let published = scopeSerializationInput (Some alias) OuterLayer
                                 { published with Source = ValueSome(jsonToken value); Carrier = input.Carrier }
             DirectValue(value, published)
