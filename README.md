@@ -477,6 +477,8 @@ var nextPage = findUsers("Jo", 20, 20).ToArray();
 
 The source parameter is bound to the receiving collection. Supply zero to three additional arguments; `Select` can change the result type. Query values are bound on invocation, and each enumeration reads current data through the ordinary query executor. Retain the function rather than calling `Compile` for every request. Pass stateful values as invocation arguments; do not rely on callback evaluation order inside an optimized query expression.
 
+A captured `IQueryable<T>` source property is read once during compilation to discover its query structure; getter effects and exceptions occur then. Compilation does not enumerate local rows. If that property returns an in-memory query, each invocation reads and enumerates its fresh value. Use an `IEnumerable<T>` property or an invocation argument for local values that should first be acquired at invocation. Database query structure remains fixed by compilation.
+
 Read terminals and materializers can be included directly:
 
 ```csharp

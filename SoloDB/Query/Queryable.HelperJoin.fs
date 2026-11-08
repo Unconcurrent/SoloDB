@@ -111,20 +111,18 @@ module internal QueryableHelperJoin =
         | :? UnaryExpression as conversion when QueryTranslatorBaseHelpers.isReferenceUpcast conversion -> fieldValue conversion.Operand
         | _ -> false
 
-    /// Native layouts come from known roots, not by sampling invocation callbacks.
+    /// Captured query properties expose their layout during preparation; local values bind afresh.
     let rec private nativeSequence (expression: Expression) =
         let queryValue (value: obj) =
             match value with
             | :? IRootQueryable -> Some(Expression.Constant(value) :> Expression)
             | :? IQueryable as query when (query.Provider :? SoloDBQueryProvider) -> nativeSequence query.Expression
             | _ -> None
-        let declaredCollection (target: Type) =
-            target.IsGenericType && target.GetGenericTypeDefinition().Equals(typedefof<ISoloDBCollection<_>>)
         match expression with
         | :? UnaryExpression as conversion when QueryTranslatorBaseHelpers.isReferenceUpcast conversion -> nativeSequence conversion.Operand
         | :? ConstantExpression as constant -> queryValue constant.Value
         | :? MemberExpression when fieldValue expression ||
-                                  declaredCollection expression.Type && QueryTranslatorBaseHelpers.isFullyConstant expression ->
+                                  typeof<IQueryable>.IsAssignableFrom(expression.Type) && QueryTranslatorBaseHelpers.isFullyConstant expression ->
             queryValue(ExpressionEvaluation.evaluateExpr<obj> expression)
         | :? MethodCallExpression as call when call.Arguments.Count > 0 &&
                                               (typeof<Queryable>.Equals(call.Method.DeclaringType) || typeof<Enumerable>.Equals(call.Method.DeclaringType)) ->
