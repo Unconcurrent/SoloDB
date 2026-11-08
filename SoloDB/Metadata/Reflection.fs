@@ -114,6 +114,11 @@ module internal TypeMetadata =
     type internal ExpressionHelper =
         static member inline internal get<'a, 'b>(expression: Expression<System.Func<'a, 'b>>) = expression
 
+        static member internal rowIdentity() =
+            let id = Expression.Parameter(typeof<int64>, "id")
+            let value = Expression.Parameter(typeof<obj>, "value")
+            Expression.Lambda<Func<int64,obj,int64>>(id, [|id; value|])
+
         static member inline internal min (e1: Expression) (e2: Expression) =
             // Produces an expression tree representing min(e1, e2) using LessThan
             Expression.Condition(

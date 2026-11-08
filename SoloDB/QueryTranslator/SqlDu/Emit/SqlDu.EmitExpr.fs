@@ -44,7 +44,7 @@ let private emitLiteral (ctx: EmitContext) (lit: SqlLiteral) : Emitted =
             ctx.AllocParam(box v)
     | SqlLiteral.Float v ->
         if ctx.InlineLiterals && not (System.Double.IsNaN v || System.Double.IsInfinity v) then
-            let value = sprintf "%.17g" v
+            let value = v.ToString("g17", System.Globalization.CultureInfo.InvariantCulture)
             // A decimal or exponent keeps integral-valued doubles in SQLite's REAL class.
             let sql = if value.IndexOf('.') >= 0 || value.IndexOf('e') >= 0 || value.IndexOf('E') >= 0 then value else value + ".0"
             { Sql = sql; Parameters = Emitted.emptyParameters () }

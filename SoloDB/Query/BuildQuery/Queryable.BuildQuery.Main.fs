@@ -164,7 +164,7 @@ module internal QueryableBuildQueryMain =
                         current.Orders.Clear()
                         current.Orders.Add({ OrderingRule = ordering; Direction = direction; RawExpr = rawExpr })
                         if List.isEmpty existingOrders then
-                            current.Orders.Add({ OrderingRule = TypeMetadata.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id")); Direction = SortDirection.Asc; RawExpr = None })
+                            current.Orders.Add({ OrderingRule = TypeMetadata.ExpressionHelper.rowIdentity(); Direction = SortDirection.Asc; RawExpr = None })
                         else
                             for order in existingOrders do
                                 current.Orders.Add(order)

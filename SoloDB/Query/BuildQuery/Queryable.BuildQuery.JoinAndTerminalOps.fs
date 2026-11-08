@@ -229,7 +229,7 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                             for order in x.Orders do
                                 order.Direction <- SortDirection.reverse order.Direction
                         | _ ->
-                            addOrder statements (TypeMetadata.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id"))) true
+                            addOrder statements (TypeMetadata.ExpressionHelper.rowIdentity()) true
                         addTake statements (TypeMetadata.ExpressionHelper.constant 1)
 
                 | _ -> ()

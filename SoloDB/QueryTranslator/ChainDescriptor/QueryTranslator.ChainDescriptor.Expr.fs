@@ -57,6 +57,14 @@ module internal ChainExpr =
                 raise (unsupported ())
 
     /// Resolve the real default operation before selecting its comparer-free SQL shape.
+    [<System.Diagnostics.CodeAnalysis.DynamicDependency("MinBy``2", typeof<Queryable>);
+      System.Diagnostics.CodeAnalysis.DynamicDependency("MaxBy``2", typeof<Queryable>);
+      System.Diagnostics.CodeAnalysis.DynamicDependency("OrderBy``2", typeof<Queryable>);
+      System.Diagnostics.CodeAnalysis.DynamicDependency("OrderByDescending``2", typeof<Queryable>);
+      System.Diagnostics.CodeAnalysis.DynamicDependency("MinBy``2", typeof<Enumerable>);
+      System.Diagnostics.CodeAnalysis.DynamicDependency("MaxBy``2", typeof<Enumerable>);
+      System.Diagnostics.CodeAnalysis.DynamicDependency("OrderBy``2", typeof<Enumerable>);
+      System.Diagnostics.CodeAnalysis.DynamicDependency("OrderByDescending``2", typeof<Enumerable>)>]
     let defaultComparerOverload (call: MethodCallExpression) =
         let method = call.Method
         let parameters = method.GetParameters()
