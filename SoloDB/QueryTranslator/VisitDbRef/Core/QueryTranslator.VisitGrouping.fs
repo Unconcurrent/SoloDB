@@ -21,8 +21,11 @@ module internal QueryTranslatorVisitGrouping =
             | _ -> false
 
     let internal handle (builder: QueryBuilder) (expression: Expression) =
+        let isValue source =
+            isFullyConstant source || (builder.SourceContext.BindQueryValue |> ValueOption.exists (fun binder -> binder.IsValue source))
         let storedSequence (value: Expression) =
-            if DBRefTypeHelpers.isManyReferenceType value.Type then false else
+            if not(typeof<System.Collections.IEnumerable>.IsAssignableFrom value.Type)
+               || DBRefTypeHelpers.isManyReferenceType value.Type || isValue value then false else
             match JsonSerializator.JsonValue.SerializedValueFacts value.Type with
             | JsonSerializator.JsonSerializationShape.SequenceValues _ -> true
             | _ -> false
@@ -49,7 +52,7 @@ module internal QueryTranslatorVisitGrouping =
                 LambdaContext = "group"
                 Validate = ignore
                 IsRoot = fun source -> obj.ReferenceEquals(source, parameter)
-                IsValue = fun source -> isFullyConstant source || (builder.SourceContext.BindQueryValue |> ValueOption.exists (fun binder -> binder.IsValue source))
+                IsValue = isValue
                 Alias = builder.SourceContext.NextAlias
                 Variables = builder.Variables
                 DefaultValue = QueryDefault.value builder.Variables
