@@ -108,7 +108,12 @@ module internal ChainExpr =
             if arguments.Length = 1 then
                 let parameter = Expression.Parameter(typeof<string>,"value")
                 let selector = Expression.Lambda<Func<string,string>>(parameter,parameter) |> key
-                let name = if method.Name = "OrderDescending" then "OrderByDescending" else "OrderBy"
+                let name =
+                    match method.Name with
+                    | "Min" -> "MinBy"
+                    | "Max" -> "MaxBy"
+                    | "OrderDescending" -> "OrderByDescending"
+                    | _ -> "OrderBy"
                 let ordered = owner.GetMethods(BindingFlags.Public ||| BindingFlags.Static)
                               |> Array.find(fun candidate -> candidate.Name = name && candidate.GetGenericArguments().Length = 2 && candidate.GetParameters().Length = 2)
                 Expression.Call(ordered.MakeGenericMethod(typeof<string>,typeof<string>),arguments[0],argument selector)

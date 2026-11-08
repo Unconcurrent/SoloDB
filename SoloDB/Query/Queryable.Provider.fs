@@ -174,7 +174,7 @@ module internal QueryableExecution =
                 let entity = JsonFunctions.fromSQLiteCaptured<'TResult> (position >= 0) storageClass row
                 batchLoadSingle connection row position entity
             | ValueNone when methodName.EndsWith("OrDefault", StringComparison.Ordinal) -> getTerminalDefaultValue()
-            | ValueNone when methodName = "MinBy" || methodName = "MaxBy" ->
+            | ValueNone when methodName = "MinBy" || methodName = "MaxBy" || methodName = "Min" || methodName = "Max" ->
                 if typeof<'TResult>.IsValueType && isNull (TypeMetadata.nullableUnderlying(typeof<'TResult>)) then
                     raise (InvalidOperationException("Sequence contains no elements"))
                 Unchecked.defaultof<'TResult>
