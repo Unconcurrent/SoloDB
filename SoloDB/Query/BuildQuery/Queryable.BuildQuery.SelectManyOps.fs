@@ -43,7 +43,9 @@ module internal QueryableBuildQuerySelectManyOps =
 Reason: The canonical left-join composite requires a two-parameter result selector.
 Fix: Use SelectMany with the standard (carrier, inner) result selector or move the query after AsEnumerable()."))
 
-                        if isCompositeJoinKeyBody composite.OuterKeySelector.Body || isCompositeJoinKeyBody composite.InnerKeySelector.Body then
+                        let keyShape = joinKeyShape composite.OuterKeySelector composite.InnerKeySelector
+                        if (match keyShape with AtomicKey _ -> true | _ -> false) &&
+                           (isCompositeJoinKeyBody composite.OuterKeySelector.Body || isCompositeJoinKeyBody composite.InnerKeySelector.Body) then
                             raise (NotSupportedException(
                                 "Error: Left-join composite key selectors are not supported.
 Reason: Anonymous-type and composite key equality lowering is not supported here.
@@ -66,16 +68,17 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                             let outerAlias = "o"
                             let innerAlias = "j"
                             let outerCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input; Joins = ResizeArray() }
-                            let outerKeyExpr =
-                                translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars (Some composite.OuterKeySelector.Parameters.[0]) composite.OuterKeySelector.Body
+                            let outerKey = translateJoinSingleSourceProduced outerCtx outerAlias ctx.Vars (Some composite.OuterKeySelector.Parameters.[0]) composite.OuterKeySelector.Body
+                            let outerTerms,keyEdges = prepareJoinKey keyShape outerCtx ctx.Vars outerKey
+                            let outerKeyExpr = keyExpression outerTerms
                             let keyPhase = reserveJoinKey sourceCtx
                             let struct(innerCtx, innerInput) = prepareInner ctx.Vars
                             let struct(innerQuery, keyName) =
-                                publishInnerJoinKey innerCtx innerInput innerAlias (fun context alias ->
+                                publishInnerJoinKey keyShape ctx.Vars innerCtx innerInput innerAlias (fun context alias ->
                                     keyPhase (fun () -> translateJoinSingleSourceProduced context alias ctx.Vars (Some composite.InnerKeySelector.Parameters.[0]) composite.InnerKeySelector.Body))
-                            let joinCondition = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, SqlExpr.Column(Some innerAlias, keyName))
+                            let joinCondition = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, keyColumns innerAlias keyName)
 
-                            let outerKeyJoins = QueryTranslatorReferenceJoin.preparedJoinClauses outerCtx.Joins
+                            let outerKeyJoins = QueryTranslatorReferenceJoin.preparedJoinClauses outerCtx.Joins @ keyEdges
                             let outerCtx = { outerCtx with Joins = ResizeArray() }
                             let result =
                                 translateJoinResultSelectorProduced
@@ -154,44 +157,23 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                             // Fallback: json_each SelectMany.
                             addComplexFinal statements (fun ctx ->
                                 match expressions.Length with
-                                | 1 ->
+                                | 1 | 2 ->
                                     let generics = TypeMetadata.GenericMethodArgCache.Get originalMethod
                                     if typeof<byte>.Equals(generics.[1]) then
                                         raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
                                     // Use a stable inner source alias based on the inner select structure
                                     let innerSourceName = Utils.getVarName (Interlocked.Increment(sourceCtx.AliasCounter))
                                     let selectorCtx = { sourceCtx.CloneForSubquery() with LayerPosition = OuterLayer; SerializationInput = ctx.Input }
-                                    // Build the json_each join source expression
-                                    let collection =
-                                        match expressions.[0] with
-                                        | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
-                                            let lambda = ue.Operand :?> LambdaExpression
-                                            let body = QueryTranslatorBaseHelpers.normalizeStoredConstruction lambda.Body
-                                            let memberAccess =
-                                                match body with
-                                                | :? MemberExpression -> true
-                                                | :? BoundValueAccessExpression as access -> not(String.IsNullOrEmpty access.MemberName)
-                                                | _ -> false
-                                            match body with
-                                            | body when memberAccess ->
-                                                // Reject DBRefMany-typed members here; they must go through
-                                                // the link-table JOIN path, not json_each on embedded JSON.
-                                                if DBRefTypeHelpers.isManyReferenceType body.Type || DBRefTypeHelpers.isSingleReferenceType body.Type then
-                                                    raise (NotSupportedException(
-                                                        "Error: SelectMany on a relation-backed property requires direct owner-parameter access.\nReason: Non-direct member access (projected alias, computed selector) is not supported.\nFix: Use .SelectMany(o => o.RelationProperty) directly on the owner collection."))
-                                                QueryTranslator.translateProduced selectorCtx innerSourceName lambda ctx.Vars
-                                            | :? ParameterExpression ->
-                                                QueryTranslator.translateProduced selectorCtx innerSourceName lambda ctx.Vars
-                                            | _ ->
-                                                raise (NotSupportedException(
-                                                    "Error: Unsupported SelectMany selector structure.
-Reason: The selector cannot be translated to SQL.
-Fix: Simplify the selector or move SelectMany after AsEnumerable()."))
-                                        | _ ->
-                                            raise (NotSupportedException(
-                                                "Error: Invalid SelectMany structure.
-Reason: The SelectMany arguments are not a supported query pattern.
-Fix: Rewrite the query or move SelectMany after AsEnumerable()."))
+                                    let selector = unwrapLambdaExpressionOrThrow "SelectMany collection selector" expressions[0]
+                                    if DBRefTypeHelpers.isManyReferenceType selector.Body.Type || DBRefTypeHelpers.isSingleReferenceType selector.Body.Type then
+                                        raise(NotSupportedException("A relation sequence requires its physical owner and link-table source."))
+                                    let selector =
+                                        match selector.Body with
+                                        | :? MethodCallExpression ->
+                                            let body = Expression.Call(typeof<Enumerable>,"ToArray",[|generics[1]|],selector.Body)
+                                            Expression.Lambda(body,selector.Parameters)
+                                        | _ -> selector
+                                    let collection = QueryTranslator.translateProduced selectorCtx innerSourceName selector ctx.Vars
                                     let relationJoins = QueryTranslatorReferenceJoin.preparedJoinClauses selectorCtx.Joins
                                     let resultType = TypeMetadata.GenericMethodArgCache.Get(originalMethod).[1]
                                     let collectionAlias = sourceCtx.NextAlias()
@@ -199,12 +181,15 @@ Fix: Rewrite the query or move SelectMany after AsEnumerable()."))
                                         match collection with
                                         | DirectValue(value, input) -> DerivedTable(ctx.Inner, innerSourceName), (value, input)
                                         | PackedValue _ ->
-                                            let collectionCore = mkCore [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some innerSourceName, "Id") }
-                                                                         { Alias = Some "Value"; Expr = SqlExpr.Literal SqlLiteral.Null }]
-                                                                        (Some(DerivedTable(ctx.Inner, innerSourceName)))
+                                            let collectionCore = mkCore
+                                                                     ([{Alias=Some "Id";Expr=SqlExpr.Column(Some innerSourceName,"Id")}
+                                                                       {Alias=Some "Value";Expr=SqlExpr.Column(Some innerSourceName,"Value")}
+                                                                       {Alias=Some "_collection";Expr=SqlExpr.Literal SqlLiteral.Null}]
+                                                                      @ QueryTranslatorSerialization.companionProjections (Some innerSourceName) ctx.Input)
+                                                                     (Some(DerivedTable(ctx.Inner,innerSourceName)))
                                             let collectionCore = { collectionCore with Joins = relationJoins }
-                                            let struct(query, input) = QueryProduced.publishCore sourceCtx.NextAlias collectionCore collection false
-                                            DerivedTable(query, collectionAlias), (SqlExpr.Column(Some collectionAlias, "Value"), QueryTranslatorSerialization.scopeSerializationInput (Some collectionAlias) OuterLayer input)
+                                            let struct(query,input) = QueryProduced.publishSlot sourceCtx.NextAlias "_collection" collectionCore collection false
+                                            DerivedTable(query,collectionAlias),(SqlExpr.Column(Some collectionAlias,"_collection"),QueryTranslatorSerialization.scopeSerializationInput (Some collectionAlias) OuterLayer input)
                                     let jsonEachExpr, collectionInput = collectionInput
                                     let elementAlias = sourceCtx.NextAlias()
                                     let fullkey = SqlExpr.Column(Some elementAlias, "fullkey")
@@ -214,13 +199,22 @@ Fix: Rewrite the query or move SelectMany after AsEnumerable()."))
                                     let value = QueryProduced.scalarValue resultType token { produced with Carrier = CanonicalToken }
                                     let packed = match collection with PackedValue _ -> true | _ -> false
                                     let ownerAlias = if packed then collectionAlias else innerSourceName
+                                    let result,extraJoins =
+                                        if expressions.Length=1 then DirectValue(value,produced),[] else
+                                        let resultSelector = unwrapLambdaExpressionOrThrow "SelectMany result selector" expressions[1]
+                                        let ownerCtx = {sourceCtx with LayerPosition=OuterLayer;SerializationInput=ctx.Input;Joins=ResizeArray()}
+                                        let elementCtx = {ownerCtx with SerializationInput=produced;Joins=ResizeArray()}
+                                        let owner = DirectValue(SqlExpr.Column(Some ownerAlias,"Value"),QueryTranslatorSerialization.scopeSerializationInput (Some ownerAlias) OuterLayer ctx.Input)
+                                        let result = translateJoinResultSelectorProduced ownerCtx elementCtx ctx.Vars ownerAlias elementAlias
+                                                         resultSelector.Parameters[0] resultSelector.Parameters[1] resultSelector.Body (ValueSome(owner,DirectValue(value,produced)))
+                                        result,QueryTranslatorReferenceJoin.preparedJoinClauses ownerCtx.Joins @ QueryTranslatorReferenceJoin.preparedJoinClauses elementCtx.Joins
                                     let core =
                                         { mkCore
-                                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some ownerAlias, "Id") }
-                                             { Alias = Some "Value"; Expr = value }]
+                                            [{Alias=Some "Id";Expr=SqlExpr.Column(Some ownerAlias,"Id")}
+                                             {Alias=Some "Value";Expr=SqlExpr.Literal SqlLiteral.Null}]
                                             (Some collectionSource)
-                                          with Joins = (if packed then [] else relationJoins) @ [CrossJoin(FromJsonEach(jsonEachExpr, Some elementAlias))] }
-                                    let struct(query, input) = QueryProduced.publishCore sourceCtx.NextAlias core (DirectValue(value, produced)) false
+                                          with Joins=(if packed then [] else relationJoins) @ [CrossJoin(FromJsonEach(jsonEachExpr,Some elementAlias))] @ extraJoins }
+                                    let struct(query,input) = QueryProduced.publishCore sourceCtx.NextAlias core result false
                                     { Query = query; SerializationInput = input; KeyInput = ValueNone }
                                 | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" originalMethod.Name other))
                             )

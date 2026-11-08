@@ -25,6 +25,6 @@ module internal GroupJoinRuntimeTypes =
           GroupParam: ParameterExpression
           OuterKeyExpr: SqlExpr
           InnerParameter: ParameterExpression
-          InnerKeyName: string
+          InnerKeyNames: string list
           Vars: Dictionary<string, obj>
           ReplaceExpression: Expression -> Expression -> Expression -> Expression }

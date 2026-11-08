@@ -67,7 +67,9 @@ Fix: Remove the comparer or move the join after AsEnumerable()."))
                         let innerKeySelector = unwrapLambdaExpressionOrThrow "Join inner key selector" m.Expressions.[2]
                         let resultSelector = unwrapLambdaExpressionOrThrow "Join result selector" m.Expressions.[3]
 
-                        if isCompositeJoinKeyBody outerKeySelector.Body || isCompositeJoinKeyBody innerKeySelector.Body then
+                        let keyShape = joinKeyShape outerKeySelector innerKeySelector
+                        if (match keyShape with AtomicKey _ -> true | _ -> false) &&
+                           (isCompositeJoinKeyBody outerKeySelector.Body || isCompositeJoinKeyBody innerKeySelector.Body) then
                             raise (NotSupportedException(
                                 "Error: Join composite key selectors are not supported.
 Reason: Anonymous-type and composite key equality lowering is not supported here.
@@ -81,16 +83,17 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                                     LayerPosition = OuterLayer
                                     SerializationInput = ctx.Input
                                     Joins = ResizeArray() }
-                            let outerKeyExpr =
-                                translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
+                            let outerKey = translateJoinSingleSourceProduced outerCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
+                            let outerTerms,keyEdges = prepareJoinKey keyShape outerCtx ctx.Vars outerKey
+                            let outerKeyExpr = keyExpression outerTerms
                             let keyPhase = reserveJoinKey sourceCtx
                             let struct(innerCtx, innerInput) = prepareInner ctx.Vars
                             let struct(innerQuery, keyName) =
-                                publishInnerJoinKey innerCtx innerInput innerAlias (fun context alias ->
+                                publishInnerJoinKey keyShape ctx.Vars innerCtx innerInput innerAlias (fun context alias ->
                                     keyPhase (fun () -> translateJoinSingleSourceProduced context alias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body))
-                            let joinCondition = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, SqlExpr.Column(Some innerAlias, keyName))
+                            let joinCondition = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, keyColumns innerAlias keyName)
 
-                            let outerKeyJoins = QueryTranslatorReferenceJoin.preparedJoinClauses outerCtx.Joins
+                            let outerKeyJoins = QueryTranslatorReferenceJoin.preparedJoinClauses outerCtx.Joins @ keyEdges
                             let outerCtx = { outerCtx with Joins = ResizeArray() }
                             let result =
                                 translateJoinResultSelectorProduced

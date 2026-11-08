@@ -65,7 +65,7 @@ module internal QueryDefaultEquality =
     let private constant = function SqlExpr.Literal _ -> true | _ -> false
 
     /// Presence makes inactive fields harmless without reserving any public value.
-    let private components key =
+    let internal components key =
         match key.Parts with
         | ValueSome parts -> parts
         | ValueNone ->

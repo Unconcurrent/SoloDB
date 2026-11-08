@@ -46,8 +46,14 @@ module internal QueryableHelperPreprocess =
                 | Some SupportedLinqMethods.SelectMany when mce.Arguments.Count = 3 ->
                     match mce.Arguments.[0] with
                     | :? MethodCallExpression as groupJoin when groupJoin.Method.Name = "GroupJoin" ->
-                        expression <- groupJoin.Arguments.[0]
-                        let exprs = [| groupJoin :> Expression; mce.Arguments.[1]; mce.Arguments.[2] |]
+                        let combined = [| groupJoin :> Expression; mce.Arguments[1]; mce.Arguments[2] |]
+                        let exprs =
+                            if (tryMatchCanonicalLeftJoinComposite combined).IsSome then
+                                expression <- groupJoin.Arguments[0]
+                                combined
+                            else
+                                expression <- groupJoin
+                                [|mce.Arguments[1];mce.Arguments[2]|]
                         queries.Add(Method {| Value = SupportedLinqMethods.SelectMany; Expressions = exprs; OriginalMethod = mce.Method |})
                     | _ ->
                         expression <- mce.Arguments.[0]

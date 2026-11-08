@@ -8,7 +8,7 @@ open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorReferenceJoin
 open SoloDatabase.QueryTranslatorVisitCore
 
-/// Completed grouping rows supply their published sequence to the ordered owner.
+/// Stored sequences and completed groups share the existing ordered rowset owner.
 module internal QueryTranslatorVisitGrouping =
     let private actualGrouping (builder: QueryBuilder) (parameter: ParameterExpression) =
         let input = (builder.ResolveParameterSource parameter).SerializationInput
@@ -21,12 +21,19 @@ module internal QueryTranslatorVisitGrouping =
             | _ -> false
 
     let internal handle (builder: QueryBuilder) (expression: Expression) =
+        let storedSequence (value: Expression) =
+            if DBRefTypeHelpers.isManyReferenceType value.Type then false else
+            match JsonSerializator.JsonValue.SerializedValueFacts value.Type with
+            | JsonSerializator.JsonSerializationShape.SequenceValues _ -> true
+            | _ -> false
         let rec root (expression: Expression) =
             match expression with
-            | :? ParameterExpression as parameter when actualGrouping builder parameter -> Some parameter
             | :? MethodCallExpression as call when call.Arguments.Count > 0 -> root call.Arguments[0]
-            | :? MemberExpression as memberAccess when not(isNull memberAccess.Expression) -> root memberAccess.Expression
             | :? UnaryExpression as unary when isReferenceUpcast unary -> root unary.Operand
+            | :? ParameterExpression as parameter when actualGrouping builder parameter -> Some(expression)
+            | _ when storedSequence expression -> Some expression
+            | :? MemberExpression as memberAccess when not(isNull memberAccess.Expression) -> root memberAccess.Expression
+            | :? BoundValueAccessExpression as access -> root access.Parent
             | _ -> None
         match root expression with
         | None -> false
@@ -52,23 +59,27 @@ module internal QueryTranslatorVisitGrouping =
                 TranslateOrderKey = translateWith (QueryStructuralOrdering.translate visitProduced)
                 Source = fun _ source ->
                     let produced = visitProduced source builder |> QueryProduced.sequence builder.SourceContext.NextAlias
-                    match produced with
-                    | PackedValue _ -> invalidOp "A grouping parameter requires its completed row binding."
-                    | DirectValue(collection, input) ->
-                        let alias = builder.SourceContext.NextAlias()
-                        let fullKey = SqlExpr.Column(Some alias, "fullkey")
-                        let key = SqlExpr.Column(Some alias, "key")
-                        let token = SqlExpr.FunctionCall("jsonb", [SqlExpr.Binary(collection, BinaryOperator.JsonText, fullKey)])
-                        let item = QueryTranslatorSerialization.elementInput input key token
-                        let itemType = ChainExpr.sequenceElementType parameter.Type
-                        let id = if hasPhysicalRowIdentity itemType then SqlExpr.FunctionCall("jsonb_extract", [token; SqlExpr.Literal(SqlLiteral.String "$.Id")]) else key
-                        let value = QueryProduced.scalarValue itemType token { item with Carrier = CanonicalToken }
-                        let produced = QueryProduced.canonical builder.SourceContext.NextAlias (DirectValue(value, item))
-                        let row =
-                            { OrderedChainRows.core (Some(FromJsonEach(collection, Some alias)))
-                                  [{ Alias = Some "Id"; Expr = id }; { Alias = Some "Value"; Expr = SqlExpr.Literal SqlLiteral.Null }; { Alias = Some "__ord"; Expr = key }] with
-                                OrderBy = [{ Expr = key; Direction = SortDirection.Asc }] }
-                        QueryProduced.publishCore builder.SourceContext.NextAlias row produced false
+                    let struct(collection,input),bindings = QueryProduced.bindTerms builder.SourceContext.NextAlias (fun value input -> struct(value,input)) produced
+                    let alias = builder.SourceContext.NextAlias()
+                    let fullKey = SqlExpr.Column(Some alias, "fullkey")
+                    let key = SqlExpr.Column(Some alias, "key")
+                    let token = SqlExpr.FunctionCall("jsonb", [SqlExpr.Binary(collection, BinaryOperator.JsonText, fullKey)])
+                    let item = QueryTranslatorSerialization.elementInput input key token
+                    let itemType = ChainExpr.sequenceElementType parameter.Type
+                    let id = if hasPhysicalRowIdentity itemType then SqlExpr.FunctionCall("jsonb_extract", [token; SqlExpr.Literal(SqlLiteral.String "$.Id")]) else key
+                    let value = QueryProduced.scalarValue itemType token { item with Carrier = CanonicalToken }
+                    let produced = QueryProduced.canonical builder.SourceContext.NextAlias (DirectValue(value, item))
+                    let source,joins =
+                        match bindings with
+                        | [] -> FromJsonEach(collection,Some alias),[]
+                        | CrossJoin source :: rest -> source,rest @ [CrossJoin(FromJsonEach(collection,Some alias))]
+                        | _ -> invalidOp "A bound sequence requires its original row binding."
+                    let row =
+                        { OrderedChainRows.core (Some source)
+                              [{ Alias = Some "Id"; Expr = id }; { Alias = Some "Value"; Expr = SqlExpr.Literal SqlLiteral.Null }; { Alias = Some "__ord"; Expr = key }] with
+                            Joins = joins
+                            OrderBy = [{ Expr = key; Direction = SortDirection.Asc }] }
+                    QueryProduced.publishCore builder.SourceContext.NextAlias row produced false
             }
             match OrderedChain.tryBuild adapter expression with
             | Some value -> builder.DuHandlerResult.Value <- ValueSome value; true

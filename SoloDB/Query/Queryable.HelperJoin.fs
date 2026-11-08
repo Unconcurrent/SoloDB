@@ -153,23 +153,22 @@ module internal QueryableHelperJoin =
         | _ -> None
 
     /// Publish keys beside the complete right source, including their reference edges.
-    let internal publishInnerJoinKey (context: QueryContext) (input: TranslatedQuery) alias lower =
-        let name = "_join_key" + context.NextAlias()
-        let core, keyAlias, keyContext =
+    let internal publishInnerJoinKey shape variables (context: QueryContext) (input: TranslatedQuery) alias lower =
+        let core,keyAlias,keyContext =
             match tryPhysicalJoinInput context input with
-            | Some(core, source, context) ->
-                let projections = ProjectionSetOps.toList core.Projections @ [{ Alias = Some name; Expr = SqlExpr.Literal SqlLiteral.Null }]
-                { core with Projections = ProjectionSetOps.ofList projections }, source, context
+            | Some(core,source,context) -> core,source,context
             | None ->
-                let fields = [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some alias, "Id") }
-                              { Alias = Some "Value"; Expr = SqlExpr.Column(Some alias, "Value") }
-                              { Alias = Some name; Expr = SqlExpr.Literal SqlLiteral.Null }]
+                let fields = [{Alias=Some "Id";Expr=SqlExpr.Column(Some alias,"Id")}
+                              {Alias=Some "Value";Expr=SqlExpr.Column(Some alias,"Value")}]
                              @ QueryTranslatorSerialization.companionProjections (Some alias) input.SerializationInput
-                mkCore fields (Some(DerivedTable(input.Query, alias))), alias, { context with Joins = ResizeArray() }
+                mkCore fields (Some(DerivedTable(input.Query,alias))),alias,{context with Joins=ResizeArray()}
         let key = lower keyContext keyAlias
-        let core = { core with Joins = core.Joins @ QueryTranslatorReferenceJoin.preparedJoinClauses keyContext.Joins }
-        let struct(query, _) = QueryProduced.publishSlot context.NextAlias name core key false
-        struct(query, name)
+        let values,edges = prepareJoinKey shape keyContext variables key
+        let names = values |> List.map(fun _ -> "_join_key"+context.NextAlias())
+        let projections = ProjectionSetOps.toList core.Projections @ List.map2(fun name value -> {Alias=Some name;Expr=value}) names values
+        let core = {core with Projections=ProjectionSetOps.ofList projections
+                              Joins=core.Joins @ QueryTranslatorReferenceJoin.preparedJoinClauses keyContext.Joins @ edges}
+        struct(wrapCore core,names)
 
     type internal GroupJoinCarrierMembers = {
         OuterMember: MemberInfo
@@ -260,6 +259,14 @@ module internal QueryableHelperJoin =
             else
                 base.VisitMember(node)
 
+        override _.VisitExtension(node: Expression) =
+            match node with
+            | :? BoundValueAccessExpression as access when Object.ReferenceEquals(access.Parent,carrierParam) ->
+                if access.MemberName = outerMember.Name && access.Type.Equals outerParam.Type then outerParam :> Expression
+                elif access.MemberName = groupMember.Name then touchesGroup <- true; node
+                else touchesCarrier <- true; node
+            | _ -> base.VisitExtension(node)
+
     type internal CanonicalLeftJoinComposite = {
         InnerExpression: Expression
         OuterKeySelector: LambdaExpression
@@ -282,7 +289,10 @@ module internal QueryableHelperJoin =
                 let resultSelector = unwrapLambdaExpressionOrThrow "GroupJoin SelectMany result selector" resultSelectorExpr
 
                 match tryExtractGroupJoinCarrierMembers groupJoinResultSelector with
-                | Some carrierMembers when tryMatchGroupCarrierDefaultIfEmpty carrierMembers.GroupMember collectionSelector ->
+                | Some carrierMembers when tryMatchGroupCarrierDefaultIfEmpty carrierMembers.GroupMember collectionSelector && resultSelector.Parameters.Count=2 ->
+                    let rewriter = LeftJoinCompositeResultRewriter(resultSelector.Parameters[0],carrierMembers.OuterMember,carrierMembers.GroupMember,outerKeySelector.Parameters[0])
+                    rewriter.Visit(resultSelector.Body) |> ignore
+                    if rewriter.TouchesGroup || rewriter.TouchesCarrier then None else
                     Some {
                         InnerExpression = groupJoin.Arguments.[1]
                         OuterKeySelector = outerKeySelector
