@@ -369,3 +369,9 @@ module internal QueryableHelperBase =
             wrapBody lambda.Body lambda.Parameters :> Expression
         | _ ->
             Expression.Not expr :> Expression
+
+    let internal serializeForCollection (valueType: Type) (value: obj) =
+        let includeType = typeof<JsonSerializator.JsonValue>.IsAssignableFrom valueType
+        if includeType then value.GetType() |> ignore
+        let text = JsonSerializator.JsonValue.WriteRuntimeBuffer(valueType,value,includeType,false)
+        System.String(text.Array,text.Offset,text.Count)

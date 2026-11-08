@@ -23,8 +23,7 @@ module internal QueryableBuildQuerySetMembership =
             raise (NotSupportedException("Custom set comparers cannot be translated to SQL. Use the default comparer or call AsEnumerable() first."))
         let elementType = m.OriginalMethod.GetGenericArguments().[if byKey then 1 else 0]
         addComplexFinal statements (fun ctx ->
-            let rhs = readSoloDBQueryable<'T> m.Expressions[0]
-            let right = translateQueryFn sourceCtx ctx.Vars rhs
+            let right = prepareSequenceSource sourceCtx translateQueryFn m.Expressions[0] ctx.Vars
             let leftInput = QueryTranslatorSerialization.scopeSerializationInput (Some "set_left") OuterLayer ctx.Input
             let rows = QueryProduced.completedRows sourceCtx.NextAlias ctx.Inner ctx.Input
             let fields = [{ Alias = Some "Id"; Expr = QueryDefaultEquality.outputIdentity (m.OriginalMethod.GetGenericArguments()[0]) leftInput (SqlExpr.Column(Some "set_left", "Id")) }

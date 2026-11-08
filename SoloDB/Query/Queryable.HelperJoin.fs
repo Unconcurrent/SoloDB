@@ -23,36 +23,19 @@ module internal QueryableHelperJoin =
     open QueryableHelperState
     open QueryableHelperBase
     open QueryableHelperJoinBindings
-    let rec internal readSoloDBQueryable<'T> (methodArg: Expression) =
-        let unsupportedConcatMessage = "Cannot concat with an IEnumerable other than another SoloDB IQueryable on the same connection. To do this anyway, use AsEnumerable()."
-        match methodArg with
-        | :? UnaryExpression as convert when QueryTranslatorBaseHelpers.isReferenceUpcast convert -> readSoloDBQueryable<'T> convert.Operand
-        | :? MemberExpression when typeof<IQueryable>.IsAssignableFrom(methodArg.Type) && QueryTranslatorBaseHelpers.isFullyConstant methodArg ->
-            let query = ExpressionEvaluation.evaluateExpr<IQueryable> methodArg
-            readSoloDBQueryable<'T> (Expression.Constant(query, typeof<IQueryable>))
-        | :? ConstantExpression as ce -> 
-            match ExpressionEvaluation.evaluateExpr<IEnumerable> ce with
-            | :? IQueryable as appendingQuery when (match appendingQuery.Provider with :? SoloDBQueryProvider -> true | _other -> false) ->
-                appendingQuery.Expression
-            | :? IRootQueryable as rq ->
-                Expression.Constant(rq, typeof<IRootQueryable>)
-            | _other -> raise (NotSupportedException(unsupportedConcatMessage))
-        | :? MethodCallExpression as mcl ->
-            mcl
-        | :? RelationQueryExpression -> methodArg
-        | _other -> raise (NotSupportedException(unsupportedConcatMessage))
-
     let rec internal readSoloDBQueryableUntyped (methodArg: Expression) =
-        let unsupportedJoinMessage = "Join is supported only when the inner source is another SoloDB IQueryable. To do this anyway, use AsEnumerable() first."
+        let unsupportedJoinMessage = "The join inner source must be an invariant local sequence or a SoloDB query rooted in a collection."
 
         match methodArg with
         | :? UnaryExpression as convert when QueryTranslatorBaseHelpers.isReferenceUpcast convert -> readSoloDBQueryableUntyped convert.Operand
         | :? MemberExpression when typeof<IQueryable>.IsAssignableFrom(methodArg.Type) && QueryTranslatorBaseHelpers.isFullyConstant methodArg ->
             let query = ExpressionEvaluation.evaluateExpr<IQueryable> methodArg
-            readSoloDBQueryableUntyped (Expression.Constant(query, typeof<IQueryable>))
+            if query :? EnumerableQuery then methodArg
+            else readSoloDBQueryableUntyped (Expression.Constant(query, typeof<IQueryable>))
         | :? ConstantExpression as ce ->
             match ce.Value with
             | :? IRootQueryable -> methodArg
+            | :? EnumerableQuery -> methodArg
             | :? IQueryable as query when (query.Provider :? SoloDBQueryProvider) ->
                 readSoloDBQueryableUntyped query.Expression
             | _ -> raise (NotSupportedException(unsupportedJoinMessage))
@@ -105,20 +88,75 @@ module internal QueryableHelperJoin =
             | _ -> None
         loop expression
 
+    /// Local input is transported once; database rows stay in the native query.
+    let private localRowset (context: QueryContext) (expression: Expression) =
+        let target = ModelMetadata.SequenceElement expression.Type
+        let readId =
+            if QueryTranslatorBaseHelpers.hasPhysicalRowIdentity target then
+                (EntityIdentity.compiledInt64IdReader target).Invoke
+            else fun _ -> -1L
+        let encode (value: obj) =
+            if isNull value then raise(ArgumentNullException("inner"))
+            if value :? IQueryable && not(value :? EnumerableQuery) then
+                raise(NotSupportedException("A query source must retain its database routing; it cannot be enumerated as a local input."))
+            let output = StringBuilder("[")
+            let iterator = (value :?> IEnumerable).GetEnumerator()
+            try
+                let mutable comma = false
+                while iterator.MoveNext() do
+                    let value = iterator.Current
+                    if comma then output.Append(',') |> ignore
+                    comma <- true
+                    let id = if isNull value then -1L else readId value
+                    output.Append('[').Append(id.ToString(Globalization.CultureInfo.InvariantCulture)).Append(',')
+                          .Append(serializeForCollection target value).Append(']') |> ignore
+            finally
+                match iterator with :? IDisposable as owned -> owned.Dispose() | _ -> ()
+            output.Append(']').ToString()
+        fun (_variables: Dictionary<string,obj>) ->
+            let parameter =
+                match context.BindQueryValue with
+                | ValueSome binder ->
+                    binder.Scalar(BoundValueCallExpression([|expression|],typeof<string>,Func<obj array,obj>(fun values -> box(encode values[0]))))
+                | _ -> SqlExpr.Literal(SqlLiteral.String(encode(ExpressionEvaluation.evaluateExpr<obj> expression)))
+            let alias = context.NextAlias()
+            let packet = SqlExpr.Column(Some alias,"value")
+            let token = SqlExpr.FunctionCall("jsonb",[SqlExpr.Binary(packet,BinaryOperator.JsonText,SqlExpr.Literal(SqlLiteral.String "$[1]"))])
+            let input = { QuerySerializationInput.ForType target with Source=ValueSome token;Carrier=CanonicalToken }
+            let value = QueryProduced.scalarValue target token input
+            let result = DirectValue(value,{input with Carrier=if isSqlScalarResult target then SqlScalar else CanonicalToken})
+            let core = mkCore
+                           [{Alias=Some "Id";Expr=SqlExpr.FunctionCall("jsonb_extract",[packet;SqlExpr.Literal(SqlLiteral.String "$[0]")])}
+                            {Alias=Some "Value";Expr=SqlExpr.Literal SqlLiteral.Null}]
+                           (Some(FromJsonEach(SqlExpr.FunctionCall("jsonb",[parameter]),Some alias)))
+            let struct(query,input) = QueryProduced.publishCore context.NextAlias core result false
+            { Query=query;SerializationInput=input;KeyInput=ValueNone }
+
+    let private querySource (expression: Expression) =
+        typeof<IQueryable>.IsAssignableFrom(expression.Type) || (tryGetJoinRootSource expression).IsSome
+
+    let private completeSequenceSource (context: QueryContext) translate expression =
+        if (tryGetJoinRootSource expression).IsSome then
+            fun variables -> translate context variables expression
+        else localRowset context expression
+
+    let internal prepareSequenceSource (context: QueryContext) translate (expression: Expression) =
+        let expression = if querySource expression then readSoloDBQueryableUntyped expression else expression
+        completeSequenceSource context translate expression
+
     let internal prepareInnerJoinSource
         (operation: string)
         (sourceCtx: QueryContext)
         (translate: QueryContext -> Dictionary<string, obj> -> Expression -> TranslatedQuery)
         expression =
-        let expression = readSoloDBQueryableUntyped expression
+        let expression = if querySource expression then readSoloDBQueryableUntyped expression else expression
         let table =
-            match tryGetJoinRootSource expression with
-            | Some struct(table, _) -> table
-            | None -> raise(NotSupportedException($"Error: {operation} inner source is not supported.\nReason: The inner query does not resolve to a SoloDB root collection.\nFix: Use another SoloDB IQueryable rooted in a collection or move the join after AsEnumerable()."))
-        fun vars ->
-            let context = { QueryContext.ChildOf(sourceCtx, table) with AliasCounter = sourceCtx.AliasCounter }
-            let input = translate context vars expression
-            struct({ context with LayerPosition = OuterLayer; SerializationInput = input.SerializationInput }, input)
+            tryGetJoinRootSource expression |> Option.map(fun struct(table,_) -> table) |> Option.defaultValue sourceCtx.RootTable
+        let context = { QueryContext.ChildOf(sourceCtx,table) with AliasCounter=sourceCtx.AliasCounter }
+        let prepare = completeSequenceSource context translate expression
+        fun variables ->
+            let input = prepare variables
+            struct({context with LayerPosition=OuterLayer;SerializationInput=input.SerializationInput},input)
 
     /// Key captures retain their original phase while source dependencies lower first.
     let internal reserveJoinKey (context: QueryContext) =

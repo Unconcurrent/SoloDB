@@ -191,12 +191,6 @@ module internal QueryableHelperPreprocess =
             IsAtTopLevel = sourceCtx.IsAtTopLevel
         }
 
-    let internal serializeForCollection (valueType: Type) (value: obj) =
-        let includeType = typeof<JsonSerializator.JsonValue>.IsAssignableFrom valueType
-        if includeType then value.GetType() |> ignore
-        let text = JsonSerializator.JsonValue.WriteRuntimeBuffer(valueType,value,includeType,false)
-        System.String(text.Array,text.Offset,text.Count)
-
     let internal buildOrdersDu (sourceCtx: QueryContext) vars keyInput contextTable predicate orders =
         let terms=ResizeArray<OrderBy>()
         let joins=ResizeArray<JoinShape>()
