@@ -29,8 +29,7 @@ module internal CompiledQueries =
                 let arguments =
                     call.Arguments |> Seq.map (fun argument ->
                         match argument with
-                        | (:? MemberExpression | :? ConstantExpression)
-                            when typeof<LambdaExpression>.IsAssignableFrom argument.Type
+                        | argument when typeof<LambdaExpression>.IsAssignableFrom argument.Type
                                  && QueryTranslatorBaseHelpers.isFullyConstant argument ->
                             match QueryTranslatorVisitPost.tryExtractLambdaExpression argument with
                             | ValueSome lambda -> Expression.Quote(this.Visit(lambda) :?> LambdaExpression) :> Expression

@@ -193,6 +193,9 @@ module internal OrderedChainRows =
                         | :? MethodCallExpression as call when typeof<Enumerable>.Equals(call.Method.DeclaringType) || typeof<Queryable>.Equals(call.Method.DeclaringType) ->
                             let items = Expression.Call(typeof<Enumerable>, "ToArray", [|sequenceElementType selector.ReturnType|], selector.Body)
                             { selector with Body = items }
+                        | _ when DBRefTypeHelpers.isManyReferenceType selector.ReturnType ->
+                            let items = Expression.Call(typeof<Enumerable>, "ToArray", [|sequenceElementType selector.ReturnType|], selector.Body)
+                            { selector with Body = items }
                         | _ -> selector
                     let collectionProduced, joins = adapter.Translate plan.Root input a selector ValueNone
                     let from, collection, collectionInput, ownerAlias, joins =

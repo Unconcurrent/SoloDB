@@ -76,47 +76,22 @@ module internal QueryTranslatorVisitPost =
             expr
 
     let rec internal tryExtractLambdaExpression (expr: Expression) : LambdaExpression voption =
-        let tryEvaluateAsLambda (candidate: Expression) =
-            try
-                match ExpressionEvaluation.evaluateExpr<obj> candidate with
-                | :? LambdaExpression as le -> ValueSome le
-                | :? Expression as e ->
-                    match e with
-                    | :? LambdaExpression as le -> ValueSome le
-                    | _ -> ValueNone
-                | _ -> ValueNone
-            with _ ->
-                ValueNone
-
         match QueryTranslatorBaseHelpers.unwrapConversions expr with
-        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote || ue.NodeType = ExpressionType.Convert ->
-            tryExtractLambdaExpression ue.Operand
-        | :? LambdaExpression as le ->
-            ValueSome le
-        | :? MethodCallExpression as mc ->
-            let fromObject =
-                if isNull mc.Object then ValueNone
-                else tryExtractLambdaExpression mc.Object
-            match fromObject with
-            | ValueSome _ as hit -> hit
-            | ValueNone ->
-                mc.Arguments
-                |> Seq.tryPick (fun a ->
-                    match tryExtractLambdaExpression a with
-                    | ValueSome le -> Some le
-                    | ValueNone -> None)
-                |> function
-                   | Some le -> ValueSome le
-                   | None -> tryEvaluateAsLambda (mc :> Expression)
-        | (:? MemberExpression | :? ConstantExpression) as captured
-            when typeof<LambdaExpression>.IsAssignableFrom(captured.Type) && isFullyConstant captured ->
-            tryEvaluateAsLambda captured
-        | :? InvocationExpression as ie ->
-            match tryExtractLambdaExpression ie.Expression with
-            | ValueSome _ as hit -> hit
-            | ValueNone -> tryEvaluateAsLambda (ie :> Expression)
-        | _ ->
-            ValueNone
+        | :? UnaryExpression as quoted when quoted.NodeType = ExpressionType.Quote ->
+            tryExtractLambdaExpression quoted.Operand
+        | null -> ValueNone
+        | :? LambdaExpression as lambda -> ValueSome lambda
+        | :? MethodCallExpression as call when call.Method.Name = "Compile" && not(isNull call.Object)
+                                             && typeof<LambdaExpression>.IsAssignableFrom(call.Object.Type)
+                                             && typeof<LambdaExpression>.IsAssignableFrom(call.Method.DeclaringType)
+                                             && (call.Arguments.Count = 0 ||
+                                                 call.Arguments.Count = 1 && typeof<bool>.Equals(call.Arguments[0].Type)) ->
+            tryExtractLambdaExpression call.Object
+        | candidate when typeof<LambdaExpression>.IsAssignableFrom(candidate.Type) && isFullyConstant candidate ->
+            match ExpressionEvaluation.evaluateExpr<obj> candidate with
+            | :? LambdaExpression as lambda -> ValueSome lambda
+            | _ -> ValueNone
+        | _ -> ValueNone
 
     let rec private computePathKeyForUpdate (expr: Expression) : string =
         match expr with
