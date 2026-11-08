@@ -122,8 +122,9 @@ module internal QueryableBuildQuerySetAndTypeOps =
                 | SupportedLinqMethods.Concat
                 | SupportedLinqMethods.Union ->
                     OrderedChainPlan.validateDefaultComparerArity m.OriginalMethod.Name (m.Expressions.Length + 1)
+                    let prepare = prepareSequenceSource sourceCtx translateQueryFn m.Expressions[0]
                     addComplexFinal statements (fun ctx ->
-                        let completed = prepareSequenceSource sourceCtx translateQueryFn m.Expressions[0] ctx.Vars
+                        let completed = prepare ctx.Vars
                         let name = "_input" + sourceCtx.NextAlias()
                         let ordered = QueryTranslatorSerialization.hasSearchContext ctx.Input ||
                                       QueryTranslatorSerialization.hasSearchContext completed.SerializationInput
@@ -166,9 +167,10 @@ module internal QueryableBuildQuerySetAndTypeOps =
                 | SupportedLinqMethods.UnionBy ->
                     if m.Expressions.Length <> 2 then
                         raise (NotSupportedException("Custom set comparers cannot be translated to SQL. Use the default comparer overload or call AsEnumerable() first."))
+                    let prepare = prepareSequenceSource sourceCtx translateQueryFn m.Expressions[0]
                     addComplexFinal statements (fun ctx ->
                         let name = "_input" + sourceCtx.NextAlias()
-                        let completed = prepareSequenceSource sourceCtx translateQueryFn m.Expressions[0] ctx.Vars
+                        let completed = prepare ctx.Vars
                         let rhsSelect = completed.Query
                         let elementType = m.OriginalMethod.GetGenericArguments()[0]
                         let keyType = m.OriginalMethod.GetGenericArguments()[1]

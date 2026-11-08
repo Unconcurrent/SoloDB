@@ -23,35 +23,6 @@ module internal QueryableHelperJoin =
     open QueryableHelperState
     open QueryableHelperBase
     open QueryableHelperJoinBindings
-    let rec internal readSoloDBQueryableUntyped (methodArg: Expression) =
-        let unsupportedJoinMessage = "The join inner source must be an invariant local sequence or a SoloDB query rooted in a collection."
-
-        match methodArg with
-        | :? UnaryExpression as convert when QueryTranslatorBaseHelpers.isReferenceUpcast convert -> readSoloDBQueryableUntyped convert.Operand
-        | :? MemberExpression when typeof<IQueryable>.IsAssignableFrom(methodArg.Type) && QueryTranslatorBaseHelpers.isFullyConstant methodArg ->
-            let query = ExpressionEvaluation.evaluateExpr<IQueryable> methodArg
-            if query :? EnumerableQuery then methodArg
-            else readSoloDBQueryableUntyped (Expression.Constant(query, typeof<IQueryable>))
-        | :? ConstantExpression as ce ->
-            match ce.Value with
-            | :? IRootQueryable -> methodArg
-            | :? EnumerableQuery -> methodArg
-            | :? IQueryable as query when (query.Provider :? SoloDBQueryProvider) ->
-                readSoloDBQueryableUntyped query.Expression
-            | _ -> raise (NotSupportedException(unsupportedJoinMessage))
-        | :? MethodCallExpression as call when call.Arguments.Count > 0 ->
-            let source = readSoloDBQueryableUntyped call.Arguments.[0]
-            if obj.ReferenceEquals(source,call.Arguments.[0]) then methodArg else
-            let arguments = call.Arguments |> Seq.toArray
-            arguments.[0] <- source
-            call.Update(call.Object,arguments) :> Expression
-        | :? RelationQueryExpression as directive ->
-            let source = readSoloDBQueryableUntyped directive.Source
-            if obj.ReferenceEquals(source,directive.Source) then methodArg
-            else RelationQueryExpression(directive.Type,source,directive.Selector,directive.Operation) :> Expression
-        | _ ->
-            raise (NotSupportedException(unsupportedJoinMessage))
-
     let internal normalizeUnionArm
         (aliasFactory: unit -> string)
         (columnNames: string list)
@@ -113,12 +84,12 @@ module internal QueryableHelperJoin =
             finally
                 match iterator with :? IDisposable as owned -> owned.Dispose() | _ -> ()
             output.Append(']').ToString()
+        let parameter =
+            match context.BindQueryValue with
+            | ValueSome binder ->
+                binder.Scalar(BoundValueCallExpression([|expression|],typeof<string>,Func<obj array,obj>(fun values -> box(encode values[0]))))
+            | _ -> SqlExpr.Literal(SqlLiteral.String(encode(ExpressionEvaluation.evaluateExpr<obj> expression)))
         fun (_variables: Dictionary<string,obj>) ->
-            let parameter =
-                match context.BindQueryValue with
-                | ValueSome binder ->
-                    binder.Scalar(BoundValueCallExpression([|expression|],typeof<string>,Func<obj array,obj>(fun values -> box(encode values[0]))))
-                | _ -> SqlExpr.Literal(SqlLiteral.String(encode(ExpressionEvaluation.evaluateExpr<obj> expression)))
             let alias = context.NextAlias()
             let packet = SqlExpr.Column(Some alias,"value")
             let token = SqlExpr.FunctionCall("jsonb",[SqlExpr.Binary(packet,BinaryOperator.JsonText,SqlExpr.Literal(SqlLiteral.String "$[1]"))])
@@ -132,28 +103,58 @@ module internal QueryableHelperJoin =
             let struct(query,input) = QueryProduced.publishCore context.NextAlias core result false
             { Query=query;SerializationInput=input;KeyInput=ValueNone }
 
-    let private querySource (expression: Expression) =
-        typeof<IQueryable>.IsAssignableFrom(expression.Type) || (tryGetJoinRootSource expression).IsSome
+    let rec private fieldValue (expression: Expression) =
+        match expression with
+        | :? ConstantExpression -> true
+        | :? MemberExpression as memberAccess when (memberAccess.Member :? FieldInfo) && not(isNull memberAccess.Expression) ->
+            fieldValue memberAccess.Expression
+        | :? UnaryExpression as conversion when QueryTranslatorBaseHelpers.isReferenceUpcast conversion -> fieldValue conversion.Operand
+        | _ -> false
 
-    let private completeSequenceSource (context: QueryContext) translate expression =
-        if (tryGetJoinRootSource expression).IsSome then
-            fun variables -> translate context variables expression
-        else localRowset context expression
+    /// Native layouts come from known roots, not by sampling invocation callbacks.
+    let rec private nativeSequence (expression: Expression) =
+        let queryValue (value: obj) =
+            match value with
+            | :? IRootQueryable -> Some(Expression.Constant(value) :> Expression)
+            | :? IQueryable as query when (query.Provider :? SoloDBQueryProvider) -> nativeSequence query.Expression
+            | _ -> None
+        let declaredCollection (target: Type) =
+            target.IsGenericType && target.GetGenericTypeDefinition().Equals(typedefof<ISoloDBCollection<_>>)
+        match expression with
+        | :? UnaryExpression as conversion when QueryTranslatorBaseHelpers.isReferenceUpcast conversion -> nativeSequence conversion.Operand
+        | :? ConstantExpression as constant -> queryValue constant.Value
+        | :? MemberExpression when fieldValue expression ||
+                                  declaredCollection expression.Type && QueryTranslatorBaseHelpers.isFullyConstant expression ->
+            queryValue(ExpressionEvaluation.evaluateExpr<obj> expression)
+        | :? MethodCallExpression as call when call.Arguments.Count > 0 &&
+                                              (typeof<Queryable>.Equals(call.Method.DeclaringType) || typeof<Enumerable>.Equals(call.Method.DeclaringType)) ->
+            nativeSequence call.Arguments[0] |> Option.map(fun source ->
+                let arguments = call.Arguments |> Seq.toArray
+                arguments[0] <- source
+                call.Update(call.Object,arguments) :> Expression)
+        | :? RelationQueryExpression as directive ->
+            nativeSequence directive.Source |> Option.map(fun source ->
+                RelationQueryExpression(directive.Type,source,directive.Selector,directive.Operation) :> Expression)
+        | _ -> None
+
+    let private completeSequenceSource (context: QueryContext) translate expression native =
+        match native with
+        | Some source -> fun variables -> translate context variables source
+        | None -> localRowset context expression
 
     let internal prepareSequenceSource (context: QueryContext) translate (expression: Expression) =
-        let expression = if querySource expression then readSoloDBQueryableUntyped expression else expression
-        completeSequenceSource context translate expression
+        completeSequenceSource context translate expression (nativeSequence expression)
 
     let internal prepareInnerJoinSource
         (operation: string)
         (sourceCtx: QueryContext)
         (translate: QueryContext -> Dictionary<string, obj> -> Expression -> TranslatedQuery)
         expression =
-        let expression = if querySource expression then readSoloDBQueryableUntyped expression else expression
-        let table =
-            tryGetJoinRootSource expression |> Option.map(fun struct(table,_) -> table) |> Option.defaultValue sourceCtx.RootTable
+        let native = nativeSequence expression
+        let table = native |> Option.bind tryGetJoinRootSource |> Option.map(fun struct(table,_) -> table)
+                           |> Option.defaultValue sourceCtx.RootTable
         let context = { QueryContext.ChildOf(sourceCtx,table) with AliasCounter=sourceCtx.AliasCounter }
-        let prepare = completeSequenceSource context translate expression
+        let prepare = completeSequenceSource context translate expression native
         fun variables ->
             let input = prepare variables
             struct({context with LayerPosition=OuterLayer;SerializationInput=input.SerializationInput},input)
