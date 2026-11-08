@@ -21,7 +21,7 @@ module internal QueryTranslatorVisitPost =
 
     [<Literal>]
     let private updateManyDbRefManyPersistedIdMessage =
-        "Error: UpdateMany DBRefMany Add/Remove requires a persisted target Id.\nReason: The target Id must be nonzero to reference an existing row. Cascade-insert via DBRef.From(unsaved) is not supported in UpdateMany.\nFix: Save the target first or pass either an int64 row id or an entity whose Id property is nonzero. Insert the target first via the target collection if the entity is unsaved."
+        "Error: UpdateMany DBRefMany Add/Remove requires a persisted target Id.\nReason: The target Id must be > 0 to reference an existing row. Cascade-insert via DBRef.From(unsaved) is not supported in UpdateMany.\nFix: Save the target first or pass either an int64 row id or an entity whose Id property is > 0. Insert the target first via the target collection if the entity is unsaved."
 
     [<Literal>]
     let private updateManyDbRefValueMutationMessage =
@@ -344,7 +344,7 @@ module internal QueryTranslatorVisitPost =
                 if DBRefTypeHelpers.isDBRefSingleDefinition dbRefDef then
                     let rawId = ExpressionEvaluation.evaluateExpr<obj> mc.Arguments.[0]
                     match tryAsInt64 rawId with
-                    | ValueSome id when id <> 0L -> DocumentReferenceMutation.SetId id
+                    | ValueSome id when id > 0L -> DocumentReferenceMutation.SetId id
                     | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
                 else
                     let typedId = ExpressionEvaluation.evaluateExpr<obj> mc.Arguments.[0]
@@ -378,12 +378,12 @@ module internal QueryTranslatorVisitPost =
                     if reference.PendingEntity.IsSome then
                         raise (NotSupportedException updateManyDbRefFromUnsupportedMessage)
                     if DBRefTypeHelpers.isDBRefSingleDefinition dbRefDef then
-                        if reference.Id <> 0L then DocumentReferenceMutation.SetId reference.Id
+                        if reference.Id > 0L then DocumentReferenceMutation.SetId reference.Id
                         else DocumentReferenceMutation.Clear
                     else
                         match reference.TypedId with
                         | ValueSome typedId -> DocumentReferenceMutation.SetTypedId(args.[1],typedId)
-                        | ValueNone when reference.Id <> 0L -> DocumentReferenceMutation.SetId reference.Id
+                        | ValueNone when reference.Id > 0L -> DocumentReferenceMutation.SetId reference.Id
                         | _ -> DocumentReferenceMutation.Clear
         MutateDocumentRef(hops, propertyPath, targetType, mutation)
 
@@ -433,7 +433,7 @@ module internal QueryTranslatorVisitPost =
             | ValueSome getter -> getter.Invoke valueObj
             | ValueNone -> raise (NotSupportedException updateManyDbRefManyPersistedIdMessage)
         match tryAsInt64 rawId with
-        | ValueSome id when id <> 0L -> id
+        | ValueSome id when id > 0L -> id
         | _ -> raise (NotSupportedException updateManyDbRefManyPersistedIdMessage)
 
     let internal tryTranslateUpdateManyRelationTransform (expression: Expression) : UpdateManyRelationTransform voption =

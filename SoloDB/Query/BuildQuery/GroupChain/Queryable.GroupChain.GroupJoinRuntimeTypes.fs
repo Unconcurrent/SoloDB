@@ -23,7 +23,7 @@ module internal GroupJoinRuntimeTypes =
         { InnerCtx: QueryContext
           InnerSelect: SqlSelect
           GroupParam: ParameterExpression
-          MatchKey: SqlExpr -> SqlExpr
+          OuterKeyExpr: SqlExpr
           InnerParameter: ParameterExpression
           InnerKeyNames: string list
           Vars: Dictionary<string, obj>

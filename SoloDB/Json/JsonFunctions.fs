@@ -175,18 +175,17 @@ module internal JsonFunctions =
             raise (InvalidOperationException text)
 
 
-    let private needsPhysicalTreeId isObject hasId = isObject && not hasId
+    let private needsPhysicalTreeId id isObject hasId = isObject && not hasId && id >= 0L
 
     /// Member identity shares the tree reader policy; original child tokens remain unconverted.
-    let internal physicalTreeSubject (identity: int64 voption) (text: string) =
-        if identity.IsNone then text
+    let internal physicalTreeSubject (id: int64) (text: string) =
+        if id < 0L then text
         else
-            let id = identity.Value
             let mutable input = JsonReadContext(JsonLexer.fromString text, { Start = 0; Length = text.Length; Depth = 0 })
             JsonReadCursor.scan &input
             let isObject = not(isNull input.Properties)
             let hasId = isObject && input.Properties.ContainsKey "Id"
-            if not(needsPhysicalTreeId isObject hasId) then text
+            if not(needsPhysicalTreeId id isObject hasId) then text
             else
                 let output = System.Text.StringBuilder(text.Length + 32)
                 output.Append('{') |> ignore
@@ -201,9 +200,9 @@ module internal JsonFunctions =
         if typeof<JsonValue>.Equals(typeof<'R>) then
             let json = value :> obj :?> JsonValue
             let isObject = json.JsonType = JsonValueType.Object
-            if needsPhysicalTreeId isObject (isObject && json.Contains "Id") then json.["Id"] <- id
+            if needsPhysicalTreeId id isObject (isObject && json.Contains "Id") then json.["Id"] <- id
             value
-        elif not(isNull(box value)) && EntityDocumentId<'R>.Value then
+        elif not(isNull(box value)) && id <> -1 && EntityDocumentId<'R>.Value then
             EntityDocumentId<'R>.WithId value id
         else value
 

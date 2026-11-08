@@ -294,13 +294,7 @@ module internal OrderedChain =
                 | "Contains" ->
                     let input = QueryTranslatorSerialization.scopeSerializationInput (Some a) BaseLayer completedInput
                     let receiver = DirectValue(col a "Value", input)
-                    let comparison =
-                        if call.Arguments.Count = 3 then
-                            let probe = if adapter.IsValue arg.Value then Some arg.Value else None
-                            let operation = adapter.PrepareEquality elementType call.Arguments[2] probe
-                            let right = if probe.IsSome then SqlExpr.Literal SqlLiteral.Null else QueryComparers.key adapter.Alias (adapter.Value arg.Value)
-                            QueryComparers.equal operation (QueryComparers.key adapter.Alias receiver) right
-                        else QueryDefaultEquality.contains adapter.Alias elementType adapter.MembershipContext (adapter.IsValue arg.Value)
+                    let comparison = QueryDefaultEquality.contains adapter.Alias elementType adapter.MembershipContext (adapter.IsValue arg.Value)
                                          receiver (fun () -> adapter.Comparison arg.Value)
                                          (fun () -> adapter.Comparison(Expression.PropertyOrField(arg.Value, "Id")))
                                          (fun _ -> invalidOp "A root value matcher is not an ordered membership context.")

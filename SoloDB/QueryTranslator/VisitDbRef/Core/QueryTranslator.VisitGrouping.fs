@@ -52,7 +52,6 @@ module internal QueryTranslatorVisitGrouping =
                 IsValue = fun source -> isFullyConstant source || (builder.SourceContext.BindQueryValue |> ValueOption.exists (fun binder -> binder.IsValue source))
                 Alias = builder.SourceContext.NextAlias
                 Variables = builder.Variables
-                PrepareEquality = QueryComparers.prepareWithProbe builder.SourceContext builder.Variables
                 DefaultValue = QueryDefault.value builder.Variables
                 Value = fun value -> visitProduced value builder
                 Comparison = fun value -> visitComparisonProduced value builder

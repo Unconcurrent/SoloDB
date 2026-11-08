@@ -60,8 +60,7 @@ type internal ModelMetadata private () =
     static member RegisterComparer<'T>() =
         TypeMetadataCache.Register(typeof<'T>,fun metadata ->
             { metadata with EqualityComparer = MetadataValue.generated (box EqualityComparer<'T>.Default)
-                            OrderingComparer = MetadataValue.generated (box Comparer<'T>.Default)
-                            EqualityOperation = MetadataValue.generated (ModelMetadata.Equality<'T>()) })
+                            OrderingComparer = MetadataValue.generated (box Comparer<'T>.Default) })
 
     static member private Members(owner: Type) =
         TypeMetadataCache.Discover(owner,(fun metadata -> metadata.MemberTypes),
@@ -171,15 +170,6 @@ type internal ModelMetadata private () =
 
     static member private Comparer<'T>() = box EqualityComparer<'T>.Default
     static member private Ordering<'T>() = box Comparer<'T>.Default
-    static member private Equality<'T>() : Func<obj,obj,obj,bool> =
-        Func<obj,obj,obj,bool>(fun comparer left right ->
-            let comparer = if isNull comparer then EqualityComparer<'T>.Default :> IEqualityComparer<'T> else comparer :?> IEqualityComparer<'T>
-            comparer.Equals(unbox<'T> left,unbox<'T> right))
-    static member EqualityOperation(owner: Type) =
-        TypeMetadataCache.Discover(owner,(fun metadata -> metadata.EqualityOperation),
-            (fun value metadata -> { metadata with EqualityOperation = ValueSome value }),Func<Func<obj,obj,obj,bool>>(fun () ->
-                if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "typed equality operation" owner
-                typeof<ModelMetadata>.GetMethod("Equality",BindingFlags.NonPublic ||| BindingFlags.Static).MakeGenericMethod(owner).Invoke(null,null) :?> Func<obj,obj,obj,bool>))
     static member DefaultComparer(owner: Type) =
         TypeMetadataCache.Discover(owner,(fun metadata -> metadata.EqualityComparer),
             (fun value metadata -> { metadata with EqualityComparer = ValueSome value }),Func<obj>(fun () ->

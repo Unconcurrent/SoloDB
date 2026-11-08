@@ -169,12 +169,11 @@ type internal NativeStatementScope =
         this.statement.HasBindings <- true
         this.cache.Database.Check(raw.sqlite3_bind_null(handle, index))
     member this.BindValue(index: int, value: obj) =
-        this.CheckStatement()
+        let handle = this.Handle
         this.statement.HasBindings <- true
-        this.statement.BindValue(index,value)
+        this.cache.Database.Check(NativeParameterBinding.bind handle index value)
     member this.BindValues(values: IReadOnlyDictionary<string, obj>) =
         this.CheckStatement()
-        this.statement.BeginValueBinding()
         let names = this.statement.ParameterNames
         this.statement.HasBindings <- names.Length > 0
         let shortNames = this.statement.UnprefixedParameterNames
@@ -182,13 +181,13 @@ type internal NativeStatementScope =
             let mutable value = null
             if not (values.TryGetValue(names.[i], &value)) && not (values.TryGetValue(shortNames.[i], &value)) then
                 raise (InvalidOperationException("Missing SQL argument: " + names.[i]))
-            this.statement.BindValue(i+1,value)
+            this.cache.Database.Check(NativeParameterBinding.bind this.Handle (i + 1) value)
     member this.Bind(arguments: INativeArgumentBinding) =
         this.CheckStatement()
         this.statement.Bind(arguments)
     member private this.StepNative(attempt: byref<NativeStatementStepAttempt>) =
         this.cache.Database.BeginStorageOperation()
-        attempt.Result <- this.cache.Step(this.statement)
+        attempt.Result <- raw.sqlite3_step(this.statement.Handle)
         this.Check()
         let database = this.cache.Database
         if database.CallbackEpoch <> attempt.Callbacks then database.RaiseCallbackFailure()
@@ -276,7 +275,7 @@ type internal NativeStatementScope =
         if this.statement.HasStatement then
             this.statement.AdvanceRow()
             this.cache.Database.BeginStorageOperation()
-            let result = this.cache.Reset(this.statement)
+            let result = raw.sqlite3_reset(this.statement.Handle)
             this.cache.Database.ObserveStatementCompletion()
             this.cache.Database.Check(result)
             if this.affected < 0 && raw.sqlite3_stmt_readonly(this.statement.Handle) = 0 then
@@ -295,7 +294,7 @@ type internal NativeStatementScope =
                     this.statement.AdvanceRow()
                     try
                         this.cache.Database.BeginStorageOperation()
-                        let result = this.cache.Reset(this.statement)
+                        let result = raw.sqlite3_reset(this.statement.Handle)
                         if current then
                             database.ObserveStatementCompletion()
                             if isNull primary && isNull failure then database.Check(result)

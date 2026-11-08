@@ -189,11 +189,6 @@ module internal Helper =
         // Drop/recreate must rebuild relation descriptors from a clean cache snapshot.
         TypeMetadataCache.ClearReferenceSpecs()
 
-    let internal automaticDocumentIdSql quotedTable =
-        // SQLite's next rowid can be zero after explicitly negative rows. Zero
-        // remains the document/reference empty state, so avoid publishing it.
-        $"(SELECT CASE WHEN MAX(Id) = -1 THEN 1 ELSE NULL END FROM {quotedTable})"
-
     /// <summary>
     /// Inserts serialized JSON into a specified table, with options for replacement and explicit ID.
     /// </summary>
@@ -215,9 +210,10 @@ module internal Helper =
                 .Append(" INTO \"")
                 .Append(name)
                 .Append("\"(")
-                .Append("Id,Value) VALUES(")
-                .Append(if includeId then "@id" else automaticDocumentIdSql (RelationsTypes.quoteIdentifier name))
-                .Append(",jsonb(@jsonText)) RETURNING Id;")
+                .Append(if includeId then "Id," else String.Empty)
+                .Append("Value) VALUES(")
+                .Append(if includeId then "@id," else String.Empty)
+                .Append("jsonb(@jsonText)) RETURNING Id;")
                 .ToString()
 
         let mutable statement = connection.OpenStatement(queryString)
@@ -251,7 +247,10 @@ module internal Helper =
 
 
         let id =
-            if existsWritebleDirectId && 0L <> EntityDocumentId<'T>.Read item then
+            if existsWritebleDirectId && -1L >= EntityDocumentId<'T>.Read item then
+                raise (InvalidOperationException
+                    "Error: Invalid Id value.\nReason: Id must be 0 for auto-generated ids or > 0 for explicit ids.\nFix: Use Id=0 for new entities or a positive Id for explicit insert.")
+            elif existsWritebleDirectId && 0L <> EntityDocumentId<'T>.Read item then
                 // Inserting with Id
                 insertJson orReplace (Some (EntityDocumentId<'T>.Read item)) name json connection
             else

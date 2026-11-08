@@ -70,8 +70,6 @@ module internal ChainExpr =
         let comparer = call.Arguments[call.Arguments.Count-1]
         let ordinal = typeof<string>.Equals keyType && ordinalComparer comparer
         let nullComparer = match comparer with :? ConstantExpression as value -> isNull value.Value | _ -> false
-        if equality && (method.Name = "Join" || method.Name = "GroupJoin" || method.Name = "Contains") &&
-           not(isImmutableComparer comparer || nullComparer) && QueryComparers.scalar keyType then call,None else
         let stringOrdering = ordering && typeof<string>.Equals keyType
         let validate value =
             let fixedOrdinal = typeof<string>.Equals keyType && Object.ReferenceEquals(value,StringComparer.Ordinal)

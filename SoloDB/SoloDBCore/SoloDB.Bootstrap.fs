@@ -76,12 +76,11 @@ module internal Bootstrap =
                     if arguments[0].IsNull then context.SetNull()
                     else
                         let text = arguments[0].CopyToString()
-                        let identity = if arguments[1].IsNull then ValueNone else ValueSome(arguments[1].GetInt64())
+                        let identity = if arguments[1].IsNull then -1L else arguments[1].GetInt64()
                         match enum<TreeValueFormat>(arguments[2].GetInt32()) with
                         | TreeValueFormat.Subject -> context.SetText(JsonFunctions.physicalTreeSubject identity text)
                         | TreeValueFormat.EqualityKey ->
-                            let value = JsonSerializator.JsonValue.Parse text
-                            let subject = match identity with ValueSome id -> JsonFunctions.withPhysicalId id value | ValueNone -> value
+                            let subject = JsonFunctions.withPhysicalId identity (JsonSerializator.JsonValue.Parse text)
                             let key = subject.EqualityKey()
                             context.SetBlob(System.Runtime.InteropServices.MemoryMarshal.AsBytes(key.AsSpan()))
                         | _ -> invalidArg "format" "The native tree result format is not supported."),
@@ -343,8 +342,6 @@ module internal Bootstrap =
         let readOnly = dbConnection.IsReadOnly
         if dbConnection.DatabaseOwner.IsStorageReadOnly && dbSchemaVersion < 6 then
             raise (NotSupportedException("ReadOnly storage requires a current SoloDB image. Upgrade a writable copy before opening it as immutable storage."))
-
-        FileSystemReferenceSchema.evolveFileSystemOwners dbConnection dbSchemaVersion currentSupportedSchemaVersion
 
         // Schema creation: version 0 -> 1
         if dbSchemaVersion = 0 then

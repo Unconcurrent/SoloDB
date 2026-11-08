@@ -41,7 +41,6 @@ module internal OrderedChainPlan =
         Variables: System.Collections.Generic.Dictionary<string,obj>
         DefaultValue: Type -> QueryProducedValue
         Comparison: Expression -> QueryProducedValue
-        PrepareEquality: Type -> Expression -> Expression option -> SqlExpr
         Alias: unit -> string
     }
     let lambda e =
@@ -59,8 +58,7 @@ module internal OrderedChainPlan =
     let validateOverload (call: MethodCallExpression) =
         if call.Method.Name = "CountBy" && call.Arguments.Count = 3 then
             validateGroupingComparer "CountBy" (call.Method.GetGenericArguments().[1]) call.Arguments.[2]
-        if not(call.Method.Name = "Contains" && call.Arguments.Count = 3 && QueryComparers.scalar(call.Method.GetGenericArguments()[0])) then
-            validateDefaultComparerArity call.Method.Name call.Arguments.Count
+        validateDefaultComparerArity call.Method.Name call.Arguments.Count
     let parse isRoot (expr: Expression) =
         let rec loop (expr: Expression) stages =
             if isRoot expr then Some { Root = expr; Stages = stages } else

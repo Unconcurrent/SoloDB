@@ -20,7 +20,7 @@ open RelationsDelete
 open RelationsBatchLoad
 open RelationsCore
 let private emitSingleRelationAssignment (ops: ResizeArray<RelationUpdateManyOp>) (descriptor: RelationDescriptor) (newId: int64) =
-    if newId <> 0L then
+    if newId > 0L then
         ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, newId))
     else
         ops.Add(SetDBRefToNone(descriptor.PropertyPath, descriptor.TargetType))
@@ -46,7 +46,7 @@ let prepareInsert (tx: RelationTxContext) (owner: obj) =
             match descriptor.Kind with
             | Single ->
                 let targetId = resolveSingleTargetIdAndCascade tx descriptor owner visited depth
-                if targetId <> 0L then
+                if targetId > 0L then
                     ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, targetId))
             | Many ->
                 match collectManyTargetIdsAndCascade tx descriptor owner true visited depth with
@@ -104,7 +104,7 @@ let prepareUpsert (tx: RelationTxContext) (oldOwner: obj voption) (newOwner: obj
 
 let private prepareUpdateCore (replace: bool) (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newOwner: obj) =
     ensureTxContext tx
-    if ownerId = 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be nonzero."))
+    if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
     ensureOwnerInstance tx.OwnerType oldOwner "oldOwner"
     ensureOwnerInstance tx.OwnerType newOwner "newOwner"
     withRelationSqliteWrap "prepare" "prepareUpdate" (fun () ->
@@ -157,7 +157,7 @@ let private prepareUpdateCore (replace: bool) (tx: RelationTxContext) (ownerId: 
                         // Persisted-target AddOnly on an unloaded tracker is treated as explicit replace intent.
                         let hasUnsavedPendingTarget =
                             tracker.GetCurrentItemsBoxed()
-                            |> Seq.exists (fun item -> readEntityIdOrZero descriptor.TargetType item = 0L)
+                            |> Seq.exists (fun item -> readEntityIdOrZero descriptor.TargetType item <= 0L)
                         if hasUnsavedPendingTarget then
                             raise (InvalidOperationException(
                                 $"Error: Cannot apply add-only mutation on unloaded relation '{descriptor.PropertyPath}'.\nReason: The DBRefMany tracker is unloaded and has pending mutations without Clear(), which is ambiguous.\nFix: Load the relation first, or call Clear() then Add(...) before saving."))
@@ -194,7 +194,7 @@ let prepareReplacement tx ownerId oldOwner newOwner = prepareUpdateCore true tx 
 
 let prepareDeleteOwner (tx: RelationTxContext) (ownerId: int64) (owner: obj) =
     ensureTxContext tx
-    if ownerId = 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be nonzero."))
+    if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
     ensureOwnerInstance tx.OwnerType owner "owner"
     withRelationSqliteWrap "prepare" "prepareDeleteOwner" (fun () ->
         { OwnerId = ownerId; OwnerType = tx.OwnerType }

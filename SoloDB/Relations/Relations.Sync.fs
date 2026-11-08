@@ -23,7 +23,7 @@ open RelationsPlan
 let private runSyncWithOwnerIdGuard (opName: string) (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) (updateOwnerJson: bool) =
     ensureTxContext tx
     ensureTransaction tx
-    if ownerId = 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be nonzero."))
+    if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
     withRelationSqliteWrap "sync" opName (fun () ->
         // Entity preparation and serialization can execute arbitrary nested user code.
         if plan.Kind <> RelationPlanKind.UpdateMany then tx.Preparation.Invalidate()
@@ -45,7 +45,7 @@ let syncUpdate (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan
 let syncReplaceOne (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newOwner: obj) =
     ensureTxContext tx
     ensureTransaction tx
-    if ownerId = 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be nonzero."))
+    if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
     ensureOwnerInstance tx.OwnerType oldOwner "oldOwner"
     ensureOwnerInstance tx.OwnerType newOwner "newOwner"
     withRelationSqliteWrap "sync" "syncReplaceOne" (fun () ->
@@ -62,7 +62,7 @@ let syncReplaceMany (tx: RelationTxContext) (ownerIds: int64 seq) (oldOwners: ob
     if isNull oldOwners then nullArg "oldOwners"
     ensureOwnerInstance tx.OwnerType newOwner "newOwner"
     for id in ownerIds do
-        if id = 0L then raise (ArgumentOutOfRangeException("ownerIds", id, "Every owner id must be nonzero."))
+        if id <= 0L then raise (ArgumentOutOfRangeException("ownerIds", id, "Every owner id must be > 0."))
     for oldOwner in oldOwners do
         ensureOwnerInstance tx.OwnerType oldOwner "oldOwners"
 
@@ -84,7 +84,7 @@ let syncReplaceMany (tx: RelationTxContext) (ownerIds: int64 seq) (oldOwners: ob
 let syncDeleteOwner (tx: RelationTxContext) (plan: RelationDeletePlan) =
     ensureTxContext tx
     ensureTransaction tx
-    if plan.OwnerId = 0L then raise (ArgumentOutOfRangeException("plan.OwnerId", plan.OwnerId, "ownerId must be nonzero."))
+    if plan.OwnerId <= 0L then raise (ArgumentOutOfRangeException("plan.OwnerId", plan.OwnerId, "ownerId must be > 0."))
     let deleteCtx = createDeleteTraversalContext()
     withRelationSqliteWrap "sync" "syncDeleteOwner" (fun () ->
         ensureRelationCatalogTable tx.Connection
@@ -101,7 +101,7 @@ let applyOwnerDeletePolicies (tx: RelationTxContext) (ownerTable: string) (owner
     ensureTxContext tx
     ensureTransaction tx
     if String.IsNullOrWhiteSpace ownerTable then raise (ArgumentException("ownerTable is required.", "ownerTable"))
-    if ownerId = 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be nonzero."))
+    if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
     let deleteCtx = createDeleteTraversalContext()
     withRelationSqliteWrap "delete" "applyOwnerDeletePolicies" (fun () ->
         ensureRelationCatalogTable tx.Connection
@@ -112,7 +112,7 @@ let applyOwnerReplacePolicies (tx: RelationTxContext) (ownerTable: string) (owne
     ensureTxContext tx
     ensureTransaction tx
     if String.IsNullOrWhiteSpace ownerTable then raise (ArgumentException("ownerTable is required.", "ownerTable"))
-    if ownerId = 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be nonzero."))
+    if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
     let deleteCtx = createDeleteTraversalContext()
     withRelationSqliteWrap "replace" "applyOwnerReplacePolicies" (fun () ->
         ensureRelationCatalogTable tx.Connection

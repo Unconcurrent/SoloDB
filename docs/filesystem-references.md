@@ -74,10 +74,6 @@ reports.UpdateMany((fun (r: Report) -> r.Id = id), fun r -> r.MainFile.Set(FileR
 
 `FileRef.To(id)` and `DirectoryRef.To(id)` create unloaded references to positive header IDs. `From(header)` captures an existing header and its identity. `None` or the default Single value is empty; check `HasValue` before use. `Value` throws when empty or unloaded. A document save never creates a file or directory from a reference.
 
-Document owners may have any nonzero signed 64-bit ID, including negative IDs. Zero remains unassigned. This does not change file or directory header IDs, which remain positive.
-
-On the first writable open of an older database with a positive-only document-owner constraint, SoloDB updates the protecting reference table in one transaction. This copies that table's rows and preserves its indexes, triggers, views and foreign keys; the work is proportional to the table's size. The database version does not change. Readonly opens leave the original table untouched, and subsequent writable opens do not repeat the copy.
-
 Equality compares the reference kind and header ID, not the loaded snapshot. Ordinary and compiled queries support reference equality; an empty Single has an `Id` of zero in both CLR and SQL queries.
 
 Identity is local to a database and the reference kind. Values do not prove database provenance. Detached IDs can be reused after their target has been deleted; they are not permanent generation identities. Moves and renames retain a live target's ID and protection. Loaded `Value` is a header and metadata snapshot, with no file bytes or connection. It retains its old path after a move; query again to load current facts.

@@ -165,7 +165,7 @@ let internal applyResetMapIfAny (owner: obj) (resetMap: Dictionary<string, int64
         resetDbRefManyTrackers owner (asReadOnlyDict resetMap)
 
 let internal readPersistedManyTargetIds (tx: RelationTxContext) (descriptor: RelationDescriptor) (ownerId: int64) =
-    if ownerId = 0L then
+    if ownerId <= 0L then
         [||]
     else
         let ownerColumn, targetColumn =

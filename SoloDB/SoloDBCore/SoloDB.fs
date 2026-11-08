@@ -177,7 +177,7 @@ type internal Collection<'T>(connection: NativeConnection, name: string, connect
         let oldRow =
             if EntityDocumentId<'T>.Value then
                 let id = EntityDocumentId<'T>.Read item
-                if id <> 0L then
+                if id > 0L then
                     match readDocumentById conn name id with
                     | row when Object.ReferenceEquals(row, null) -> ValueNone
                     | row -> ValueSome row

@@ -51,9 +51,6 @@ module internal QueryOrderingPrimitives =
         finally ArrayPool<char>.Shared.Return chars
 
     let register (connection: NativeSqliteConnection) =
-        connection.RegisterManagedScalar(NativeQueryEquality.FunctionName,3,RawScalarFunc(fun context values ->
-            let text (value: SqliteRawValue) = if value.IsNull then "null" else value.CopyToString()
-            context.SetInt32(if connection.StatementCache.QueryEqual(values[0].GetInt32(),text values[1],text values[2]) then 1 else 0)),SqliteFunctionFlags.None)
         connection.RegisterScalar("ORDER_NUMBER",2,RawScalarFunc(fun context values ->
             let floating = values[0].GetInt32() = 1
             let encoded =

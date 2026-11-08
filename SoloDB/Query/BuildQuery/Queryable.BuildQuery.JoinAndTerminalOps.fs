@@ -55,13 +55,17 @@ module internal QueryableBuildQueryJoinAndTerminalOps =
 
                 | SupportedLinqMethods.Join ->
                     match m.Expressions.Length with
-                    | 4 | 5 ->
+                    | 5 ->
+                        raise (NotSupportedException(
+                            "Error: Join comparer overload is not supported.
+Reason: SoloDB only supports SQL-translatable equality without custom comparers here.
+Fix: Remove the comparer or move the join after AsEnumerable()."))
+                    | 4 ->
                         let prepareInner = prepareInnerJoinSource "Join" sourceCtx translateQueryFn m.Expressions.[0]
 
                         let outerKeySelector = unwrapLambdaExpressionOrThrow "Join outer key selector" m.Expressions.[1]
                         let innerKeySelector = unwrapLambdaExpressionOrThrow "Join inner key selector" m.Expressions.[2]
                         let resultSelector = unwrapLambdaExpressionOrThrow "Join result selector" m.Expressions.[3]
-                        let custom = m.Expressions.Length = 5
 
                         let keyShape = joinKeyShape outerKeySelector innerKeySelector
                         if (match keyShape with AtomicKey _ -> true | _ -> false) &&
@@ -72,8 +76,6 @@ Reason: Anonymous-type and composite key equality lowering is not supported here
 Fix: Join on a single scalar key or move the join after AsEnumerable()."))
 
                         addComplexFinal statements (fun ctx ->
-                            let operation = if custom then Some(QueryComparers.prepare sourceCtx ctx.Vars outerKeySelector.ReturnType m.Expressions[4]) else None
-                            let key produced = if custom then QueryProduced.typed typeof<string> (QueryComparers.key sourceCtx.NextAlias produced) else produced
                             let outerAlias = "o"
                             let innerAlias = "j"
                             let outerCtx =
@@ -82,17 +84,14 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                                     SerializationInput = ctx.Input
                                     Joins = ResizeArray() }
                             let outerKey = translateJoinSingleSourceProduced outerCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
-                            let outerTerms,keyEdges = prepareJoinKey keyShape outerCtx ctx.Vars (key outerKey)
+                            let outerTerms,keyEdges = prepareJoinKey keyShape outerCtx ctx.Vars outerKey
                             let outerKeyExpr = keyExpression outerTerms
                             let keyPhase = reserveJoinKey sourceCtx
                             let struct(innerCtx, innerInput) = prepareInner ctx.Vars
                             let struct(innerQuery, keyName) =
                                 publishInnerJoinKey keyShape ctx.Vars innerCtx innerInput innerAlias (fun context alias ->
-                                    keyPhase (fun () -> translateJoinSingleSourceProduced context alias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body |> key))
-                            let joinCondition =
-                                match operation with
-                                | Some operation -> QueryComparers.join outerKeySelector.ReturnType operation outerKeyExpr (keyColumns innerAlias keyName)
-                                | None -> SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, keyColumns innerAlias keyName)
+                                    keyPhase (fun () -> translateJoinSingleSourceProduced context alias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body))
+                            let joinCondition = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, keyColumns innerAlias keyName)
 
                             let outerKeyJoins = QueryTranslatorReferenceJoin.preparedJoinClauses outerCtx.Joins @ keyEdges
                             let outerCtx = { outerCtx with Joins = ResizeArray() }

@@ -479,7 +479,7 @@ The source parameter is bound to the receiving collection. Supply zero to three 
 
 A captured `IQueryable<T>` source property is read once during compilation to discover its query structure; getter effects and exceptions occur then. Compilation does not enumerate local rows. If that property returns an in-memory query, each invocation reads and enumerates its fresh value. Use an `IEnumerable<T>` property or an invocation argument for local values that should first be acquired at invocation. Database query structure remains fixed by compilation.
 
-Default-comparer overloads accept `EqualityComparer<T>.Default` or `null` for supported keys. `Join`, `GroupJoin` and `Contains` also accept scalar-key comparers; their `Equals` method receives the decoded key values. These comparisons may scan inputs instead of seeking a default index. Explicit string ordering accepts `Comparer<string>.Default` for current-culture ordering and `StringComparer.Ordinal` for ordinal ordering. Compiled queries read captured comparers at each invocation.
+Default-comparer overloads accept `EqualityComparer<T>.Default` or `null` for supported keys. Explicit string ordering accepts `Comparer<string>.Default` for current-culture ordering and `StringComparer.Ordinal` for ordinal ordering. Compiled queries read captured comparers at each invocation. Other comparers are refused; normalize the key in the selector or use `AsEnumerable()` to choose CLR execution explicitly.
 
 Read terminals and materializers can be included directly:
 

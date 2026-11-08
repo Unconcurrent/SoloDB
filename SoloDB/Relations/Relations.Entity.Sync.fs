@@ -85,11 +85,15 @@ let internal insertTargetEntity (tx: RelationTxContext) (targetTable: string) (t
     if isNull entity then
         raise (ArgumentNullException("entity", "Cascade insert target entity cannot be null."))
 
+    // Reject negative id before any schema side effects.
     let id = readEntityIdOrZero targetType entity
+    if id < 0L then
+        raise (InvalidOperationException(
+            $"Error: Invalid Id {id} on pending relation target '{targetType.FullName}'.\nReason: Id must be >= 0.\nFix: Use 0 for new entities or a positive Id for existing entities."))
 
     ensureCollectionTableExists tx.Connection targetTable
 
-    if id = 0L then
+    if id <= 0L then
         if (SoloIdAccessor.TryGetMember targetType).IsSome then tx.Preparation.DisableReuse()
         try
             CustomIdRunner.RunBoxedIfEmpty(targetType, entity, targetTable, tx)
@@ -103,12 +107,12 @@ let internal insertTargetEntity (tx: RelationTxContext) (targetTable: string) (t
     let json = serializeEntityForStorage targetType entity
     let qTarget = quoteIdentifier targetTable
     let sql =
-        if id <> 0L then $"INSERT INTO {qTarget}(Id, Value) VALUES (@id, jsonb(@jsonText)) RETURNING Id;"
-        else $"INSERT INTO {qTarget}(Id, Value) VALUES ({Helper.automaticDocumentIdSql qTarget}, jsonb(@jsonText)) RETURNING Id;"
+        if id > 0L then $"INSERT INTO {qTarget}(Id, Value) VALUES (@id, jsonb(@jsonText)) RETURNING Id;"
+        else $"INSERT INTO {qTarget}(Value) VALUES (jsonb(@jsonText)) RETURNING Id;"
     let insertedId =
         let mutable statement = tx.Connection.OpenStatement(sql)
         try
-            if id <> 0L then
+            if id > 0L then
                 statement.BindInt64(1, id)
                 statement.BindTextBuffer(2, json)
             else statement.BindTextBuffer(1, json)

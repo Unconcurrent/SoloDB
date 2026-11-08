@@ -62,7 +62,7 @@ let rec internal cascadeInsertDeep
         | Single ->
             let value = descriptor.Property.Read.Invoke(entity)
             let refId = readDbRefId value
-            if refId <> 0L then
+            if refId > 0L then
                 // Already-resolved reference — create link row, validate target exists.
                 ensureRelationSchema childTx descriptor
                 ensureTargetExists childTx descriptor.TargetTable refId
@@ -73,7 +73,7 @@ let rec internal cascadeInsertDeep
                 match tryGetPendingEntity value with
                 | ValueSome pending ->
                     let entityId = readEntityIdOrZero descriptor.TargetType pending
-                    if entityId <> 0L then
+                    if entityId > 0L then
                         // Existing entity, link-only.
                         let dbRef = createDbRefTo descriptor.Property.ReferenceType entityId
                         descriptor.Property.Write.Invoke(entity, dbRef)
@@ -104,11 +104,11 @@ let rec internal cascadeInsertDeep
                 for item in tracker.GetCurrentItemsBoxed() do
                     if not (isNull item) then
                         let mutable itemId = readEntityIdOrZero descriptor.TargetType item
-                        if itemId = 0L then
+                        if itemId <= 0L then
                             // RECURSIVE cascade-insert for Many items.
                             itemId <-
                                 cascadeInsertDeep childTx descriptor.TargetTable descriptor.TargetType item visited (depth + 1)
-                        if itemId <> 0L then
+                        if itemId > 0L then
                             // Defense-in-depth symmetric with the Single path: when the
                             // descriptor declares a typed-id, verify the just-cascade-inserted
                             // child carries a non-default [<SoloId>] before linking. After the
@@ -141,7 +141,7 @@ let rec internal cascadeInsertDeep
 let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) (visited: HashSet<obj>) (depth: int) =
     let value = descriptor.Property.Read.Invoke(owner)
     let id = readDbRefId value
-    if id <> 0L then
+    if id > 0L then
         // Preflight target-exists for DBRef.To(id) before owner mutation.
         ensureTargetExists tx descriptor.TargetTable id
         id
@@ -158,8 +158,8 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
         match tryGetPendingEntity value with
         | ValueSome pending ->
             let entityId = readEntityIdOrZero descriptor.TargetType pending
-            if entityId <> 0L then
-                // Entity already persisted (Id <> 0) — link-only, no re-insert.
+            if entityId > 0L then
+                // Entity already persisted (Id > 0) — link-only, no re-insert.
                 ensureTargetExists tx descriptor.TargetTable entityId
                 let dbRef =
                     if isTyped then
@@ -220,7 +220,7 @@ let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor:
                         ()
                     else
                         let mutable id = readEntityIdOrZero descriptor.TargetType item
-                        if id = 0L then
+                        if id <= 0L then
                             flush()
                             id <-
                                 cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType item visited (depth + 1)
@@ -231,14 +231,14 @@ let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor:
                             match descriptor.TypedIdType with
                             | ValueSome _ -> extractSoloIdOrFail descriptor.TargetType item |> ignore
                             | ValueNone -> ()
-                        elif id <> 0L then
+                        elif id > 0L then
                             // Preflight target-exists for pre-existing many items before owner mutation.
                             if canBatch then
                                 pending.Add id
                                 if pending.Count = 500 then flush()
                             else
                                 ensureTargetExists tx descriptor.TargetTable id
-                        if id <> 0L && (not canBatch || pending.Count = 0) then
+                        if id > 0L && (not canBatch || pending.Count = 0) then
                             ids.Add(id) |> ignore
                 flush()
                 ValueSome (ids |> Seq.toArray)
