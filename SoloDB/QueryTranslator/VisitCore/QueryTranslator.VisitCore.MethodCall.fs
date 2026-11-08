@@ -202,8 +202,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
             let constructed =
                 match m.Object with
                 | :? NewExpression as created -> DateTimeConstruction.tryTranslateDateTimeOffsetFormat created format qb (fun value -> visitDu value qb)
-                | :? MethodCallExpression as parsed when typeof<DateTimeOffset>.Equals parsed.Type &&
-                      parsed.Method.Name = "Parse" && parsed.Arguments.Count = 1 && typeof<string>.Equals parsed.Arguments[0].Type ->
+                | :? MethodCallExpression as parsed when DateTimeSql.isOffsetParse parsed ->
                     Some(SqlExpr.FunctionCall("DTO_PARSE_FORMAT",[visitDu parsed.Arguments[0] qb;format()]))
                 | _ -> None
             let scalarFormat =

@@ -140,8 +140,7 @@ module internal QueryTranslatorVisitCoreMemberAccess =
                         match DateTimeConstruction.tryTranslateDateTimeOffsetConstructorMember m.MemberName ne qb (fun expr -> visitDu expr qb) with
                         | Some value -> value
                         | None -> DateTimeMembers.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
-                    | :? MethodCallExpression as parsed when parsed.Method.Name = "Parse" &&
-                          parsed.Arguments.Count = 1 && typeof<string>.Equals parsed.Arguments[0].Type ->
+                    | :? MethodCallExpression as parsed when DateTimeSql.isOffsetParse parsed ->
                         SqlExpr.FunctionCall("DTO_PARSE_PART",[SqlExpr.Literal(SqlLiteral.String m.MemberName);visitDu parsed.Arguments[0] qb])
                     | _ -> DateTimeMembers.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
                 elif typeof<DateTime>.Equals(m.InputType) then DateTimeMembers.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType

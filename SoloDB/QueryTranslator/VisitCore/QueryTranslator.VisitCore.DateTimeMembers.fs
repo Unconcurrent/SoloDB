@@ -25,7 +25,7 @@ module internal DateTimeMembers =
         | "Hour"        -> strftimeInt "%H"
         | "Minute"      -> strftimeInt "%M"
         | "Second"      -> strftimeInt "%S"
-        | "Millisecond" -> castInt (SqlExpr.Binary(ms, BinaryOperator.Mod, ms1000))
+        | "Millisecond" -> castInt (millisPart ms)
         | "DayOfWeek"   -> strftimeInt "%w"
         | "DayOfYear"   -> strftimeInt "%j"
         | "Ticks" | "Kind" | "Date" | "TimeOfDay" when typeof<DateTime>.Equals clrType ->

@@ -33,6 +33,6 @@ var month = format("yyyy-MM").ToArray();
 var day = format("dd/MM/yyyy").ToArray();
 ```
 
-Literal formats retain their existing indexed SQL. Dynamic formats preserve the same UTC-equivalent and millisecond policy. DateOnly, TimeOnly and TimeSpan also accept string formats. Malformed consumed formats raise a format error.
+Literal formats use native SQL and can be indexed with `EnsureIndex`. Dynamic formats preserve the same UTC-equivalent and millisecond policy, including instants before 1970. Existing index definitions stay unchanged; call `EnsureIndex` for expressions used by current queries. DateOnly, TimeOnly and TimeSpan also accept string formats. Malformed consumed formats raise a format error.
 
 The single-string `Parse` calls for Decimal, DateTime, DateTimeOffset, DateOnly, TimeOnly and TimeSpan use the corresponding .NET parser and execution-time current culture. They return SoloDB's existing stored representation. Invalid text raises the parser's format or range error; it does not become zero through a SQL cast. Decimal parsing retains its exact coefficient before storage encoding.

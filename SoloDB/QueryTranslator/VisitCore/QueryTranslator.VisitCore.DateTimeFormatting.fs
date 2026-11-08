@@ -183,7 +183,7 @@ module internal DateTimeFormatting =
             | FromDayNumber ->
                 SqlExpr.Literal(SqlLiteral.Integer 0L), SqlExpr.Literal(SqlLiteral.Integer 0L)
             | FromMillisecondsSinceMidnight ->
-                unixSec rawExpr, SqlExpr.Binary(rawExpr, BinaryOperator.Mod, ms1000)
+                unixSec rawExpr, millisPart rawExpr
 
         let sf fmt =
             match mode with

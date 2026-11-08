@@ -74,7 +74,7 @@ module internal DateTimeRuntime =
             let offset = if args[3].IsNull then ValueNone else ValueSome(args[3].GetDouble())
             result.SetText(format (args[0].GetInt32()) (args[1].GetInt64()) (args[2].CopyToString()) offset)),SqliteFunctionFlags.None)
         connection.RegisterManagedScalar("TEMPORAL_PARSE",2,RawScalarFunc(fun result args ->
-            let text = args[1].CopyToString()
+            let text = if args[1].IsNull then null else args[1].CopyToString()
             match args[0].GetInt32() with
             | 0 -> result.SetInt64(DateTime.Parse(text,CultureInfo.CurrentCulture).ToBinary())
             | 1 -> result.SetInt64(DateTimeOffset.Parse(text,CultureInfo.CurrentCulture).ToUnixTimeMilliseconds())
@@ -91,7 +91,9 @@ module internal DateTimeRuntime =
             let value = fromClock (args[0].GetInt32()) (args[1].GetInt64()) (args[2].GetInt64())
             result.SetText(value.ToString(args[3].CopyToString(),CultureInfo.InvariantCulture))),SqliteFunctionFlags.None)
         connection.RegisterManagedScalar("DTO_PARSE_PART",2,RawScalarFunc(fun result args ->
-            result.SetInt64(offsetPart (args[0].CopyToString()) (DateTimeOffset.Parse(args[1].CopyToString(),CultureInfo.CurrentCulture)))),SqliteFunctionFlags.None)
+            let text = if args[1].IsNull then null else args[1].CopyToString()
+            result.SetInt64(offsetPart (args[0].CopyToString()) (DateTimeOffset.Parse(text,CultureInfo.CurrentCulture)))),SqliteFunctionFlags.None)
         connection.RegisterManagedScalar("DTO_PARSE_FORMAT",2,RawScalarFunc(fun result args ->
-            let value = DateTimeOffset.Parse(args[0].CopyToString(),CultureInfo.CurrentCulture)
+            let text = if args[0].IsNull then null else args[0].CopyToString()
+            let value = DateTimeOffset.Parse(text,CultureInfo.CurrentCulture)
             result.SetText(value.ToString(args[1].CopyToString(),CultureInfo.InvariantCulture))),SqliteFunctionFlags.None)

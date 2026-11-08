@@ -41,12 +41,13 @@ module internal DateTimeSql =
     /// Convert raw stored SqlExpr to canonical unix-milliseconds.
     let internal toUnixMs (raw: SqlExpr) (clrType: Type) : SqlExpr =
         if typeof<DateTime>.Equals(clrType) then
-            // ToBinary: ((raw & 0x3FFFFFFFFFFFFFFF) - 621355968000000000) / 10000
+            // Divide positive clock ticks before subtracting the epoch so a
+            // fractional pre-epoch millisecond rounds toward the earlier instant.
             SqlExpr.Binary(
                 SqlExpr.Binary(
                     SqlExpr.Binary(raw, BinaryOperator.BitwiseAnd, mask),
-                    BinaryOperator.Sub, epochTk),
-                BinaryOperator.Div, ticksMs)
+                    BinaryOperator.Div, ticksMs),
+                BinaryOperator.Sub, SqlExpr.Literal(SqlLiteral.Integer 62135596800000L))
         elif typeof<DateTimeOffset>.Equals(clrType) then
             raw  // identity: ToUnixTimeMilliseconds() is the stored value
         else
@@ -54,11 +55,14 @@ module internal DateTimeSql =
 
     /// Unix seconds from unix milliseconds.
     let internal unixSec (ms: SqlExpr) : SqlExpr =
-        SqlExpr.Binary(ms, BinaryOperator.Div, ms1000)
+        let remainder = SqlExpr.Binary(ms, BinaryOperator.Mod, ms1000)
+        let correction = SqlExpr.CaseExpr((SqlExpr.Binary(remainder,BinaryOperator.Lt,SqlExpr.Literal(SqlLiteral.Integer 0L)),SqlExpr.Literal(SqlLiteral.Integer 1L)),[],Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))
+        SqlExpr.Binary(SqlExpr.Binary(ms,BinaryOperator.Div,ms1000),BinaryOperator.Sub,correction)
 
     /// Milliseconds part from unix milliseconds (epoch mode only).
     let internal millisPart (ms: SqlExpr) : SqlExpr =
-        SqlExpr.Binary(ms, BinaryOperator.Mod, ms1000)
+        let remainder = SqlExpr.Binary(ms,BinaryOperator.Mod,ms1000)
+        SqlExpr.CaseExpr((SqlExpr.Binary(remainder,BinaryOperator.Lt,SqlExpr.Literal(SqlLiteral.Integer 0L)),SqlExpr.Binary(remainder,BinaryOperator.Add,ms1000)),[],Some remainder)
 
     let internal strftimeFromEpoch (fmt: string) (ms: SqlExpr) : SqlExpr =
         SqlExpr.FunctionCall("strftime", [SqlExpr.Literal(SqlLiteral.String fmt); unixSec ms; SqlExpr.Literal(SqlLiteral.String "unixepoch")])
@@ -119,6 +123,10 @@ module internal DateTimeSql =
         elif typeof<decimal>.Equals target then 5L
         else invalidArg "target" "The type has no temporal scalar representation."
 
+    let internal isOffsetParse (call: MethodCallExpression) =
+        call.Method.IsStatic && typeof<DateTimeOffset>.Equals call.Method.DeclaringType &&
+        call.Method.Name = "Parse" && call.Arguments.Count = 1 && typeof<string>.Equals call.Arguments[0].Type
+
     let internal daysBeforeMonth (month: SqlExpr) =
         let branch m days = eq month (intLit m), intLit days
         SqlExpr.CaseExpr(
@@ -165,9 +173,6 @@ module internal DateTimeSql =
               between minute (intLit 0L) (intLit 59L)
               between second (intLit 0L) (intLit 59L)
               between millisecond (intLit 0L) (intLit 999L) ]
-
-    let internal validOffsetMs offsetMs =
-        between offsetMs (intLit -50400000L) (intLit 50400000L)
 
     let internal zero = intLit 0L
 
