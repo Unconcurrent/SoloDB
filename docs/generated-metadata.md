@@ -18,6 +18,7 @@ Call the generated project-local `SoloDBAOT.Register()` before the first operati
 using System;
 using SoloDatabase;
 
+[SoloDBAOT] // I can work without it via automatic discovery of `db.GetCollection<Person>` usages, but it is not 100% guaranteed.
 internal sealed class Person
 {
     public long Id { get; set; }
@@ -52,6 +53,7 @@ open System
 open System.Linq
 open SoloDatabase
 
+[<SoloDBAOT>]
 type Person() =
     member val Id = 0L with get, set
     member val Name = "" with get, set
