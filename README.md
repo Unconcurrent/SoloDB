@@ -12,7 +12,7 @@ SoloDB is packed with features that provide a seamless and powerful developer ex
 - **Serverless Architecture**: As a .NET library, it runs in-process with your application. No separate server or configuration is required.
 - **Hybrid NoSQL & SQL**: Store and query schemaless JSON documents with a familiar object-oriented API, or drop down to raw SQL for complex queries.
 - **Full LINQ Support**: Use the full power of LINQ and IQueryable<T> to build expressive, strongly-typed queries against your data.
-- **Full NativeAOT Support**: Build C# and F# applications with generated operations for your models and queries. See the [NativeAOT setup guide](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md#jit-and-nativeaot-deployment).
+- **Full NativeAOT Support**: Build C# and F# applications with generated operations for your models and queries. See the [NativeAOT setup guide](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md).
 - **ACID Transactions**: Guarantees atomicity, consistency, isolation, and durability for all operations, thanks to SQLite's transactional nature.
 - **Expressive Indexing**: Create unique or non-unique indexes on document properties for lightning-fast queries, using simple attributes.
 - **Integrated File Storage**: A robust, hierarchical file system API (similar to System.IO) for storing and managing large files and binary data directly within the database.
