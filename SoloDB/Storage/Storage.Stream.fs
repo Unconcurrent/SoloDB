@@ -35,6 +35,20 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
         let value = stream.Length
         if value < 0L then raise(InvalidDataException("The Stream returned a negative length."))
         value
+    let flush () =
+        stream.Flush()
+        let mutable backing = stream
+#if !NETSTANDARD2_0
+        // BufferedStream.Flush drains the entire chain before the disk barrier.
+        let mutable searching = true
+        while searching do
+            match backing with
+            | :? BufferedStream as buffered -> backing <- buffered.UnderlyingStream
+            | _ -> searching <- false
+#endif
+        match backing with
+        | :? FileStream as file when file.CanWrite -> file.Flush(true)
+        | _ -> ()
     let zeroFrom start ending =
         if start < ending then
             if zeros.Length = 0 then zeros <- Array.zeroCreate 8192
@@ -123,10 +137,7 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
             try
                 try
                     check()
-                    stream.Flush()
-                    match stream with
-                    | :? FileStream as file when file.CanWrite -> file.Flush(true)
-                    | _ -> ()
+                    flush()
                     null
                 with error -> failure error
             finally Monitor.Exit gate

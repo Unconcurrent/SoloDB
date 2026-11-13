@@ -282,3 +282,23 @@ type internal StorageNativeFile(parent: StorageNativeVfs, name: string, wal: boo
         filename <- 0n
         if not(isNull failure) then Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw()
         result
+    interface ISqliteStorageCoordinationSession with
+        member _.DomainIdentity = box identity
+        member _.HasSharedMemory = methods.HasSharedMemory
+        member this.Lock(level) = this.Lock(level)
+        member this.Unlock(level) = this.Unlock(level)
+        member _.CheckReservedLock() =
+            let output = NativePtr.stackalloc<int> 1
+            NativePtr.write output 0
+            let result = methods.Reserved(file, NativePtr.toNativeInt output)
+            StorageReservedLockResult(result, NativePtr.read output <> 0)
+        member _.MapSharedMemory(region, size, extend) =
+            let output = NativePtr.stackalloc<nativeint> 1
+            NativePtr.write output 0n
+            let result = methods.Map(file, region, size, extend, NativePtr.toNativeInt output)
+            StorageSharedMemoryResult(result, NativePtr.read output)
+        member this.LockSharedMemory(offset, count, flags) = this.ShmLock(offset, count, flags)
+        member this.SharedMemoryBarrier() = this.Barrier()
+        member this.UnmapSharedMemory(delete) = this.Unmap(delete)
+        member this.FileControl(operation, argument) = this.Control(operation, argument)
+        member this.Close() = this.Close()

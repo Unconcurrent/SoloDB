@@ -100,7 +100,7 @@ module private StorageInput =
 /// cycles may retain all resources. Positional files are borrowed.
 [<Sealed>]
 type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorageFile[], owned: IDisposable[],
-                            coordination: SqliteStorageCoordination) =
+                            coordination: ISqliteStorageCoordination) =
     let gate = obj()
     let mutable nodes = files |> Array.map StorageNode
     let mutable ownedResources = owned
@@ -166,7 +166,7 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
         let mutable finished = false
         while not finished do
             if lock gate (fun () -> retired) then raise(ObjectDisposedException("SqliteStorage"))
-            result <- StorageFiles.lockFile state 1
+            result <- state.Coordination.Lock(1)
             try
                 if result = 0 then
                     let struct (main, log) = inspect()
@@ -174,7 +174,7 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
             finally
                 // Native pager transactions create and change the image. This
                 // admission only inspects under SHARED and releases before retry.
-                let unlocked = StorageFiles.unlock state 0
+                let unlocked = state.Coordination.Unlock(0)
                 if result = 0 then result <- unlocked
             finished <- result <> 5 || (timeout > 0 && timer.Elapsed.TotalSeconds >= float timeout)
             if not finished then Thread.Sleep(1)
@@ -189,12 +189,12 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
     member internal _.Identity = identity
     member internal _.ConnectionString =
         let builder = Data.Common.DbConnectionStringBuilder()
-        if not(isNull coordination) then
+        match coordination with
+        | :? SqliteStorageCoordination as file ->
             builder.["Data Source"] <- "custom-storage"
-            builder.["Storage Coordination"] <- coordination.Filename
-            if not(isNull coordination.RegisteredVfs) then
-                builder.["Storage Vfs"] <- coordination.RegisteredVfs
-        else builder.["Data Source"] <- identity
+            builder.["Storage Coordination"] <- file.Filename
+            if not(isNull file.RegisteredVfs) then builder.["Storage Vfs"] <- file.RegisteredVfs
+        | _ -> builder.["Data Source"] <- identity
         builder.ConnectionString
     member internal _.IsRetired = lock gate (fun () -> retired)
     member internal _.Attach() =
@@ -247,23 +247,19 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
         with _ ->
             for adapter in adapters do try (adapter :> IDisposable).Dispose() with _ -> ()
             reraise()
-    static member Simple(main: ISqliteStorageFile, journal: ISqliteStorageFile) =
-        SqliteStorage.Simple(main, journal, null)
-    static member Simple(main: ISqliteStorageFile, journal: ISqliteStorageFile, coordination: SqliteStorageCoordination) =
+    static member Simple(main: ISqliteStorageFile, journal: ISqliteStorageFile, coordination: ISqliteStorageCoordination) =
+        if isNull (box coordination) then nullArg "coordination"
         SqliteStorage.Managed(SqliteStorageProfile.Simple, [|main; journal|], Array.empty, coordination)
-    static member Wal(main: ISqliteStorageFile, log: ISqliteStorageFile) =
-        SqliteStorage.Wal(main, log, null)
-    static member Wal(main: ISqliteStorageFile, log: ISqliteStorageFile, coordination: SqliteStorageCoordination) =
+    static member Wal(main: ISqliteStorageFile, log: ISqliteStorageFile, coordination: ISqliteStorageCoordination) =
+        if isNull (box coordination) then nullArg "coordination"
         SqliteStorage.Managed(SqliteStorageProfile.Wal, [|main; log|], Array.empty, coordination)
     static member ReadOnly(main: ISqliteStorageFile) =
-        SqliteStorage.Managed(SqliteStorageProfile.ReadOnly, [|main|], Array.empty, null)
-    static member Simple(main: Stream, journal: Stream, leaveOpen: bool) =
-        SqliteStorage.Simple(main, journal, leaveOpen, null)
-    static member Simple(main: Stream, journal: Stream, leaveOpen: bool, coordination: SqliteStorageCoordination) =
+        SqliteStorage.Managed(SqliteStorageProfile.ReadOnly, [|main|], Array.empty, SqliteStorageCoordination.SingleProcessInMemory)
+    static member Simple(main: Stream, journal: Stream, leaveOpen: bool, coordination: ISqliteStorageCoordination) =
+        if isNull (box coordination) then nullArg "coordination"
         SqliteStorage.Streams(SqliteStorageProfile.Simple, [|main; journal|], leaveOpen, coordination)
-    static member Wal(main: Stream, log: Stream, leaveOpen: bool) =
-        SqliteStorage.Wal(main, log, leaveOpen, null)
-    static member Wal(main: Stream, log: Stream, leaveOpen: bool, coordination: SqliteStorageCoordination) =
+    static member Wal(main: Stream, log: Stream, leaveOpen: bool, coordination: ISqliteStorageCoordination) =
+        if isNull (box coordination) then nullArg "coordination"
         SqliteStorage.Streams(SqliteStorageProfile.Wal, [|main; log|], leaveOpen, coordination)
     static member ReadOnly(main: Stream, leaveOpen: bool) =
-        SqliteStorage.Streams(SqliteStorageProfile.ReadOnly, [|main|], leaveOpen, null)
+        SqliteStorage.Streams(SqliteStorageProfile.ReadOnly, [|main|], leaveOpen, SqliteStorageCoordination.SingleProcessInMemory)

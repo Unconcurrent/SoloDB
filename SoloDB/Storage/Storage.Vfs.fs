@@ -12,13 +12,9 @@ open StorageNative
 /// to actual supplied objects. Dispose only after actual native close returns.
 [<Sealed>]
 type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNode[], profile: SqliteStorageProfile,
-                              coordination: SqliteStorageCoordination,
+                              coordination: ISqliteStorageCoordination,
                               fault: Action<int,exn>, initialize: StorageHandle -> int) =
     let parent = StorageNativeVfs(null)
-    let coordinator =
-        if isNull coordination then None
-        else
-            Some(StorageNativeVfs(coordination.RegisteredVfs))
     let callbacks = ResizeArray<Delegate>()
     let nameBytes = bytes name
     let methodSize = methodFields + 18 * ptr
@@ -75,10 +71,7 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
         result
     let control (state: StorageHandle) operation argument =
         match operation with
-        | 1 ->
-            match state.Coordination with
-            | Some native -> native.Control(operation, argument)
-            | None -> lock state.Node.Gate (fun () -> Marshal.WriteInt32(argument, state.Lock); 0)
+        | 1 -> state.Coordination.FileControl(operation, argument)
         | 5 | 8 | 11 | 19 | 21 | 22 | 37 | 39 | 45 -> 0 // Advisory, no byte/length or durability change.
         | 10 ->
             let value = Marshal.ReadInt32(argument)
@@ -94,11 +87,7 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
         | 14 -> 12 // SQLite owns journal and synchronization mode semantics.
         | 18 -> Marshal.WriteInt64(argument, 0L); 0 // Managed bytes have no stable native mapping.
         | 20 -> Marshal.WriteInt32(argument, 0); 0 // Permanent bound identity cannot move.
-        | 15 | 16 | 24 | 34 | 40 | 44 ->
-            match state.Coordination with
-            | Some native -> native.Control(operation, argument)
-            | None when operation = 40 -> Marshal.WriteInt32(argument, 0); 0
-            | None -> 12
+        | 15 | 16 | 24 | 34 | 40 | 44 -> state.Coordination.FileControl(operation, argument)
         // Core owns FILE_POINTER, VFS_POINTER, JOURNAL_POINTER, DATA_VERSION and
         // RESET_CACHE. OS handles, media/atomic promises and extension controls
         // do not describe this byte backend. Their defined fallback is NOTFOUND.
@@ -128,37 +117,38 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                             elif flags &&& openDeleteOnClose <> 0 && flags &&& 2 = 0 then 8
                             elif profile = SqliteStorageProfile.ReadOnly && flags &&& 2 <> 0 then 8
                             else
-                                let native =
-                                    if logical = 0 then
-                                        coordinator |> Option.map (fun parent -> StorageNativeFile(parent, coordination.Filename, (profile = SqliteStorageProfile.Wal)))
-                                    else None
-                                let state = StorageHandle(node, flags, native)
+                                let mutable session: ISqliteStorageCoordinationSession = Unchecked.defaultof<_>
+                                let mutable state: StorageHandle = Unchecked.defaultof<_>
                                 let mutable attached = false
                                 let mutable root = Unchecked.defaultof<GCHandle>
                                 try
+                                    session <-
+                                        if logical = 0 then coordination.Open(node.File, profile)
+                                        else SqliteStorageCoordination.SingleProcessInMemory.Open(node.File, profile)
+                                    if isNull (box session) then invalidOp "The coordination provider returned no session."
+                                    state <- StorageHandle(node, flags, session)
                                     StorageFiles.attach state
                                     attached <- true
                                     let result = if logical = 0 then initialize state else 0
                                     if result <> 0 then
-                                        StorageFiles.close state |> ignore
                                         attached <- false
+                                        session <- Unchecked.defaultof<_>
+                                        StorageFiles.close state |> ignore
                                         result
                                     else
                                         root <- GCHandle.Alloc(state)
                                         Marshal.WriteIntPtr(file, ptr, GCHandle.ToIntPtr(root))
-                                        let table =
-                                            if native |> Option.exists (fun file -> not file.HasSharedMemory) then rollbackMethods
-                                            else methods
+                                        let table = if state.Coordination.HasSharedMemory then methods else rollbackMethods
                                         Marshal.WriteIntPtr(file, table)
                                         Interlocked.Increment(&files) |> ignore
-                                        if output <> 0n then
-                                            Marshal.WriteInt32(output, flags)
+                                        if output <> 0n then Marshal.WriteInt32(output, flags)
                                         0
                                 with error ->
                                     if root.IsAllocated then root.Free()
+                                    Marshal.WriteIntPtr(file, ptr, 0n)
                                     try
                                         if attached then StorageFiles.close state |> ignore
-                                        else native |> Option.iter (fun file -> file.Close() |> ignore)
+                                        elif not(isNull (box session)) then session.Close() |> ignore
                                     with cleanup -> error.Data.["SoloDB.OpenCleanupException"] <- cleanup
                                     reraise())))
             set 4 (Path(fun _ path sync -> protect 2570 (fun () ->
@@ -266,18 +256,26 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                 let state = handle file
                 lock state.Node.Gate (fun () -> Marshal.WriteInt64(output, StorageFiles.length state.Node); 0)
               with error -> fail 1802 error))
-            methodAt 6 (IntArg(fun file level -> protect 3850 (fun () -> StorageFiles.lockFile (handle file) level)))
-            methodAt 7 (IntArg(fun file level -> protect 2058 (fun () -> StorageFiles.unlock (handle file) level)))
-            methodAt 8 (Output(fun file output -> protect 3594 (fun () -> StorageFiles.reserved (handle file) output)))
+            methodAt 6 (IntArg(fun file level -> protect 3850 (fun () -> (handle file).Coordination.Lock(level))))
+            methodAt 7 (IntArg(fun file level -> protect 2058 (fun () -> (handle file).Coordination.Unlock(level))))
+            methodAt 8 (Output(fun file output ->
+                Marshal.WriteInt32(output, 0)
+                protect 3594 (fun () ->
+                    let result = (handle file).Coordination.CheckReservedLock()
+                    Marshal.WriteInt32(output, if result.IsReserved then 1 else 0)
+                    result.ResultCode)))
             methodAt 9 (Control(fun file operation argument -> protect 10 (fun () -> control (handle file) operation argument)))
             methodAt 10 (One(fun _ -> 4096))
             methodAt 11 (One(fun _ -> 0x8000 ||| (if profile = SqliteStorageProfile.ReadOnly then 0x2000 else 0)))
             methodAt 12 (ShmMap(fun file region size extend output ->
                 Marshal.WriteIntPtr(output, 0n)
-                protect 5386 (fun () -> StorageFiles.map (handle file) region size extend output)))
-            methodAt 13 (ShmLock(fun file offset count flags -> protect 5130 (fun () -> StorageFiles.shmLock (handle file) offset count flags)))
-            methodAt 14 (Barrier(fun file -> contain () (fun () -> StorageFiles.barrier (handle file))))
-            methodAt 15 (IntArg(fun file delete -> protect 5130 (fun () -> StorageFiles.unmap (handle file) delete)))
+                protect 5386 (fun () ->
+                    let result = (handle file).Coordination.MapSharedMemory(region, size, extend)
+                    Marshal.WriteIntPtr(output, result.Address)
+                    result.ResultCode)))
+            methodAt 13 (ShmLock(fun file offset count flags -> protect 5130 (fun () -> (handle file).Coordination.LockSharedMemory(offset, count, flags))))
+            methodAt 14 (Barrier(fun file -> contain () (fun () -> (handle file).Coordination.SharedMemoryBarrier())))
+            methodAt 15 (IntArg(fun file delete -> protect 5130 (fun () -> (handle file).Coordination.UnmapSharedMemory(delete))))
             methodAt 16 (Fetch(fun _ _ _ output -> Marshal.WriteIntPtr(output, 0n); 0))
             methodAt 17 (Unfetch(fun _ _ _ -> 0))
             // Publish the real main-file capability. SQLite then declines WAL

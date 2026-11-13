@@ -179,6 +179,8 @@
     <Compile Include="Storage/Storage.Stream.fs" />
     <Compile Include="Storage/Storage.Native.fs" />
     <Compile Include="Storage/Storage.Files.fs" />
+    <Compile Include="Storage/Storage.Memory.fs" />
+    <Compile Include="Storage/Storage.Coordination.fs" />
     <Compile Include="Storage/Storage.Vfs.fs" />
     <Compile Include="Storage/Storage.Source.fs" />
     <Compile Include="SQLiteNative/SQLiteNative.Engine.fs" />

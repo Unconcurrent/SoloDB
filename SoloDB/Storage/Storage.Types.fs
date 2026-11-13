@@ -11,7 +11,7 @@ type internal StorageObjectState() =
     member val References = 0 with get,set
     member val CloseRequested = false with get,set
     member val Closing = false with get,set
-    // Storage.Files supplies the domain after its native handle types are defined.
+    member val LiveDomain: obj = null with get,set
     member val PrivateDomain: obj = null with get,set
 
 module internal StorageObjects =
@@ -97,19 +97,52 @@ type StorageIOException(kind: StorageFailureKind, message: string, cause: exn) =
     do StorageValidation.failureKind kind
     member _.Kind = kind
 
-/// Reusable same-host coordination configuration. Each physical open acquires its own session.
-/// Participants expose coherent bytes and use the same dedicated identity, which
-/// must not be independently closed, unlinked or replaced while participation continues.
-[<Sealed; AllowNullLiteral>]
-type SqliteStorageCoordination private (filename: string, registeredVfs: string) =
-    member internal _.Filename = filename
-    member internal _.RegisteredVfs = registeredVfs
-    /// Uses the native filesystem's locks and shared memory at a dedicated path.
-    static member File(filename: string) =
-        StorageValidation.filename "filename" filename
-        SqliteStorageCoordination(Path.GetFullPath(filename), null)
-    /// Borrows the named native VFS. Keep its actual registration alive through every session.
-    static member File(filename: string, registeredVfs: string) =
-        StorageValidation.filename "filename" filename
-        StorageValidation.filename "registeredVfs" registeredVfs
-        SqliteStorageCoordination(filename, registeredVfs)
+/// SQLite's result code and the reserved-lock query output. Output is meaningful on success.
+[<Struct>]
+type StorageReservedLockResult =
+    val ResultCode: int
+    val IsReserved: bool
+    new(resultCode, isReserved) = { ResultCode = resultCode; IsReserved = isReserved }
+
+/// SQLite's result code and a WAL-index region. A successful null address means absent.
+[<Struct>]
+type StorageSharedMemoryResult =
+    val ResultCode: int
+    val Address: nativeint
+    new(resultCode, address) = { ResultCode = resultCode; Address = address }
+
+/// One physical main-file open's SQLite coordination. Calls may change threads and
+/// must not reenter the database. Return SQLite result codes (including extended errors);
+/// thrown exceptions retain their cause through the physical connection's fault channel.
+/// Close releases only this session's grants/mappings and returns its SQLite close result.
+[<AllowNullLiteral>]
+type ISqliteStorageCoordinationSession =
+    /// Stable nonnull equality identity for compatible sessions on this database's bytes.
+    /// Distinct databases must not share locks or WAL-index regions accidentally.
+    abstract DomainIdentity: obj
+    abstract HasSharedMemory: bool
+    /// SQLite lock levels: SHARED=1, RESERVED=2, PENDING=3, EXCLUSIVE=4.
+    /// A failed upgrade must retain the grants required by SQLite's locking contract.
+    abstract Lock: level: int -> int
+    /// SQLite unlock targets: NONE=0 or SHARED=1.
+    abstract Unlock: level: int -> int
+    abstract CheckReservedLock: unit -> StorageReservedLockResult
+    /// Every nonzero extend value permits extension, including SQLite recovery value 2.
+    /// Successful mapped addresses remain stable until this session unmaps or closes.
+    abstract MapSharedMemory: region: int * size: int * extend: int -> StorageSharedMemoryResult
+    /// SQLite WAL slot flags: UNLOCK=1, LOCK=2, SHARED=4, EXCLUSIVE=8.
+    abstract LockSharedMemory: offset: int * count: int * flags: int -> int
+    abstract SharedMemoryBarrier: unit -> unit
+    abstract UnmapSharedMemory: delete: int -> int
+    /// Only coordination controls are forwarded; return SQLITE_NOTFOUND=12 when unsupported.
+    /// The native argument is borrowed for this call and follows SQLite's control ABI.
+    abstract FileControl: operation: int * argument: nativeint -> int
+    /// Called once, after native completion or failed opening; release all owned resources.
+    abstract Close: unit -> int
+
+/// A borrowed reusable provider. Return a distinct session for every physical main open.
+/// The main byte view and provider must remain usable through the session's Close.
+/// Independently opened byte views must be coherent regardless of coordination choice.
+[<AllowNullLiteral>]
+type ISqliteStorageCoordination =
+    abstract Open: main: ISqliteStorageFile * profile: SqliteStorageProfile -> ISqliteStorageCoordinationSession
