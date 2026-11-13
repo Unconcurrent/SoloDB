@@ -221,6 +221,7 @@ type internal StorageNativeVfs(name: string) =
 /// One actual native file receiver and filename, retained through its xClose.
 [<Sealed>]
 type internal StorageNativeFile(parent: StorageNativeVfs, name: string, wal: bool) =
+    let shmLocks = Array.zeroCreate<byte> 8
     let mutable file = StorageNative.alloc parent.FileSize
     let mutable filename = 0n
     let mutable identity = struct (0n, "")
@@ -257,6 +258,26 @@ type internal StorageNativeFile(parent: StorageNativeVfs, name: string, wal: boo
             file <- 0n
             filename <- 0n
             reraise()
+    let unmap delete =
+        if file = 0n then 0 else
+        let mutable result = 0
+        let mutable failure: exn = null
+        // Native xShmUnmap removes its receiver; it does not release that
+        // receiver's slot grants. Release only grants actually acquired here.
+        for slot = 0 to shmLocks.Length - 1 do
+            let held = shmLocks.[slot]
+            if held <> 0uy then
+                shmLocks.[slot] <- 0uy
+                try
+                    let released = methods.ShmLock(file, slot, 1, if held = 1uy then 5 else 9)
+                    if result = 0 then result <- released
+                with error -> if isNull failure then failure <- error
+        try
+            let unmapped = methods.Unmap(file, delete)
+            if result = 0 then result <- unmapped
+        with error -> if isNull failure then failure <- error
+        if not(isNull failure) then Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw()
+        result
     member _.HasSharedMemory = methods.HasSharedMemory
     member _.Identity = identity
     member _.Lock(level) = methods.Lock(file, level)
@@ -264,14 +285,19 @@ type internal StorageNativeFile(parent: StorageNativeVfs, name: string, wal: boo
     member _.Reserved(output) = methods.Reserved(file, output)
     member _.Control(operation, argument) = methods.Control(file, operation, argument)
     member _.Map(region, size, extend, output) = methods.Map(file, region, size, extend, output)
-    member _.ShmLock(offset, count, flags) = methods.ShmLock(file, offset, count, flags)
+    member _.ShmLock(offset, count, flags) =
+        let result = methods.ShmLock(file, offset, count, flags)
+        if result = 0 then
+            for slot = offset to offset + count - 1 do
+                shmLocks.[slot] <- if flags &&& 1 <> 0 then 0uy elif flags &&& 8 <> 0 then 2uy else 1uy
+        result
     member _.Barrier() = methods.Barrier(file)
-    member _.Unmap(delete) = methods.Unmap(file, delete)
+    member _.Unmap(delete) = unmap delete
     member _.Close() =
         if file = 0n then 0 else
         let mutable result = 0
         let mutable failure: exn = null
-        try result <- methods.Unmap(file, 0) with error -> failure <- error
+        try result <- unmap 0 with error -> failure <- error
         try
             let closed = methods.Close(file)
             if result = 0 then result <- closed
