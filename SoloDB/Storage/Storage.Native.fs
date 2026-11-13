@@ -12,6 +12,11 @@ type internal StorageNativeError(code: int, message: string) =
     inherit IO.IOException(message)
     member _.Code = code
 
+/// A library-established state failure, distinct from a provider's thrown cause.
+[<Sealed>]
+type internal StorageNativeStateError(message: string) =
+    inherit InvalidOperationException(message)
+
 /// SQLite 3 sqlite3_vfs and sqlite3_io_methods ABI. The pointer arrays start at
 /// native pointer alignment, following three and one 32-bit integers respectively.
 /// https://sqlite.org/c3ref/vfs.html and https://sqlite.org/c3ref/io_methods.html
@@ -164,7 +169,7 @@ type internal StorageNativeVfs(name: string) =
         else
             let text = StorageNative.utf8 name
             try StorageNative.sqlite3_vfs_find(text) finally Marshal.FreeHGlobal(text)
-    do if address = 0n then invalidOp "The native VFS is not registered."
+    do if address = 0n then raise(StorageNativeStateError("The native VFS is not registered."))
     let version = Marshal.ReadInt32(address)
     let openFile = StorageNative.bindAt<StorageNative.Open> version address StorageNative.vfsFields 3 1
     let delete = StorageNative.bindAt<StorageNative.Path> version address StorageNative.vfsFields 4 1

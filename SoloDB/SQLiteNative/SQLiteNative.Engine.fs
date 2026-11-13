@@ -122,6 +122,7 @@ type internal NativeDatabase(connectionString: string, storage: SqliteStorage op
         let fault = if isNull (box storageLease) then ValueNone else storageLease.Faults.Take()
         match fault with
         | ValueSome(struct (_, (:? StorageConfigurationError as error))) -> NotSupportedException(error.Message, error) :> exn
+        | ValueSome(struct (_, (:? StorageNativeStateError as error))) -> InvalidOperationException(error.Message, error) :> exn
         | ValueSome(struct (code, cause)) ->
             let message = raw.sqlite3_errstr(code).utf8_to_string()
             NativeSqliteException($"SQLite Error {code &&& 255}: '{message}'.", code &&& 255, code, cause) :> exn
