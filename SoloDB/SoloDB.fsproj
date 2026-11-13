@@ -181,6 +181,11 @@
     <Compile Include="Storage/Storage.Files.fs" />
     <Compile Include="Storage/Storage.Memory.fs" />
     <Compile Include="Storage/Storage.Coordination.fs" />
+    <Compile Include="Storage/Storage.Diagnostics.Types.fs" />
+    <Compile Include="Storage/Storage.Diagnostics.Checks.fs" />
+    <Compile Include="Storage/Storage.Diagnostics.Pager.fs" />
+    <Compile Include="Storage/Storage.Diagnostics.Wal.fs" />
+    <Compile Include="Storage/Storage.Diagnostics.fs" />
     <Compile Include="Storage/Storage.Vfs.fs" />
     <Compile Include="Storage/Storage.Source.fs" />
     <Compile Include="SQLiteNative/SQLiteNative.Engine.fs" />

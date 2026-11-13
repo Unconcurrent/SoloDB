@@ -195,6 +195,58 @@ using var db = new SoloDB(storage);
 
 Here `mainFile` and `journalFile` implement `ISqliteStorageFile`. The decorator retains SingleProcessInMemory's scope. Implementing a provider alone does not make incoherent backing bytes safe to share.
 
+## Test your coordination implementation
+
+Use `SqliteStorageDiagnostics.TestCoordination` explicitly while developing a provider. Supply a provider configured for an isolated test database and two `ISqliteStorageFile` views of the same logical main backing. The views can be independent objects when your provider supports that arrangement. For `SingleProcessInMemory`, pass the same actual main file object twice.
+
+```csharp
+using System;
+using SoloDatabase;
+
+static void TestMyLocks(
+    ISqliteStorageCoordination coordination,
+    ISqliteStorageFile firstMain,
+    ISqliteStorageFile secondMain)
+{
+    var report = SqliteStorageDiagnostics.TestCoordination(
+        coordination, firstMain, secondMain, SqliteStorageProfile.Wal);
+
+    foreach (var failure in report.Failures)
+    {
+        Console.WriteLine(failure.Message);
+        if (failure.Exception is Exception cause)
+            Console.WriteLine(cause);
+    }
+
+    report.ThrowIfFailed();
+}
+```
+
+Call this helper with your provider and test views. `SqliteStorageCoordination.File(testCoordinationPath)` uses a dedicated test coordination path. To check the built-in memory implementation, call:
+
+```csharp
+var report = SqliteStorageDiagnostics.TestCoordination(
+    SqliteStorageCoordination.SingleProcessInMemory,
+    testFile, testFile, SqliteStorageProfile.Wal);
+report.ThrowIfFailed();
+```
+
+Here `testFile` is your `ISqliteStorageFile` for the isolated test backing. No stream adapter is needed. In F# the same call is:
+
+```fsharp
+let report = SqliteStorageDiagnostics.TestCoordination(
+    coordination, firstMain, secondMain, SqliteStorageProfile.Wal)
+report.ThrowIfFailed()
+```
+
+`Simple` checks pager readers/writers, reservations, pending upgrades, downgrade/release and session-close isolation. `Wal` adds shared-memory capability, region growth and shared bytes, slot conflicts and peer mapping lifetime. Use `Simple` for a rollback-only provider. `ReadOnly` has no applicable diagnostic profile. Every unexpected result stops dependent operations; cleanup still attempts every distinct session it acquired. The checker releases its own WAL grants before unmapping or closing, following the native SQLite calling order.
+
+The immutable report exposes `Passed` and `Failures`. Each failure has a `Message`, nullable `ExpectedResultCode` and `ActualResultCode`, and its original `Exception` when available. An absent code means the failure concerns a value, capability or exception rather than a returned result code. `ThrowIfFailed` does nothing on success and throws `AggregateException` on failure, retaining original backend exceptions; result-only mismatches become descriptive `InvalidOperationException` entries. Argument errors are rejected before any provider session opens.
+
+The checker borrows your provider and byte files, opens its own sessions and closes them once. You own file disposal and test-backend cleanup. It does not read or write the main byte files directly, but providers can use them during Open. WAL checks overwrite mapped test bytes, so no database may be using that test domain. Provider methods must return normally; the synchronous diagnostic cannot interrupt blocked caller code.
+
+Passing describes the exercised sequential session operations in one process. It does not establish cross-process exclusion, independent byte-view coherence, crash recovery, durability or correctness for every thread interleaving. Memory barriers are invoked, but a successful observed read is not proof of a barrier implementation on every architecture. Normal database opening does not run these diagnostics.
+
 ## Close safely and handle errors
 
 Dispose readers, streams selected from query results, transactions and borrowed connections before disposing their database. A normal `using` or `use` scope does this when these objects are declared after the database.

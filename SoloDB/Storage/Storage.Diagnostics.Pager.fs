@@ -1,0 +1,35 @@
+namespace SoloDatabase
+
+module internal StorageCoordinationPager =
+    let run (check: StorageCoordinationChecks) firstMain secondMain =
+        check.Run(fun () ->
+            let first = check.Open("Open first session", firstMain)
+            let second = check.Open("Open second session", secondMain)
+            check.Reserved("Initially unreserved", second, false)
+            check.Code("First reader", 0, fun () -> first.Lock(1))
+            check.Code("Second reader", 0, fun () -> second.Lock(1))
+            check.Code("Reserve first writer", 0, fun () -> first.Lock(2))
+            check.Code("Competing reserved writer", 5, fun () -> second.Lock(2))
+            check.Reserved("Observe reserved writer", second, true)
+            check.LockState("Reserved lock state", first, 2)
+            // RESERVED permits a new reader; PENDING must bar it after upgrade contention.
+            let late = check.Open("Open late reader session", firstMain)
+            check.Code("Reader admitted during reservation", 0, fun () -> late.Lock(1))
+            check.Code("Release late reader", 0, fun () -> late.Unlock(0))
+            check.Code("Exclusive upgrade waits for peer", 5, fun () -> first.Lock(4))
+            check.LockState("Pending lock state", first, 3)
+            check.Code("Pending writer bars a new reader", 5, fun () -> late.Lock(1))
+            check.Code("Release original peer reader", 0, fun () -> second.Unlock(0))
+            check.Code("Complete exclusive upgrade", 0, fun () -> first.Lock(4))
+            check.Code("Exclusive writer bars peer reader", 5, fun () -> second.Lock(1))
+            check.Reserved("Observe exclusive writer", second, true)
+            check.Code("Downgrade writer to shared", 0, fun () -> first.Unlock(1))
+            check.Reserved("Downgrade clears reservation", second, false)
+            check.Code("Peer reads after downgrade", 0, fun () -> second.Lock(1))
+            check.Code("Peer reserves while first still reads", 0, fun () -> second.Lock(2))
+            check.Close("Close unrelated third session", late)
+            check.Reserved("Third close preserves peer reservation", first, true)
+            check.Close("Close reserved writer", second)
+            check.Reserved("Writer close releases reservation", first, false)
+            check.Code("Surviving reader upgrades after peer close", 0, fun () -> first.Lock(4))
+            check.Code("Release surviving writer", 0, fun () -> first.Unlock(0)))
