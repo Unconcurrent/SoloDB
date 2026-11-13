@@ -10,6 +10,20 @@ type internal StorageFileError(failure: StorageFailure) =
     inherit IO.IOException("The storage operation failed.", failure.Cause)
     member _.Failure = failure
 
+module internal StorageErrors =
+    let describe code (error: exn) =
+        match error with
+        | :? StorageFileError as error ->
+            let result =
+                match error.Failure.Kind with
+                | StorageFailureKind.Full -> 13
+                | StorageFailureKind.ReadOnly -> 8
+                | _ -> code
+            struct (result, error.Failure.Cause)
+        | :? StorageNativeError as error -> struct (error.Code, error :> exn)
+        | :? OutOfMemoryException -> struct (7, error)
+        | _ -> struct (code, error)
+
 /// Live byte-role admission for one actual supplied object.
 type internal StorageDomain() =
     member val Handles = ResizeArray<StorageHandle>()

@@ -13,7 +13,7 @@ open StorageNative
 [<Sealed>]
 type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNode[], profile: SqliteStorageProfile,
                               coordination: ISqliteStorageCoordination,
-                              fault: Action<int,exn>, initialize: StorageHandle -> int) =
+                              fault: Action<int,exn>, openingCleanup: Action<int,exn>, initialize: StorageHandle -> int) =
     let parent = StorageNativeVfs(null)
     let callbacks = ResizeArray<Delegate>()
     let nameBytes = bytes name
@@ -32,22 +32,21 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
         Marshal.GetFunctionPointerForDelegate(callback)
     let handle file = GCHandle.FromIntPtr(Marshal.ReadIntPtr(file, ptr)).Target :?> StorageHandle
     let fail code (error: exn) =
-        let code, cause =
-            match error with
-            | :? StorageFileError as error ->
-                let result =
-                    match error.Failure.Kind with
-                    | StorageFailureKind.Full -> 13
-                    | StorageFailureKind.ReadOnly -> 8
-                    | _ -> code
-                result, error.Failure.Cause
-            | :? StorageNativeError as error -> error.Code, error
-            | :? OutOfMemoryException -> 7, error
-            | _ -> code, error
+        let struct (code, cause) = StorageErrors.describe code error
         // No managed exception may leave a reverse native callback, including
         // a secondary diagnostic failure. A missing cause does not erase the code.
         try fault.Invoke(code, cause) with _ -> ()
         code
+    let closeOpening state (session: ISqliteStorageCoordinationSession) attached =
+        try
+            let result =
+                if attached then StorageFiles.close state
+                elif not(isNull (box session)) then session.Close()
+                else 0
+            if result <> 0 then
+                try openingCleanup.Invoke(result, null) with _ -> ()
+        with error ->
+            try openingCleanup.Invoke(4106, error) with _ -> ()
     let protect code operation = try operation() with error -> fail code error
     let contain fallback operation =
         try operation() with error -> fail 10 error |> ignore; fallback
@@ -121,6 +120,8 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                                 let mutable state: StorageHandle = Unchecked.defaultof<_>
                                 let mutable attached = false
                                 let mutable root = Unchecked.defaultof<GCHandle>
+                                let mutable result = 0
+                                let mutable openingError: exn = null
                                 try
                                     session <-
                                         if logical = 0 then coordination.Open(node.File, profile)
@@ -129,28 +130,26 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                                     state <- StorageHandle(node, flags, session)
                                     StorageFiles.attach state
                                     attached <- true
-                                    let result = if logical = 0 then initialize state else 0
-                                    if result <> 0 then
-                                        attached <- false
-                                        session <- Unchecked.defaultof<_>
-                                        StorageFiles.close state |> ignore
-                                        result
-                                    else
+                                    result <- if logical = 0 then initialize state else 0
+                                    if result = 0 then
+                                        let table = if state.Coordination.HasSharedMemory then methods else rollbackMethods
                                         root <- GCHandle.Alloc(state)
                                         Marshal.WriteIntPtr(file, ptr, GCHandle.ToIntPtr(root))
-                                        let table = if state.Coordination.HasSharedMemory then methods else rollbackMethods
                                         Marshal.WriteIntPtr(file, table)
-                                        Interlocked.Increment(&files) |> ignore
                                         if output <> 0n then Marshal.WriteInt32(output, flags)
-                                        0
+                                        Interlocked.Increment(&files) |> ignore
                                 with error ->
+                                    result <- 14
+                                    openingError <- error
+                                if result <> 0 then
+                                    // SQLite cannot call xClose without published pMethods.
+                                    // Record the opening fault before attempting its owned cleanup.
+                                    result <- fail result openingError
                                     if root.IsAllocated then root.Free()
                                     Marshal.WriteIntPtr(file, ptr, 0n)
-                                    try
-                                        if attached then StorageFiles.close state |> ignore
-                                        elif not(isNull (box session)) then session.Close() |> ignore
-                                    with cleanup -> error.Data.["SoloDB.OpenCleanupException"] <- cleanup
-                                    reraise())))
+                                    Marshal.WriteIntPtr(file, 0n)
+                                    closeOpening state session attached
+                                result)))
             set 4 (Path(fun _ path sync -> protect 2570 (fun () ->
                 let logical = role(text path)
                 if logical = -1 then parent.Delete(path, sync)

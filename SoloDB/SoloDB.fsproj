@@ -175,6 +175,7 @@
     <Compile Include="Metadata/JsonOperations.fs" />
     <Compile Include="Metadata/TypeDescriptions.fs" />
     <Compile Include="Metadata/RelationAccessors.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.Errors.fs" />
     <Compile Include="Storage/Storage.Types.fs" />
     <Compile Include="Storage/Storage.Stream.fs" />
     <Compile Include="Storage/Storage.Native.fs" />

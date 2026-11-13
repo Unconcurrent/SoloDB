@@ -112,6 +112,21 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
     let mutable cleanupState = 0
     let mutable closingFailure: exn = null
     let report error = lock gate (fun () -> if isNull closingFailure then closingFailure <- error)
+    let reportOpeningCleanup code cause =
+        // Failed opening has a primary result before any session is published.
+        // Its cleanup belongs to the input, independently of that first-fault result.
+        try
+            let struct (code, cause) = StorageErrors.describe code cause
+            let error = NativeSqliteException.FromStorageResult(code, cause)
+            lock gate (fun () ->
+                if isNull closingFailure then closingFailure <- error
+                else
+                    let previous = closingFailure.Data.["SoloDB.OpenCleanupException"]
+                    closingFailure.Data.["SoloDB.OpenCleanupException"] <-
+                        match previous with
+                        | :? exn as previous -> AggregateException([|previous; error|]) :> exn
+                        | _ -> error :> exn)
+        with _ -> () // Reporting cannot replace the original opening failure.
     let cleanup () =
         let resources =
             lock gate (fun () ->
@@ -167,16 +182,30 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
         while not finished do
             if lock gate (fun () -> retired) then raise(ObjectDisposedException("SqliteStorage"))
             result <- state.Coordination.Lock(1)
+            let mutable inspectionFailed = false
+            let mutable cleanupFailed = false
             try
-                if result = 0 then
-                    let struct (main, log) = inspect()
-                    validateExisting main log
+                try
+                    if result = 0 then
+                        let struct (main, log) = inspect()
+                        validateExisting main log
+                with _ -> inspectionFailed <- true; reraise()
             finally
                 // Native pager transactions create and change the image. This
                 // admission only inspects under SHARED and releases before retry.
-                let unlocked = state.Coordination.Unlock(0)
-                if result = 0 then result <- unlocked
-            finished <- result <> 5 || (timeout > 0 && timer.Elapsed.TotalSeconds >= float timeout)
+                try
+                    let unlocked = state.Coordination.Unlock(0)
+                    if inspectionFailed || result <> 0 then
+                        if unlocked <> 0 then
+                            cleanupFailed <- true
+                            reportOpeningCleanup unlocked null
+                    else result <- unlocked
+                with error ->
+                    if inspectionFailed || result <> 0 then
+                        cleanupFailed <- true
+                        reportOpeningCleanup 2058 error
+                    else reraise()
+            finished <- cleanupFailed || result <> 5 || (timeout > 0 && timer.Elapsed.TotalSeconds >= float timeout)
             if not finished then Thread.Sleep(1)
         result
     do
@@ -225,7 +254,8 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
             StorageNative.verifyProvider()
             let name = identity + "-" + Guid.NewGuid().ToString("N")
             let vfs = new ManagedStorageVfs(name, identity, nodes, profile, coordination,
-                                            Action<int,exn>(fun code cause -> faults.Record(code, cause)), initialize timeout)
+                                            Action<int,exn>(fun code cause -> faults.Record(code, cause)),
+                                            Action<int,exn>(fun code cause -> reportOpeningCleanup code cause), initialize timeout)
             registration <- vfs
             let filename = if profile = SqliteStorageProfile.ReadOnly then "file:" + identity + "?immutable=1" else identity
             lease <- SqliteStorageLease(name, filename, profile, registration, faults, report, release)

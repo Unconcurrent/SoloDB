@@ -16,24 +16,6 @@ module internal NativeConnectionDefaults =
     [<Literal>]
     let commandTimeout = 30
 
-/// Shared numeric error contract for native and public callback failures.
-type internal ISqliteError =
-    abstract ResultCode: int
-
-/// A SQLite failure with its primary and extended engine result codes.
-type NativeSqliteException internal (message: string, errorCode: int, extendedErrorCode: int, cause: exn) =
-    inherit DbException(message, cause)
-    new(message: string, errorCode: int, extendedErrorCode: int) = NativeSqliteException(message, errorCode, extendedErrorCode, null)
-    new(message: string, errorCode: int) = NativeSqliteException(message, errorCode, errorCode)
-    member _.SqliteErrorCode = errorCode
-    member _.SqliteExtendedErrorCode = extendedErrorCode
-    interface ISqliteError with member _.ResultCode = extendedErrorCode
-    static member internal FromResult(handle: sqlite3, result: int) =
-        let primary = result &&& 255
-        let extended = if isNull handle || handle.IsInvalid then result else raw.sqlite3_extended_errcode(handle)
-        let text = if isNull handle || handle.IsInvalid then raw.sqlite3_errstr(result).utf8_to_string() else raw.sqlite3_errmsg(handle).utf8_to_string()
-        NativeSqliteException($"SQLite Error {primary}: '{text}'.", primary, extended)
-
 [<AllowNullLiteral>]
 type internal INativeExecutionObserver =
     abstract After: unit -> unit
@@ -123,17 +105,13 @@ type internal NativeDatabase(connectionString: string, storage: SqliteStorage op
         match fault with
         | ValueSome(struct (_, (:? StorageConfigurationError as error))) -> NotSupportedException(error.Message, error) :> exn
         | ValueSome(struct (_, (:? StorageNativeStateError as error))) -> InvalidOperationException(error.Message, error) :> exn
-        | ValueSome(struct (code, cause)) ->
-            let message = raw.sqlite3_errstr(code).utf8_to_string()
-            NativeSqliteException($"SQLite Error {code &&& 255}: '{message}'.", code &&& 255, code, cause) :> exn
+        | ValueSome(struct (code, cause)) -> NativeSqliteException.FromStorageResult(code, cause) :> exn
         | ValueNone -> NativeSqliteException.FromResult(handle, result) :> exn
     member _.CheckStorageOperation() =
         if not(isNull (box storageLease)) then
             match storageLease.Faults.Take() with
             | ValueNone -> ()
-            | ValueSome(struct (code, cause)) ->
-                let message = raw.sqlite3_errstr(code).utf8_to_string()
-                raise(NativeSqliteException($"SQLite Error {code &&& 255}: '{message}'.", code &&& 255, code, cause))
+            | ValueSome(struct (code, cause)) -> raise(NativeSqliteException.FromStorageResult(code, cause))
     member _.AfterStorageClose(action: Action) =
         if storage.IsSome then
             let closed =
@@ -183,9 +161,7 @@ type internal NativeDatabase(connectionString: string, storage: SqliteStorage op
                         if not(isNull original) then original.SetHandleAsInvalid()
                         try
                             match lease.Faults.Take() with
-                            | ValueSome(struct (code, cause)) ->
-                                let message = raw.sqlite3_errstr(code).utf8_to_string()
-                                lease.Report(NativeSqliteException($"SQLite Error {code &&& 255}: '{message}'.", code &&& 255, code, cause))
+                            | ValueSome(struct (code, cause)) -> lease.Report(NativeSqliteException.FromStorageResult(code, cause))
                             | ValueNone -> ()
                         with error -> lease.Report(error)
                         if not(isNull original) then
