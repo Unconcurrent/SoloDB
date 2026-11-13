@@ -208,6 +208,8 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                     let state = root.Target :?> StorageHandle
                     try
                         let result = StorageFiles.close state
+                        // SQLite can complete physical close without returning xClose's error.
+                        if result <> 0 then fail result null |> ignore
                         if result = 0 && state.Flags &&& openDeleteOnClose <> 0 then
                             lock state.Node.Gate (fun () ->
                                 state.Node.File.SetLength(0L) |> StorageFiles.check
