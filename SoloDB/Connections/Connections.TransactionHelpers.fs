@@ -29,18 +29,20 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
             Some commitEx
         | None -> None
 
-    let private executeBoundaryWithNotification notifyAfter completing (connection: NativeSqliteConnection) sql =
+    let private executeBoundaryWithNotification notifyAfter completing committing (connection: NativeSqliteConnection) sql =
         let mutable statement =
             if completing then connection.OpenTransactionStatement(sql)
             else connection.OpenStatement(sql)
         try
-            statement.StepTransactionBoundary() |> ignore
+            if committing then statement.StepCommitBoundary() |> ignore
+            else statement.StepTransactionBoundary() |> ignore
             statement.Finish(null, notifyAfter)
         with error -> statement.Abort(error); reraise()
 
-    let private executeBoundary connection sql = executeBoundaryWithNotification true false connection sql
-    let private executeCompletionBoundary connection sql = executeBoundaryWithNotification true true connection sql
-    let private executeCleanupBoundary connection sql = executeBoundaryWithNotification false true connection sql
+    let private executeBoundary connection sql = executeBoundaryWithNotification true false false connection sql
+    let private executeCompletionBoundary connection sql = executeBoundaryWithNotification true true false connection sql
+    let private executeCleanupBoundary connection sql = executeBoundaryWithNotification false true false connection sql
+    let private executeCommitBoundary connection = executeBoundaryWithNotification true true true connection "COMMIT;"
 
     let cleanupSavepointRollback (conn: NativeSqliteConnection) (sp: string) (ex: exn) =
         let faultDepth = tryGetRecordedHandlerFaultDepth conn ex
@@ -74,7 +76,7 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
     let commitOrRollbackBorrowedTransaction (conn: NativeCachingDbConnection) (primaryEx: exn option ref) (cleanupEx: exn option ref) =
         match takeHandlerFaultCommitException conn with
         | Some ex -> rollbackBorrowedTransaction conn primaryEx cleanupEx ex
-        | None -> executeCompletionBoundary conn "COMMIT;"
+        | None -> executeCommitBoundary conn
 
     let cleanupBorrowedTransaction (conn: NativeCachingDbConnection) (cleanupEx: exn option ref) =
         conn.InsideTransaction <- false

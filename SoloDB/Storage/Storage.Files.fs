@@ -51,6 +51,7 @@ and internal StorageHandle(node: StorageNode, flags: int, coordination: ISqliteS
     member _.Coordination = coordination
     member _.CoordinationIdentity = identity
     member val PersistWal = 0 with get,set
+    member val WalPageSize = 0 with get,set
 
 module internal StorageFiles =
     let check failure = if not(isNull failure) then raise(StorageFileError(failure))

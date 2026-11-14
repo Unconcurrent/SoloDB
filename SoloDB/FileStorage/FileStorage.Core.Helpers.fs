@@ -115,7 +115,24 @@ module FileStorageCore =
         with error -> statement.Abort(error); reraise()
 
     let internal tryGetDir (db: NativeSqliteConnection) (path: string) =
-        tryGetDirectoriesWhere db "dh.FullPath = @Path" (fun statement -> statement.BindText(1, path)) |> Seq.tryHead
+        let mutable statement = db.OpenStatement("SELECT dh.Id, dh.Name, dh.FullPath, dh.ParentId, dh.Created, dh.Modified, dm.Key, dm.Value FROM SoloDBDirectoryHeader dh LEFT JOIN SoloDBDirectoryMetadata dm ON dh.Id = dm.DirectoryId WHERE dh.FullPath = @Path")
+        try
+            statement.BindText(1, path)
+            let result =
+                if not(statement.Step()) then None
+                else
+                    // FullPath is unique; only the final metadata dictionary escapes.
+                    let metadata = Dictionary<string, string>()
+                    let directory = readDirectoryHeader statement.Row metadata
+                    let mutable reading = true
+                    while reading do
+                        let row = statement.Row
+                        if not(row.IsDBNull(6)) then metadata.Add(row.GetString(6), row.GetString(7))
+                        reading <- statement.Step()
+                    Some directory
+            statement.Dispose()
+            result
+        with error -> statement.Abort(error); reraise()
 
     /// <summary>
     /// Recursively retrieves or creates a directory, resolving ancestors by id only.

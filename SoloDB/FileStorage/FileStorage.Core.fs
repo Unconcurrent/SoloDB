@@ -4,8 +4,6 @@ open System
 open System.IO
 open NativeSQLiteTools
 open SoloDatabase.Types
-open NativeArray
-open Snappier
 open System.Runtime.InteropServices
 open SoloDatabase.Connections
 open FileStorageCore
@@ -31,6 +29,7 @@ module FileStorageCoreStream =
         let mutable position = 0L
         let mutable disposed = false
         let mutable dirty = false
+        let mutable mutationVersion = 0L
 
         let checkDisposed() =
             db.CheckAccess()
@@ -38,9 +37,12 @@ module FileStorageCoreStream =
 
         member internal this.UpdateModified() =
             if dirty then
+                let version = mutationVersion
                 db.WithTransaction(fun conn ->
                     updateModifiedTimestamp conn fileId
                 )
+                // A metadata callback may have written through this same stream.
+                if mutationVersion = version then dirty <- false
 
         override _.CanRead = db.CheckAccess(); not disposed
         override _.CanSeek = db.CheckAccess(); not disposed
@@ -68,67 +70,30 @@ module FileStorageCoreStream =
             checkDisposed()
             this.UpdateModified()
 
-        #if NETSTANDARD2_1_OR_GREATER || NET6_0_OR_GREATER
-        override this.Read(buffer: Span<byte>) =
-        #else
-        member this.Read(buffer: Span<byte>) =
-        #endif
+        member private this.ReadFrom(source: NativeConnection, requestedPosition: int64, buffer: Span<byte>) =
             checkDisposed()
             if buffer.IsEmpty then 0 else
 
-            let len               = this.Length
-            let currentPosition   = position
-            let remainingBytes    = len - currentPosition
-            if remainingBytes <= 0L then 0 else
-
-            let bytesToReadTotal  = int (min (int64 buffer.Length) remainingBytes)
-            let buffer            = buffer.Slice(0, bytesToReadTotal)
-            let readEnd           = currentPosition + int64 bytesToReadTotal
-
-            use db = db.Get()
-            let startChunk        = currentPosition / chunkSize
-            let endChunk          = (readEnd - 1L) / chunkSize
-
-            let mutable bytesWrittenToBuffer    = 0
-            let mutable chunkDecompressionBuffer = NativeArray.NativeArray.Empty
-
+            use connection = source.Get()
+            let len = getFileLengthById connection fileId
+            if len < 0L then raise(InvalidDataException("The Stream returned a negative length."))
+            let currentPosition = requestedPosition
+            let remaining = len - currentPosition
+            if remaining <= 0L then 0 else
+            let count = int(min (int64 buffer.Length) remaining)
+            position <- currentPosition
+            let mutable processed = 0
             try
-                for chunk in getAllCompressedChunksWithinRange db fileId startChunk endChunk do
-                    let chunkStartPos = chunk.Number * chunkSize
-                    let copyFrom      = max currentPosition chunkStartPos
-                    let offsetInChunk = int (copyFrom - chunkStartPos)
-                    let bytesInChunk  = int (min (readEnd - copyFrom) (chunkSize - int64 offsetInChunk))
-
-                    if bytesInChunk > 0 then
-                        let bufferOffset    = int (copyFrom - currentPosition)
-                        let destinationSpan = buffer.Slice(bufferOffset, bytesInChunk)
-
-                        if chunk.Data.Length = 0 then
-                            destinationSpan.Fill(0uy)
-                            bytesWrittenToBuffer <- bytesWrittenToBuffer + bytesInChunk
-                        else
-                            let written =
-                                if offsetInChunk = 0 then
-                                    match Snappy.TryDecompress(chunk.Data.Span, destinationSpan) with
-                                    | _, 0 ->
-                                        failwithf "Failed to decompress chunk #%d." chunk.Number
-                                    | _, decompressed when decompressed <> destinationSpan.Length ->
-                                        failwithf "Decompressed %d bytes but expected %d." decompressed destinationSpan.Length
-                                    | _, decompressed ->
-                                        decompressed
-                                else
-                                    if chunkDecompressionBuffer.Length = 0 then
-                                        chunkDecompressionBuffer <- NativeArray.NativeArray.Alloc (int maxChunkStoreSize)
-                                    let decompBuf = chunkDecompressionBuffer.Span
-                                    let _ = Snappy.Decompress(chunk.Data.Span, decompBuf)
-                                    decompBuf.Slice(offsetInChunk, bytesInChunk).CopyTo(destinationSpan)
-                                    bytesInChunk
-                            bytesWrittenToBuffer <- bytesWrittenToBuffer + written
+                readChunkedData connection fileId currentPosition (buffer.Slice(0, count)) &processed
+                processed
             finally
-                chunkDecompressionBuffer.Dispose()
-                this.Position <- currentPosition + int64 bytesWrittenToBuffer
+                this.Position <- currentPosition + int64 processed
 
-            bytesWrittenToBuffer
+        #if NETSTANDARD2_1_OR_GREATER || NET6_0_OR_GREATER
+        override this.Read(buffer: Span<byte>) = this.ReadFrom(db, position, buffer)
+        #else
+        member this.Read(buffer: Span<byte>) = this.ReadFrom(db, position, buffer)
+        #endif
 
         override this.Read(buffer: byte[], offset: int, count: int) : int =
             validateBufferArguments buffer offset count
@@ -158,12 +123,7 @@ module FileStorageCoreStream =
                     with ex -> Threading.Tasks.ValueTask<int>(Threading.Tasks.Task.FromException<int>(ex))
         #endif
 
-        #if NETSTANDARD2_1_OR_GREATER || NET6_0_OR_GREATER
-        override
-        #else
-        member
-        #endif
-            this.Write(buffer: ReadOnlySpan<byte>) =
+        member private this.WriteFrom(source: NativeConnection, buffer: ReadOnlySpan<byte>, scratch: ChunkWriteScratch voption) =
             db.CheckAccess()
             if buffer.IsEmpty then () else
             checkDisposed()
@@ -173,19 +133,32 @@ module FileStorageCoreStream =
                 raise (IOException("The write exceeds the supported file range."))
             let newPosition = startPosition + int64 bufferLen
             use buffer = fixed buffer
-            db.WithTransaction(fun db ->
+            let perform db =
                 let oldLength = getFileLengthById db fileId
+                if oldLength < 0L then raise(InvalidDataException("The Stream returned a negative length."))
                 let facts = FileStorageContentEvents.prepare db {
                     FileId = fileId; Offset = startPosition; Length = int64 bufferLen
                     OldLength = oldLength; NewLength = max oldLength newPosition
                     Kind = FileContentChangeKind.Write }
                 checkDisposed()
                 let data = ReadOnlySpan<byte>(NativeInterop.NativePtr.toVoidPtr buffer, bufferLen)
-                writeChunkedData db fileId startPosition data |> ignore
+                match scratch with
+                | ValueSome scratch -> writeChunkedDataWithScratch db fileId startPosition data facts.OldLength scratch |> ignore
+                | ValueNone -> writeChunkedData db fileId startPosition data facts.OldLength |> ignore
                 if facts.NewLength > facts.OldLength then updateLenById db fileId facts.NewLength
-                FileStorageContentEvents.completed db facts)
+                FileStorageContentEvents.completed db facts
+            match scratch, source with
+            | ValueSome _, NativeTransactional connection -> perform connection
+            | _ -> source.WithTransaction perform
             position <- newPosition
             dirty <- true
+            mutationVersion <- mutationVersion + 1L
+
+        #if NETSTANDARD2_1_OR_GREATER || NET6_0_OR_GREATER
+        override this.Write(buffer: ReadOnlySpan<byte>) = this.WriteFrom(db, buffer, ValueNone)
+        #else
+        member this.Write(buffer: ReadOnlySpan<byte>) = this.WriteFrom(db, buffer, ValueNone)
+        #endif
 
         override this.Write(buffer: byte[], offset: int, count: int) =
             validateBufferArguments buffer offset count
@@ -196,7 +169,7 @@ module FileStorageCoreStream =
             this.Write(buffer, offset, count)
             Threading.Tasks.Task.CompletedTask
 
-        override this.SetLength(value: int64) =
+        member private this.SetLengthFrom(source: NativeConnection, value: int64) =
             checkDisposed()
             if value < 0 then
                 raise (ArgumentOutOfRangeException("Length"))
@@ -204,8 +177,9 @@ module FileStorageCoreStream =
             let mutable shouldMarkDirty = false
             let mutable shouldClampPosition = false
 
-            db.WithTransaction(fun db ->
+            source.WithTransaction(fun db ->
                 let originalLength = getFileLengthById db fileId
+                if originalLength < 0L then raise(InvalidDataException("The Stream returned a negative length."))
                 if originalLength <> value then
                     let facts = FileStorageContentEvents.prepare db {
                         FileId = fileId; Offset = min originalLength value
@@ -223,7 +197,67 @@ module FileStorageCoreStream =
             )
 
             if shouldClampPosition then position <- value
-            if shouldMarkDirty then dirty <- true
+            if shouldMarkDirty then
+                dirty <- true
+                mutationVersion <- mutationVersion + 1L
+
+        override this.SetLength(value: int64) = this.SetLengthFrom(db, value)
+
+        member private this.WriteAtFrom(source, offset, buffer: ReadOnlySpan<byte>, scratch) =
+            checkDisposed()
+            StorageValidation.bounds offset buffer.Length
+            if not buffer.IsEmpty then
+                position <- offset
+                this.WriteFrom(source, buffer, scratch)
+
+        member private _.Source = db
+        member private _.FileId = fileId
+
+        interface IStorageParentStream with
+            member this.ByteFile =
+                { new ISqliteStorageFile with
+                    member _.ReadAt(offset, buffer) =
+                        StorageValidation.bounds offset buffer.Length
+                        StorageReadResult(this.ReadFrom(db, offset, buffer), null)
+                    member _.WriteAt(offset, buffer) =
+                        this.WriteAtFrom(db, offset, buffer, ValueNone)
+                        null
+                    member _.GetLength() =
+                        let length = this.Length
+                        if length < 0L then raise(InvalidDataException("The Stream returned a negative length."))
+                        StorageLengthResult(length, null)
+                    member _.SetLength(length) = this.SetLengthFrom(db, length); null
+                    member _.Flush() = this.Flush(); null }
+            member this.PairWith(auxiliary) =
+                match db, auxiliary with
+                | NativePooled pool, (:? DbFileStream as other) when fileId <> other.FileId && not pool.IsReadOnly ->
+                    match other.Source with
+                    | NativePooled otherPool when Object.ReferenceEquals(pool, otherPool) ->
+                        { new IStorageParentBatchFactory with
+                            member _.Begin() =
+                                let transaction = pool.BeginStorageTransaction()
+                                let scratch =
+                                    try new ChunkWriteScratch()
+                                    with error -> transaction.Fail(error); reraise()
+                                let source = NativeTransactional transaction.Connection
+                                let mutable active = true
+                                { new IStorageParentBatch with
+                                    member _.Write(auxiliary, offset, buffer) =
+                                        if not active then invalidOp "The storage batch has completed."
+                                        let target = if auxiliary then other else this
+                                        target.WriteAtFrom(source, offset, buffer, ValueSome scratch)
+                                    member _.Complete() =
+                                        if active then
+                                            active <- false
+                                            try transaction.Complete()
+                                            finally (scratch :> IDisposable).Dispose()
+                                    member _.Fail(error) =
+                                        if active then
+                                            active <- false
+                                            try transaction.Fail(error)
+                                            finally (scratch :> IDisposable).Dispose() } }
+                    | _ -> null
+                | _ -> null
 
         override this.Seek(offset: int64, origin: SeekOrigin) =
             checkDisposed()

@@ -31,7 +31,7 @@ type internal StorageFaultChannel() =
 /// Released only by the physical native owner after successful native close.
 [<Sealed>]
 type internal SqliteStorageLease(name: string, filename: string, profile: SqliteStorageProfile,
-                                vfs: IDisposable, faults: StorageFaultChannel,
+                                vfs: ManagedStorageVfs, faults: StorageFaultChannel,
                                 report: exn -> unit, release: unit -> unit) =
     let gate = obj()
     let mutable close: Action = null
@@ -41,6 +41,9 @@ type internal SqliteStorageLease(name: string, filename: string, profile: Sqlite
     member _.Filename = filename
     member _.Profile = profile
     member _.Faults = faults
+    member internal _.CanBatch = not(isNull (box vfs)) && vfs.CanBatch
+    member internal _.EnterOperation(commit) = vfs.EnterOperation(commit)
+    member internal _.ExitOperation(call, primary, result) = vfs.ExitOperation(call, primary, result)
     member _.Report(error) = report error
     member _.RequestClose() =
         let action = lock gate (fun () -> pending <- true; if completed then null else close)
@@ -55,8 +58,8 @@ type internal SqliteStorageLease(name: string, filename: string, profile: Sqlite
                 else completed <- true; close <- null; true)
         if claimed then
             try
-                if not(isNull vfs) then
-                    try vfs.Dispose() with error -> report error
+                if not(isNull (box vfs)) then
+                    try (vfs :> IDisposable).Dispose() with error -> report error
             finally release()
 
 /// One root's logical attachment, separate from native physical completion.
@@ -100,7 +103,7 @@ module private StorageInput =
 /// cycles may retain all resources. Positional files are borrowed.
 [<Sealed>]
 type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorageFile[], owned: IDisposable[],
-                            coordination: ISqliteStorageCoordination) =
+                            coordination: ISqliteStorageCoordination, parentBatch: IStorageParentBatchFactory) =
     let gate = obj()
     let mutable nodes = files |> Array.map StorageNode
     let mutable ownedResources = owned
@@ -255,10 +258,10 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
             let name = identity + "-" + Guid.NewGuid().ToString("N")
             let vfs = new ManagedStorageVfs(name, identity, nodes, profile, coordination,
                                             Action<int,exn>(fun code cause -> faults.Record(code, cause)),
-                                            Action<int,exn>(fun code cause -> reportOpeningCleanup code cause), initialize timeout)
+                                            Action<int,exn>(fun code cause -> reportOpeningCleanup code cause), initialize timeout, parentBatch)
             registration <- vfs
             let filename = if profile = SqliteStorageProfile.ReadOnly then "file:" + identity + "?immutable=1" else identity
-            lease <- SqliteStorageLease(name, filename, profile, registration, faults, report, release)
+            lease <- SqliteStorageLease(name, filename, profile, vfs, faults, report, release)
             let closing = lock gate (fun () -> leases.Add(lease) |> ignore; retired)
             if closing then lease.RequestClose()
             lease
@@ -269,11 +272,15 @@ type SqliteStorage private (profile: SqliteStorageProfile, files: ISqliteStorage
     member _.Dispose() = retire()
     interface IDisposable with member this.Dispose() = this.Dispose()
     static member private Managed(profile, files, owned, coordination) =
-        new SqliteStorage(profile, files, owned, coordination)
+        new SqliteStorage(profile, files, owned, coordination, null)
     static member private Streams(profile, streams, leaveOpen, coordination) =
         let adapters = StorageInput.adapters profile (profile <> SqliteStorageProfile.ReadOnly) leaveOpen streams
-        try SqliteStorage.Managed(profile, adapters |> Array.map (fun f -> f :> ISqliteStorageFile),
-                                  adapters |> Array.map (fun f -> f :> IDisposable), coordination)
+        try
+            let batch =
+                if profile = SqliteStorageProfile.ReadOnly || isNull adapters.[0].Parent then null
+                else adapters.[0].Parent.PairWith(adapters.[1].StreamIdentity)
+            new SqliteStorage(profile, adapters |> Array.map (fun f -> f :> ISqliteStorageFile),
+                              adapters |> Array.map (fun f -> f :> IDisposable), coordination, batch)
         with _ ->
             for adapter in adapters do try (adapter :> IDisposable).Dispose() with _ -> ()
             reraise()

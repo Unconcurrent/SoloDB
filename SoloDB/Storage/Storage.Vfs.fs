@@ -2,8 +2,10 @@ namespace SoloDatabase
 
 open System
 open System.Collections.Generic
+open System.Buffers.Binary
 open System.Runtime.InteropServices
 open System.Threading
+open Microsoft.FSharp.NativeInterop
 open StorageNative
 
 #nowarn "9"
@@ -13,7 +15,8 @@ open StorageNative
 [<Sealed>]
 type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNode[], profile: SqliteStorageProfile,
                               coordination: ISqliteStorageCoordination,
-                              fault: Action<int,exn>, openingCleanup: Action<int,exn>, initialize: StorageHandle -> int) =
+                              fault: Action<int,exn>, openingCleanup: Action<int,exn>, initialize: StorageHandle -> int,
+                              parentBatch: IStorageParentBatchFactory) =
     let parent = StorageNativeVfs(null)
     let callbacks = ResizeArray<Delegate>()
     let nameBytes = bytes name
@@ -27,11 +30,48 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
     let mutable registered = false
     let mutable files = 0
     let mutable disposed = false
+    // The owning SQLite connection mutex serializes these native invocations.
+    let mutable nextInvocation = 0L
+    let mutable invocation = 0L
+    let mutable committing = false
+    let mutable commitFence = false
+    let mutable batch: IStorageParentBatch = null
+    let mutable batchOwner = 0L
+    let mutable walPair = false
+    let mutable nextWalPosition = 0L
+    let mutable applying = false
+    let mutable walFiles = 0
+    let mutable journalFiles = 0
+    let clearBatch () =
+        let owned = batch
+        batch <- null
+        batchOwner <- 0L
+        walPair <- false
+        owned
+    let abortBatch (error: exn) =
+        let owned = clearBatch()
+        if not(isNull owned) then
+            try owned.Fail(error)
+            with cleanup -> error.Data.["SoloDB.CleanupException"] <- cleanup
+    let completeBatch () =
+        if not applying then
+            let owned = clearBatch()
+            if not(isNull owned) then owned.Complete()
+    let beginBatch frame =
+        let owned = parentBatch.Begin()
+        batch <- owned
+        batchOwner <- invocation
+        walPair <- frame
+    let writeBatch auxiliary position (source: ReadOnlySpan<byte>) =
+        applying <- true
+        try batch.Write(auxiliary, position, source)
+        finally applying <- false
     let keep (callback: Delegate) =
         callbacks.Add(callback)
         Marshal.GetFunctionPointerForDelegate(callback)
     let handle file = GCHandle.FromIntPtr(Marshal.ReadIntPtr(file, ptr)).Target :?> StorageHandle
     let fail code (error: exn) =
+        if not(isNull error) && not(isNull batch) && not applying then abortBatch error
         let struct (code, cause) = StorageErrors.describe code error
         // No managed exception may leave a reverse native callback, including
         // a secondary diagnostic failure. A missing cause does not erase the code.
@@ -61,6 +101,19 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
         | 0 -> Some nodes.[0]
         | 1 | 2 when profile <> SqliteStorageProfile.ReadOnly -> Some nodes.[1]
         | _ -> None
+    let walFrameHeader (state: StorageHandle) position count =
+        if state.Flags &&& 0x80000 = 0 || count <> 24 || position < 32L then false
+        else
+            if state.WalPageSize = 0 then
+                let pointer = NativePtr.stackalloc<byte> 32
+                let header = Span<byte>(NativePtr.toVoidPtr pointer, 32)
+                if StorageFiles.read state.Node 0L header = 32 then
+                    let bytes = ReadOnlySpan<byte>(NativePtr.toVoidPtr pointer, 32)
+                    let magic = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(0, 4))
+                    let size = BinaryPrimitives.ReadUInt32BigEndian(bytes.Slice(8, 4))
+                    if (magic = 0x377f0682u || magic = 0x377f0683u) && size >= 512u && size <= 65536u && size &&& (size - 1u) = 0u then
+                        state.WalPageSize <- int size
+            state.WalPageSize <> 0 && (position - 32L) % (int64 state.WalPageSize + 24L) = 0L
     let returnText argument message result =
         let data = bytes message
         let memory = sqlite3_malloc64(uint64 data.Length)
@@ -70,8 +123,15 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
         result
     let control (state: StorageHandle) operation argument =
         match operation with
+        | 21 ->
+            // SQLite checks this result even when the caller omits xSync.
+            try
+                completeBatch()
+                commitFence <- true
+                0
+            with error -> fail 1034 error
         | 1 -> state.Coordination.FileControl(operation, argument)
-        | 5 | 8 | 11 | 19 | 21 | 22 | 37 | 39 | 45 -> 0 // Advisory, no byte/length or durability change.
+        | 5 | 8 | 11 | 19 | 22 | 37 | 39 | 45 -> 0 // Advisory, no byte/length or durability change.
         | 10 ->
             let value = Marshal.ReadInt32(argument)
             if value < 0 then Marshal.WriteInt32(argument, state.PersistWal)
@@ -137,6 +197,8 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                                         Marshal.WriteIntPtr(file, ptr, GCHandle.ToIntPtr(root))
                                         Marshal.WriteIntPtr(file, table)
                                         if output <> 0n then Marshal.WriteInt32(output, flags)
+                                        if logical = 1 then walFiles <- walFiles + 1
+                                        elif logical = 2 then journalFiles <- journalFiles + 1
                                         Interlocked.Increment(&files) |> ignore
                                 with error ->
                                     result <- 14
@@ -151,6 +213,7 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                                     closeOpening state session attached
                                 result)))
             set 4 (Path(fun _ path sync -> protect 2570 (fun () ->
+                completeBatch()
                 let logical = role(text path)
                 if logical = -1 then parent.Delete(path, sync)
                 elif profile = SqliteStorageProfile.ReadOnly then 8
@@ -165,6 +228,7 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                                 node.File.Flush() |> StorageFiles.check
                             0))))
             set 5 (Access(fun _ path flags output -> protect 3338 (fun () ->
+                completeBatch()
                 let logical = role(text path)
                 if logical = -1 then parent.Access(path, flags, output)
                 else
@@ -206,7 +270,10 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                     let root = GCHandle.FromIntPtr(Marshal.ReadIntPtr(file, ptr))
                     let state = root.Target :?> StorageHandle
                     try
+                        let mutable boundaryError: exn = null
+                        try completeBatch() with error -> boundaryError <- error
                         let result = StorageFiles.close state
+                        if not(isNull boundaryError) then raise boundaryError
                         // SQLite can complete physical close without returning xClose's error.
                         if result <> 0 then fail result null |> ignore
                         if result = 0 && state.Flags &&& openDeleteOnClose <> 0 then
@@ -218,12 +285,15 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                         root.Free()
                         Marshal.WriteIntPtr(file, ptr, 0n)
                         Marshal.WriteIntPtr(file, 0n)
+                        if state.Flags &&& 0x80000 <> 0 then walFiles <- walFiles - 1
+                        elif state.Flags &&& 0x800 <> 0 then journalFiles <- journalFiles - 1
                         Interlocked.Decrement(&files) |> ignore)))
             methodAt 1 (Io(fun file data count position ->
               try
                 if count < 0 then 266 else
                 StorageValidation.bounds position count
                 let state = handle file
+                completeBatch()
                 // The Span is constructed inside the serialized operation, never
                 // captured by a closure or copied through a per-handle byte array.
                 lock state.Node.Gate (fun () ->
@@ -237,7 +307,25 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                 let state = handle file
                 if state.Flags &&& 2 = 0 then 8 else
                 lock state.Node.Gate (fun () ->
-                    state.Node.File.WriteAt(position, ReadOnlySpan<byte>(data.ToPointer(), count)) |> StorageFiles.check
+                    let auxiliary = state.Flags &&& 0x100 = 0
+                    let eligible = invocation <> 0L && not applying && not(isNull parentBatch)
+                    if not(isNull batch) && not applying &&
+                       (batchOwner <> invocation || walPair && (not auxiliary || position <> nextWalPosition)) then
+                        completeBatch()
+                    if eligible && not(isNull batch) && batchOwner = invocation then
+                        let frame = walPair
+                        writeBatch auxiliary position (ReadOnlySpan<byte>(data.ToPointer(), count))
+                        if frame then completeBatch()
+                    elif eligible && count > 0 && walFrameHeader state position count then
+                        beginBatch true
+                        writeBatch true position (ReadOnlySpan<byte>(data.ToPointer(), count))
+                        nextWalPosition <- position + int64 count
+                    elif eligible && count > 0 && not auxiliary && committing && not commitFence && journalFiles > 0 && walFiles = 0 then
+                        beginBatch false
+                        writeBatch false position (ReadOnlySpan<byte>(data.ToPointer(), count))
+                    else
+                        state.Node.File.WriteAt(position, ReadOnlySpan<byte>(data.ToPointer(), count)) |> StorageFiles.check
+                    if state.Flags &&& 0x80000 <> 0 && position < 32L && count > 0 then state.WalPageSize <- 0
                     0)
               with error -> fail 778 error))
             methodAt 3 (Resize(fun file length ->
@@ -245,16 +333,23 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
                 if length < 0L then 1546 else
                 let state = handle file
                 if state.Flags &&& 2 = 0 then 8 else
-                lock state.Node.Gate (fun () -> state.Node.File.SetLength(length) |> StorageFiles.check; 0)
+                completeBatch()
+                lock state.Node.Gate (fun () ->
+                    state.WalPageSize <- 0
+                    state.Node.File.SetLength(length) |> StorageFiles.check
+                    0)
               with error -> fail 1546 error))
             methodAt 4 (IntArg(fun file _ ->
               try
                 let state = handle file
+                completeBatch()
+                if state.Flags &&& 0x100 <> 0 then commitFence <- true
                 lock state.Node.Gate (fun () -> state.Node.File.Flush() |> StorageFiles.check; 0)
               with error -> fail 1034 error))
             methodAt 5 (Output(fun file output ->
               try
                 let state = handle file
+                completeBatch()
                 lock state.Node.Gate (fun () -> Marshal.WriteInt64(output, StorageFiles.length state.Node); 0)
               with error -> fail 1802 error))
             methodAt 6 (IntArg(fun file level -> protect 3850 (fun () -> (handle file).Coordination.Lock(level))))
@@ -291,6 +386,31 @@ type internal ManagedStorageVfs(name: string, filename: string, nodes: StorageNo
             Marshal.FreeHGlobal(memory)
             callbacks.Clear()
             reraise()
+    new(name, filename, nodes, profile, coordination, fault, openingCleanup, initialize) =
+        new ManagedStorageVfs(name, filename, nodes, profile, coordination, fault, openingCleanup, initialize, null)
+    member internal _.CanBatch = not(isNull parentBatch)
+    member internal _.EnterOperation(commit) =
+        let previous = { Invocation = nextInvocation + 1L; Previous = invocation
+                         PreviousCommit = committing; PreviousFence = commitFence }
+        nextInvocation <- previous.Invocation
+        invocation <- previous.Invocation
+        committing <- commit
+        commitFence <- false
+        previous
+    member internal _.ExitOperation(call: StorageNativeCall, primary: exn, result: int) =
+        try
+            if not(isNull batch) && batchOwner = call.Invocation then
+                let completed = result = 100 || result = 101
+                let error =
+                    if isNull primary then
+                        StorageNativeError((if completed then 778 else result), "The storage write batch did not reach its completion boundary.") :> exn
+                    else primary
+                abortBatch error
+                if isNull primary && completed then raise error
+        finally
+            invocation <- call.Previous
+            committing <- call.PreviousCommit
+            commitFence <- call.PreviousFence
     member _.Name = name
     member _.FileCount = files
     interface IDisposable with

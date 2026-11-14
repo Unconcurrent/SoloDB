@@ -64,6 +64,7 @@ type internal NativeDatabase(connectionString: string, storage: SqliteStorage op
     let releaseActive = if storage.IsNone then null else Action(fun () -> this.ReleaseUse(true))
     let releaseStatement = if storage.IsNone then null else Action(fun () -> this.ReleaseUse(false))
     let mutable storageLease: SqliteStorageLease = Unchecked.defaultof<_>
+    let mutable storageMutex = 0n
     let mutable nativeRoot = Unchecked.defaultof<GCHandle>
     let completed = ResizeArray<Action>()
     let mutable observer: INativeExecutionObserver = null
@@ -96,6 +97,22 @@ type internal NativeDatabase(connectionString: string, storage: SqliteStorage op
     member _.SetStatementRetirement(action: Action) = if storage.IsSome then retireStatements <- action
     member _.BeginStorageOperation() =
         if not(isNull (box storageLease)) then storageLease.Faults.Clear()
+    member internal _.CanBatchStorage = not(isNull (box storageLease)) && storageLease.CanBatch
+    member internal _.EnterStorageCall(commit) =
+        let lease = storageLease
+        // Use SQLite's recursive connection mutex, never a competing managed lock.
+        StorageNative.sqlite3_mutex_enter(storageMutex)
+        try struct (lease, lease.EnterOperation(commit), storageMutex)
+        with _ -> StorageNative.sqlite3_mutex_leave(storageMutex); reraise()
+    member internal _.ExitStorageCall(struct (lease: SqliteStorageLease, call: StorageNativeCall, mutex: nativeint), primary: exn, result: int) =
+        try
+            try lease.ExitOperation(call, primary, result)
+            with error ->
+                if isNull primary then
+                    let struct (code, cause) = StorageErrors.describe 778 error
+                    raise(NativeSqliteException.FromStorageResult(code, cause))
+                else primary.Data.["SoloDB.CleanupException"] <- error
+        finally StorageNative.sqlite3_mutex_leave(mutex)
     member _.BindStorageClose(action: Action) =
         if not(isNull (box storageLease)) then storageLease.SetCloseRequest(action)
     member _.StorageFaults =
@@ -181,6 +198,7 @@ type internal NativeDatabase(connectionString: string, storage: SqliteStorage op
                         rollbackGeneration <- -1L
                         try lease.Complete() with error -> lease.Report(error)
                         storageLease <- Unchecked.defaultof<_>
+                        storageMutex <- 0n
                         if nativeRoot.IsAllocated then nativeRoot.Free()
                     else lease.Report(this.Error(result))
                 with error -> lease.Report(error)
@@ -362,6 +380,7 @@ type internal NativeDatabase(connectionString: string, storage: SqliteStorage op
                         if result <> raw.SQLITE_OK then raise(this.Error(result))
                         openState <- true
                         generation <- generation + 1L
+                        if lease.CanBatch then storageMutex <- StorageNative.sqlite3_db_mutex(handle)
                         configure()
                         if retired then raise(ObjectDisposedException("NativeSqliteConnection"))
                     with _ -> this.Close(); reraise()

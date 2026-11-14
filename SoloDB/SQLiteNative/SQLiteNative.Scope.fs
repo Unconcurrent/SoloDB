@@ -11,6 +11,7 @@ open SQLitePCL
 type private NativeStatementStepMode =
     | Ordinary
     | TransactionBoundary
+    | CommitBoundary
     | Maintenance
 
 /// Admission retains one observer checkpoint while preparation is pending.
@@ -185,7 +186,7 @@ type internal NativeStatementScope =
     member this.Bind(arguments: INativeArgumentBinding) =
         this.CheckStatement()
         this.statement.Bind(arguments)
-    member private this.StepNative(attempt: byref<NativeStatementStepAttempt>) =
+    member private this.StepNativeCore(attempt: byref<NativeStatementStepAttempt>) =
         this.cache.Database.BeginStorageOperation()
         attempt.Result <- raw.sqlite3_step(this.statement.Handle)
         this.Check()
@@ -195,6 +196,16 @@ type internal NativeStatementScope =
         with error ->
             error.Data.["Statement"] <- this.statement.Description
             reraise()
+    member private this.StepNative(attempt: byref<NativeStatementStepAttempt>) =
+        let database = this.cache.Database
+        if database.CanBatchStorage && (not this.statement.ReadOnly || attempt.Mode = CommitBoundary) then
+            let call = database.EnterStorageCall(attempt.Mode = CommitBoundary)
+            let mutable primary: exn = null
+            try
+                try this.StepNativeCore(&attempt)
+                with error -> primary <- error; reraise()
+            finally database.ExitStorageCall(call, primary, attempt.Result)
+        else this.StepNativeCore(&attempt)
     member private this.StartStep(mode: NativeStatementStepMode) =
         this.Check()
         if not this.statement.HasStatement then ValueNone else
@@ -205,7 +216,7 @@ type internal NativeStatementScope =
     member private this.CanRetry(attempt: byref<NativeStatementStepAttempt>) =
         NativeExecution.isLocked attempt.Result && this.result = 0 &&
         (match attempt.Mode with
-         | TransactionBoundary -> true
+         | TransactionBoundary | CommitBoundary -> true
          | Maintenance -> raw.sqlite3_stmt_busy(this.statement.Handle) <> 0 || this.cache.Database.CallbackEpoch = attempt.Callbacks
          | Ordinary -> raw.sqlite3_stmt_busy(this.statement.Handle) <> 0 || (attempt.Result = 262 && this.cache.Database.CallbackEpoch = attempt.Callbacks)) &&
         this.budget.CanRetry(attempt.Started)
@@ -266,6 +277,7 @@ type internal NativeStatementScope =
     // Only transaction-owner SQL without application expressions may restart a halted VM.
     // Shared-cache BEGIN can halt on LOCKED before acquiring its transaction.
     member this.StepTransactionBoundary() = this.Step(TransactionBoundary)
+    member this.StepCommitBoundary() = this.Step(CommitBoundary)
     member this.StepTransactionBoundaryAsync() = this.StepAsync(TransactionBoundary)
     // Fixed in-place maintenance may restart a halted VM before application callbacks.
     member this.StepMaintenance() = this.Step(Maintenance)

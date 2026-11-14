@@ -40,6 +40,12 @@ module internal StorageNative =
     [<DllImport("e_sqlite3", CallingConvention=CallingConvention.Cdecl)>]
     extern int sqlite3_close(nativeint db)
     [<DllImport("e_sqlite3", CallingConvention=CallingConvention.Cdecl)>]
+    extern nativeint sqlite3_db_mutex(sqlite3 db)
+    [<DllImport("e_sqlite3", CallingConvention=CallingConvention.Cdecl)>]
+    extern void sqlite3_mutex_enter(nativeint mutex)
+    [<DllImport("e_sqlite3", CallingConvention=CallingConvention.Cdecl)>]
+    extern void sqlite3_mutex_leave(nativeint mutex)
+    [<DllImport("e_sqlite3", CallingConvention=CallingConvention.Cdecl)>]
     extern nativeint sqlite3_create_filename(nativeint database, nativeint journal, nativeint wal, int count, nativeint parameters)
     [<DllImport("e_sqlite3", CallingConvention=CallingConvention.Cdecl)>]
     extern void sqlite3_free_filename(nativeint filename)

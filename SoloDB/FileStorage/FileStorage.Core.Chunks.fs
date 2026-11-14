@@ -1,8 +1,8 @@
 namespace SoloDatabase
 
 open System
+open System.Buffers
 open NativeSQLiteTools
-open NativeArray
 open Snappier
 open SoloDatabase.Types
 open FileStorageCore
@@ -11,6 +11,24 @@ open FileStorageCore
 #nowarn "9"
 
 module internal FileStorageCoreChunks =
+    /// One operation owns both rentals through its final native consumer.
+    [<Sealed>]
+    type internal ChunkWriteScratch internal () =
+        let plain = ArrayPool<byte>.Shared.Rent(int chunkSize)
+        let compressed =
+            try ArrayPool<byte>.Shared.Rent(int maxChunkStoreSize)
+            with _ -> ArrayPool<byte>.Shared.Return(plain); reraise()
+        let mutable disposed = false
+        member internal _.Plain = plain.AsSpan(0, int chunkSize)
+        member internal _.Compressed = compressed.AsSpan(0, int maxChunkStoreSize)
+        member internal _.CompressedArray = compressed
+        interface IDisposable with
+            member _.Dispose() =
+                if not disposed then
+                    disposed <- true
+                    ArrayPool<byte>.Shared.Return(compressed)
+                    ArrayPool<byte>.Shared.Return(plain)
+
     let private readTreeEntry (statement: byref<NativeStatementScope>) =
         try
             let row = statement.Row
@@ -102,43 +120,36 @@ module internal FileStorageCoreChunks =
             with error -> statement.Abort(error); reraise()
         buffer.Slice(0, length)
 
-    let internal writeChunkData (db: NativeSqliteConnection) (fileId: int64) (chunkNumber: int64) (data: Span<byte>) =
-        let arrayBuffer = Array.zeroCreate (int maxChunkStoreSize)
-        let len = Snappy.Compress(data, arrayBuffer.AsSpan())
-        let mutable statement = db.OpenStatement("INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)")
+    let private storeChunk (db: NativeSqliteConnection) fileId chunkNumber (scratch: ChunkWriteScratch) length =
+        let mutable statement = db.OpenStatement("INSERT INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data) ON CONFLICT(FileId, Number) DO UPDATE SET Data = excluded.Data")
         try
             statement.BindInt64(1, fileId)
             statement.BindInt64(2, chunkNumber)
-            statement.BindBlob(3, arrayBuffer, len)
+            statement.BindBlob(3, scratch.CompressedArray, length)
             statement.Step() |> ignore
             let result = statement.RecordsAffected
             statement.Dispose()
             if result <> 1 then failwith "writeChunkData failed."
         with error -> statement.Abort(error); reraise()
 
-    let private allocateChunk (db: NativeSqliteConnection) (fileId: int64) (number: int64) (size: int) =
-        let mutable statement = db.OpenStatement("INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, ZEROBLOB(@Size)) RETURNING rowid")
-        try
-            statement.BindInt64(1, fileId)
-            statement.BindInt64(2, number)
-            statement.BindInt64(3, int64 size)
-            if not (statement.Step()) then Seq.head (Seq.empty<unit>)
-            let rowid = statement.Row.GetInt64(0)
-            statement.Dispose()
-            rowid
-        with error -> statement.Abort(error); reraise()
+    let private writeChunkData db fileId chunkNumber (data: Span<byte>) (scratch: ChunkWriteScratch) =
+        let length = Snappy.Compress(data, scratch.Compressed)
+        storeChunk db fileId chunkNumber scratch length
 
     /// Clear the stored boundary suffix without forming an absolute chunk end.
-    let internal clearChunkTail (db: NativeSqliteConnection) (fileId: int64) (position: int64) =
+    let private clearChunkTailWithScratch (db: NativeSqliteConnection) (fileId: int64) (position: int64) (scratch: ChunkWriteScratch) =
         let chunkNumber = position / chunkSize
         let retainedBytes = int (position % chunkSize)
-        use buffer = NativeArray.NativeArray.Alloc (int chunkSize)
-        let bytes = buffer.Span
+        let bytes = scratch.Plain
         bytes.Clear()
         let stored = tryGetChunkData db fileId chunkNumber bytes
         if not stored.IsEmpty then
             bytes.Slice(retainedBytes).Clear()
-            writeChunkData db fileId chunkNumber bytes
+            writeChunkData db fileId chunkNumber bytes scratch
+
+    let internal clearChunkTail db fileId position =
+        use scratch = new ChunkWriteScratch()
+        clearChunkTailWithScratch db fileId position scratch
 
     /// Truncate within the caller's transaction, including the discarded tail of
     /// a retained chunk so a subsequent sparse write cannot reveal old bytes.
@@ -154,55 +165,51 @@ module internal FileStorageCoreChunks =
         with error -> statement.Abort(error); reraise()
         updateLenById db fileId newFileLength
 
-    [<Struct; CLIMutable>]
-    type internal ChunkDTO = { Number: int64; Data: NativeArray.NativeArray }
-
-    let private openStoredChunks (db: NativeSqliteConnection) fileId startChunk lastChunk =
+    /// Consume each borrowed SQLite value before advancing the private statement.
+    let internal readChunkedData (db: NativeSqliteConnection) fileId position (destination: Span<byte>) (processed: byref<int>) =
+        let firstChunk = position / chunkSize
+        let ending = position + int64 destination.Length
+        let lastChunk = (ending - 1L) / chunkSize
+        let mutable partial = Array.empty<byte>
         let mutable statement = db.OpenStatement("SELECT Number, Data FROM SoloDBFileChunk WHERE FileId = @FileId AND Number >= @StartChunk AND Number <= @EndChunk ORDER BY Number")
         try
-            statement.BindInt64(1, fileId)
-            statement.BindInt64(2, startChunk)
-            statement.BindInt64(3, lastChunk)
-            statement
-        with error -> statement.Abort(error); reraise()
-
-    let private readStoredChunk (statement: byref<NativeStatementScope>) =
-        try
-            if statement.Step() then
-                ValueSome { Number = statement.Row.GetInt64(0); Data = statement.Row.GetNativeArray(1) }
-            else ValueNone
-        with error -> statement.Abort(error); reraise()
-
-    let internal getStoredChunks (db: NativeSqliteConnection) (fileId: int64) (startChunk: int64) (lastChunk: int64) = seq {
-        let mutable statement = openStoredChunks db fileId startChunk lastChunk
-        try
-            let mutable reading = true
-            while reading do
-                match readStoredChunk &statement with
-                | ValueSome chunk -> yield chunk
-                | ValueNone -> reading <- false
-        finally statement.Dispose()
-    }
-
-    let internal getAllCompressedChunksWithinRange (db: NativeSqliteConnection) (fileId: int64) (startChunk: int64) (lastChunk: int64) = seq {
-        let mutable previousNumber = startChunk - 1L
-
-        for chunk in getStoredChunks db fileId startChunk lastChunk do
             try
-                while chunk.Number - 1L > previousNumber do
-                    yield { Number = previousNumber + 1L; Data = NativeArray.NativeArray.Empty }
-                    previousNumber <- previousNumber + 1L
-
-                yield chunk
-            finally
-                chunk.Data.Dispose()
-
-            previousNumber <- chunk.Number
-
-        while previousNumber < lastChunk do
-            yield { Number = previousNumber + 1L; Data = NativeArray.NativeArray.Empty }
-            previousNumber <- previousNumber + 1L
-    }
+                statement.BindInt64(1, fileId)
+                statement.BindInt64(2, firstChunk)
+                statement.BindInt64(3, lastChunk)
+                let mutable stored = statement.Step()
+                let mutable storedNumber = if stored then statement.Row.GetInt64(0) else -1L
+                let mutable number = firstChunk
+                while number <= lastChunk do
+                    let offset = if number = firstChunk then int(position % chunkSize) else 0
+                    let count = min (int chunkSize - offset) (destination.Length - processed)
+                    let target = destination.Slice(processed, count)
+                    if stored && storedNumber = number then
+                        let compressed = SQLitePCL.raw.sqlite3_column_blob(statement.Handle, 1)
+                        if compressed.IsEmpty then target.Clear()
+                        elif offset = 0 then
+                            match Snappy.TryDecompress(compressed, target) with
+                            | _, 0 -> failwithf "Failed to decompress chunk #%d." number
+                            | _, decoded when decoded <> target.Length ->
+                                failwithf "Decompressed %d bytes but expected %d." decoded target.Length
+                            | _ -> ()
+                        else
+                            if partial.Length = 0 then partial <- ArrayPool<byte>.Shared.Rent(int chunkSize)
+                            let bytes = partial.AsSpan(0, int chunkSize)
+                            let decoded = Snappy.Decompress(compressed, bytes)
+                            if decoded < bytes.Length then bytes.Slice(decoded).Clear()
+                            bytes.Slice(offset, count).CopyTo(target)
+                        processed <- processed + count
+                        stored <- statement.Step()
+                        storedNumber <- if stored then statement.Row.GetInt64(0) else -1L
+                    else
+                        target.Clear()
+                        processed <- processed + count
+                    number <- number + 1L
+                statement.Dispose()
+            with error -> statement.Abort(error); reraise()
+        finally
+            if partial.Length <> 0 then ArrayPool<byte>.Shared.Return(partial)
 
     let internal setFileModifiedById (db: NativeSqliteConnection) (fileId: int64) (modified: DateTimeOffset) =
         let mutable statement = db.OpenStatement("UPDATE SoloDBFileHeader SET Modified = @Timestamp WHERE Id = @FileId")
@@ -236,108 +243,40 @@ module internal FileStorageCoreChunks =
             directory.Dispose()
         with error -> directory.Abort(error); reraise()
 
-    let internal writeChunkedData (db: NativeSqliteConnection) (fileId: int64) (position: int64) (buffer: ReadOnlySpan<byte>) =
-        let bufferLen = buffer.Length
-        use uncompressedChunkBuffer = NativeArray.Alloc (int chunkSize)
-        use compressedChunkBuffer = NativeArray.Alloc (int maxChunkStoreSize)
-        let uncompressedChunkBufferSpan = uncompressedChunkBuffer.Span
-        let compressedChunkBufferSpan = compressedChunkBuffer.Span
+    let internal writeChunkedDataWithScratch (db: NativeSqliteConnection) (fileId: int64) (position: int64)
+                                            (buffer: ReadOnlySpan<byte>) (originalLength: int64) (scratch: ChunkWriteScratch) =
+        if buffer.IsEmpty then position else
+        let ending = position + int64 buffer.Length
+        let firstChunk = position / chunkSize
+        let lastChunk = (ending - 1L) / chunkSize
+        let oldBoundary = originalLength / chunkSize
+        // Older truncation could leave a stored boundary suffix past logical EOF.
+        // Sparse growth need only repair that boundary, never materialize the gap.
+        if position > originalLength && originalLength % chunkSize <> 0L && oldBoundary < firstChunk then
+            clearChunkTailWithScratch db fileId originalLength scratch
+        let mutable consumed = 0
+        let mutable number = firstChunk
+        while number <= lastChunk do
+            let offset = if number = firstChunk then int(position % chunkSize) else 0
+            let count = min (int chunkSize - offset) (buffer.Length - consumed)
+            let data = buffer.Slice(consumed, count)
+            let bytes = scratch.Plain
+            let partial = offset <> 0 || count <> int chunkSize
+            let mutable unchanged = false
+            if partial then
+                let stored = tryGetChunkData db fileId number bytes
+                if stored.Length < bytes.Length then bytes.Slice(stored.Length).Clear()
+                // The logical effects and any length change remain with the stream.
+                unchanged <- ending <= originalLength && not stored.IsEmpty && data.SequenceEqual(bytes.Slice(offset, count))
+                if ending > originalLength && number = oldBoundary then
+                    bytes.Slice(int(originalLength % chunkSize)).Clear()
+            if not unchanged then
+                data.CopyTo(bytes.Slice(offset, count))
+                writeChunkData db fileId number bytes scratch
+            consumed <- consumed + count
+            number <- number + 1L
+        ending
 
-        let startChunkNumber = position / int64 chunkSize
-        let startChunkOffset = position % int64 chunkSize
-
-        let endChunkNumber = (position + int64 bufferLen) / int64 chunkSize
-        let endChunkOffset = (position + int64 bufferLen) % int64 chunkSize
-
-        // Capture the bounded affected range before writes can change chunk membership.
-        let chunks = ResizeArray()
-        let mutable statement = db.OpenStatement("SELECT rowid, Number FROM SoloDBFileChunk WHERE FileId = @FileId AND Number >= @StartChunk AND Number <= @EndChunk ORDER BY Number")
-        try
-            statement.BindInt64(1, fileId)
-            statement.BindInt64(2, startChunkNumber)
-            statement.BindInt64(3, endChunkNumber)
-            let mutable currentChunkNr = startChunkNumber
-            while statement.Step() do
-                let number = statement.Row.GetInt64(1)
-                while currentChunkNr < number do
-                    chunks.Add (struct {| rowid = -1L; Number = currentChunkNr |})
-                    currentChunkNr <- currentChunkNr + 1L
-                chunks.Add (struct {| rowid = statement.Row.GetInt64(0); Number = number |})
-                currentChunkNr <- number + 1L
-            while currentChunkNr <= endChunkNumber do
-                chunks.Add (struct {| rowid = -1L; Number = currentChunkNr |})
-                currentChunkNr <- currentChunkNr + 1L
-            statement.Dispose()
-        with error -> statement.Abort(error); reraise()
-
-        let mutable bufferConsumed = 0
-
-        for chunk in chunks do
-            let exists = chunk.rowid <> -1
-
-            if startChunkNumber = endChunkNumber then
-                if exists then
-                    use blob = new NativeSqliteBlob(db, "SoloDBFileChunk", "Data", chunk.rowid, true)
-                    let compressedSize = blob.Read compressedChunkBufferSpan
-                    let _chunkSizeExpected = Snappy.Decompress(compressedChunkBufferSpan.Slice(0, compressedSize), uncompressedChunkBufferSpan)
-                    ()
-                else
-                    uncompressedChunkBufferSpan.Slice(0, int startChunkOffset).Clear()
-                    let endOfWrite = int startChunkOffset + buffer.Length
-                    if endOfWrite < int chunkSize then
-                        uncompressedChunkBufferSpan.Slice(endOfWrite).Clear()
-                buffer.CopyTo(uncompressedChunkBufferSpan.Slice(int startChunkOffset))
-                let compressedSize = Snappy.Compress(uncompressedChunkBufferSpan, compressedChunkBufferSpan)
-                let rowid =
-                    allocateChunk db fileId chunk.Number compressedSize
-                use blob = new NativeSqliteBlob(db, "SoloDBFileChunk", "Data", rowid, false)
-                blob.Write(compressedChunkBufferSpan.Slice(0, compressedSize))
-
-            elif chunk.Number = startChunkNumber then
-                if exists && startChunkOffset > 0 then
-                    use blob = new NativeSqliteBlob(db, "SoloDBFileChunk", "Data", chunk.rowid, true)
-                    let compressedSize = blob.Read compressedChunkBufferSpan
-                    let _chunkSizeExpected = Snappy.Decompress(compressedChunkBufferSpan.Slice(0, compressedSize), uncompressedChunkBufferSpan)
-                    ()
-                else
-                    uncompressedChunkBufferSpan.Slice(0, int startChunkOffset).Clear()
-                let writeLen = int (chunkSize - startChunkOffset)
-                buffer.Slice(0, writeLen).CopyTo(uncompressedChunkBufferSpan.Slice(int startChunkOffset))
-                bufferConsumed <- bufferConsumed + writeLen
-                let compressedSize = Snappy.Compress(uncompressedChunkBufferSpan, compressedChunkBufferSpan)
-                let rowid =
-                    allocateChunk db fileId chunk.Number compressedSize
-                use blob = new NativeSqliteBlob(db, "SoloDBFileChunk", "Data", rowid, false)
-                blob.Write(compressedChunkBufferSpan.Slice(0, compressedSize))
-
-            elif chunk.Number = endChunkNumber then
-                if exists then
-                    use blob = new NativeSqliteBlob(db, "SoloDBFileChunk", "Data", chunk.rowid, true)
-                    let compressedSize = blob.Read compressedChunkBufferSpan
-                    let _chunkSizeExpected = Snappy.Decompress(compressedChunkBufferSpan.Slice(0, compressedSize), uncompressedChunkBufferSpan)
-                    ()
-                else
-                    uncompressedChunkBufferSpan.Slice(buffer.Length - bufferConsumed).Clear()
-                let dataToWrite = buffer.Slice(bufferConsumed)
-                if not dataToWrite.IsEmpty then
-                    dataToWrite.CopyTo(uncompressedChunkBufferSpan)
-                    let compressedSize = Snappy.Compress(uncompressedChunkBufferSpan, compressedChunkBufferSpan)
-                    let rowid =
-                        allocateChunk db fileId chunk.Number compressedSize
-                    use blob = new NativeSqliteBlob(db, "SoloDBFileChunk", "Data", rowid, false)
-                    blob.Write(compressedChunkBufferSpan.Slice(0, compressedSize))
-
-            else
-                let writeLen = min (int chunkSize) (bufferLen - bufferConsumed)
-                let dataToWrite = buffer.Slice(bufferConsumed, writeLen)
-                dataToWrite.CopyTo(uncompressedChunkBufferSpan)
-                if dataToWrite.Length < int chunkSize then
-                    uncompressedChunkBufferSpan.Slice(dataToWrite.Length).Clear()
-                bufferConsumed <- bufferConsumed + writeLen
-                let compressedSize = Snappy.Compress(uncompressedChunkBufferSpan, compressedChunkBufferSpan)
-                let rowid =
-                    allocateChunk db fileId chunk.Number compressedSize
-                use blob = new NativeSqliteBlob(db, "SoloDBFileChunk", "Data", rowid, false)
-                blob.Write(compressedChunkBufferSpan.Slice(0, compressedSize))
-
-        position + int64 bufferLen
+    let internal writeChunkedData db fileId position (buffer: ReadOnlySpan<byte>) originalLength =
+        use scratch = new ChunkWriteScratch()
+        writeChunkedDataWithScratch db fileId position buffer originalLength scratch

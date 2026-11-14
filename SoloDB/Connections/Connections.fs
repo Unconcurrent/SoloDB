@@ -27,6 +27,48 @@ module Connections =
     let private beginImmediateWithRetry = ConnectionsTransactionHelpers.beginImmediateWithRetry
     let private resolveTxOutcome = ConnectionsTransactionHelpers.resolveTxOutcome
 
+    /// The existing pooled transaction policy with an explicitly retained owner.
+    [<Sealed; AllowNullLiteral>]
+    type internal NativePooledTransactionScope internal (connection: NativeCachingDbConnection, indexLifetime: IDisposable,
+                                              release: NativeCachingDbConnection -> exn option ref -> unit,
+                                              primary: exn option ref, cleanup: exn option ref) =
+        let mutable started = false
+        let mutable finished = false
+        let recordCleanup error = if cleanup.Value.IsNone then cleanup.Value <- Some error
+        let releaseOwner () =
+            finished <- true
+            try release connection cleanup with error -> recordCleanup error
+            if not(isNull indexLifetime) then
+                try indexLifetime.Dispose() with error -> recordCleanup error
+        let outcome () =
+            match resolveTxOutcome !primary !cleanup with
+            | Some error -> reraiseAnywhere error
+            | None -> ()
+        member internal _.Connection = connection
+        member internal this.Begin() =
+            try
+                beginImmediateWithRetry connection
+                started <- true
+                connection.InsideTransaction <- true
+            with error ->
+                this.Fail(error)
+                reraise()
+        member internal _.Complete() =
+            if finished then invalidOp "The transaction scope has completed."
+            try
+                try commitOrRollbackBorrowedTransaction connection primary cleanup
+                with error -> rollbackBorrowedTransaction connection primary cleanup error
+            finally releaseOwner()
+            outcome()
+        member internal _.Fail(error: exn) =
+            if not finished then
+                try
+                    if started then rollbackBorrowedTransaction connection primary cleanup error
+                    else primary := Some error
+                finally releaseOwner()
+                // Attach secondary cleanup evidence without replacing the caller's error.
+                resolveTxOutcome !primary !cleanup |> ignore
+
     /// <summary>
     /// Manages a pool of reusable <see cref="NativeCachingDbConnection"/> objects to reduce the overhead
     /// of opening and closing database connections. It also provides transaction management.
@@ -179,6 +221,29 @@ module Connections =
         /// </summary>
         /// <param name="f">The function to execute within the transaction.</param>
         /// <returns>The result of the function <paramref name="f"/>.</returns>
+        member private _.CreateTransactionScope(acquire: unit -> NativeCachingDbConnection, release: NativeCachingDbConnection -> exn option ref -> unit) =
+            let primary = ref None
+            let cleanup = ref None
+            let indexLifetime = beginIndexTransaction ()
+            let conn =
+                try acquire()
+                with _ ->
+                    if not(isNull indexLifetime) then indexLifetime.Dispose()
+                    reraise()
+            let scope =
+                try new NativePooledTransactionScope(conn, indexLifetime, release, primary, cleanup)
+                with error ->
+                    try release conn cleanup
+                    finally if not(isNull indexLifetime) then indexLifetime.Dispose()
+                    resolveTxOutcome (Some error) !cleanup |> ignore
+                    reraise()
+            scope.Begin()
+            scope
+
+        member internal this.BeginStorageTransaction() =
+            if this.IsCurrentThreadInEventHandlerScope then ThrowOutsideEventContextUsage()
+            this.CreateTransactionScope(this.BorrowNative, cleanupBorrowedTransaction)
+
         member private this.RunTransaction(acquire: unit -> NativeCachingDbConnection, release: NativeCachingDbConnection -> exn option ref -> unit, f: NativeCachingDbConnection -> 'T) =
             use indexLifetime = beginIndexTransaction ()
             let conn = acquire ()

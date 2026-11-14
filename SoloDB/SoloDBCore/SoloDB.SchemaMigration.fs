@@ -180,7 +180,7 @@ module internal SchemaMigration =
                 failure)))
 
     /// Applies one versioned step inside the migration owner's transaction.
-    let private applyInTransaction (connection: NativeSqliteConnection) (plan: Plan) =
+    let private applyInTransaction (connection: NativeSqliteConnection) (plan: Plan) additionalSql =
         if inAutocommit connection then invalidOp "A schema change requires an owned transaction."
         // The caller read the version before taking this lock, so another process may have
         // applied this very step in between. Re-reading under the lock is what makes the step
@@ -191,6 +191,9 @@ module internal SchemaMigration =
 
         if versionUnderLock = plan.FromVersion then
             executeStatements connection plan.Label plan.Body
+            match additionalSql with
+            | ValueSome buildSql -> executeStatements connection plan.Label (buildSql connection)
+            | ValueNone -> ()
             executeBoundary connection plan.Label $"PRAGMA user_version = {plan.TargetVersion};"
         else
             // Not our starting version. Only an advance a peer could legitimately have made is
@@ -220,7 +223,7 @@ module internal SchemaMigration =
     /// Takes the pooled connection itself rather than a callback. Declaring it unfit is a field set,
     /// which cannot fail, so there is no recovery path to model and none is pretended.
     /// </remarks>
-    let internal run (pooled: NativeCachingDbConnection) (plan: Plan) =
+    let private runStep (pooled: NativeCachingDbConnection) (plan: Plan) additionalSql =
         let connection = pooled.Inner
         let handle =
             match connection.InternalHandle with
@@ -254,7 +257,7 @@ module internal SchemaMigration =
          try
             executeBoundary connection plan.Label "BEGIN EXCLUSIVE;"
 
-            applyInTransaction connection plan
+            applyInTransaction connection plan additionalSql
 
             executeBoundary connection plan.Label "COMMIT TRANSACTION;"
          with ex ->
@@ -294,3 +297,9 @@ module internal SchemaMigration =
         match composeOutcome plan.Label primary [ transactionCleanup; restorationCleanup ] with
         | ValueNone -> ()
         | ValueSome report -> report.Throw()
+
+    let internal run pooled plan = runStep pooled plan ValueNone
+
+    /// Discover schema-dependent DDL only after acquiring the migration transaction.
+    let internal runWithAdditionalSql pooled plan buildSql =
+        runStep pooled plan (ValueSome buildSql)

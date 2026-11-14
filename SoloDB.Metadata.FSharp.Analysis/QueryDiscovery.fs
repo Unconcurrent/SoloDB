@@ -65,7 +65,7 @@ module internal QueryDiscovery =
                 [ for call in calls do
                     for parent in contexts (visited.Add key) call do
                         for own in previous do yield parent @ call.GenericArguments @ own ])
-        let argumentGroups, expressionInputs, selectedArguments, inputProducers, constants = QueryExpressionInputs.create inputs file contains uses instantiate (contexts Set.empty)
+        let argumentGroups, expressionInputs, selectedArguments, inputProducers, constants, constructionInputs = QueryExpressionInputs.create inputs file contains uses instantiate (contexts Set.empty)
         let scope firstArgument (useSite: FSharpSymbolUse) =
             match argumentGroups useSite with
             | Some(callRange, first :: _) ->
@@ -85,6 +85,8 @@ module internal QueryDiscovery =
             | _ -> literalRanges.Add(name, ResizeArray([location]))
         let rec closed (typ: FSharpType) =
             not typ.IsGenericParameter && (typ.GenericArguments |> Seq.forall closed)
+        let callableValue (typ: FSharpType) =
+            typ.IsFunctionType || typ.HasTypeDefinition && typ.TypeDefinition.IsDelegate
         let rec soloNamespace (entity: FSharpEntity) =
             match entity.Namespace with
             | Some name -> name = "SoloDatabase" || name.StartsWith("SoloDatabase.",StringComparison.Ordinal)
@@ -287,7 +289,8 @@ module internal QueryDiscovery =
                 | _ -> None)
         for useSite, method, callScope, argumentScope in sites do
           for context in contexts Set.empty useSite do
-            for input in expressionInputs context method useSite do addLiteralRange input
+            let dataInputs = expressionInputs context method useSite
+            for input in dataInputs do addLiteralRange input
             let reference = bound context useSite
             let query = method.CurriedParameterGroups |> Seq.collect id |> Seq.head |> fun argument -> argument.Type.StripAbbreviations()
             let callable = query.GenericArguments[0].StripAbbreviations()
@@ -333,8 +336,10 @@ module internal QueryDiscovery =
             | None -> add false source arguments (reference result)
             for part in uses do
                 if contains argumentScope part.Range && not (sites |> Array.exists(fun (_,_,other,_) -> other <> callScope && contains callScope other && contains other part.Range)) then
+                    // Callable construction has its own witnesses; only query bodies supply data models.
+                    let dataUse = dataInputs |> List.exists(fun input -> contains input part.Range)
                     match part.Symbol with
-                    | :? FSharpMemberOrFunctionOrValue as operation when not part.IsFromDefinition && operation.IsMethod && runtimeMember operation ->
+                    | :? FSharpMemberOrFunctionOrValue as operation when dataUse && not part.IsFromDefinition && operation.IsMethod && runtimeMember operation ->
                         let reference = bound context part
                         let substitutions = context @ useSite.GenericArguments @ part.GenericArguments
                         for parameter in operation.CurriedParameterGroups |> Seq.collect id do
@@ -356,9 +361,9 @@ module internal QueryDiscovery =
                                     roots.Add actual
                                     add true source arguments (reference item)
                                 | _ -> ()
-                    | :? FSharpMemberOrFunctionOrValue as value when not value.IsMethod ->
+                    | :? FSharpMemberOrFunctionOrValue as value when dataUse && not value.IsMethod ->
                         let actual = instantiate (context @ useSite.GenericArguments @ part.GenericArguments) value.FullType
-                        if closed actual && not actual.IsFunctionType && (actual.IsTupleType || actual.IsAnonRecordType || actual.HasTypeDefinition) && (sequence actual |> Option.isNone) then roots.Add actual
+                        if closed actual && not(callableValue actual) && (actual.IsTupleType || actual.IsAnonRecordType || actual.HasTypeDefinition) && (sequence actual |> Option.isNone) then roots.Add actual
                     | _ -> ()
                     collectPart (context @ useSite.GenericArguments) part
                     match part.Symbol with
@@ -369,6 +374,58 @@ module internal QueryDiscovery =
                         match sequence result with
                         | Some element -> add true source arguments (reference element)
                         | None -> add false source arguments (reference result)
+                    | _ -> ()
+        let constructionScopes =
+            [ for useSite,method,_,_ in sites do
+                if method.CompiledName = "Compile" then
+                    for context in contexts Set.empty useSite do
+                        yield! constructionInputs context method useSite ] |> List.distinct
+        let rec dataHead expression =
+            match expression with
+            | SynExpr.Paren(expr=inner) | SynExpr.TypeApp(expr=inner) -> dataHead inner
+            | SynExpr.App(funcExpr=func) -> dataHead func
+            | _ -> expression.Range
+        let rec capture context visited expression =
+            let publish typ =
+                let typ = instantiate context typ
+                if closed typ && not(callableValue typ) && (sequence typ |> Option.isNone) then roots.Add typ
+            match expression with
+            | SynExpr.Paren(expr=inner) | SynExpr.Typed(expr=inner) | SynExpr.Upcast(expr=inner)
+            | SynExpr.InferredUpcast(expr=inner) | SynExpr.Downcast(expr=inner) | SynExpr.InferredDowncast(expr=inner) -> capture context visited inner
+            | SynExpr.IfThenElse(thenExpr=yes;elseExpr=no) ->
+                capture context visited yes
+                no |> Option.iter(capture context visited)
+            | SynExpr.LetOrUse(body=body) | SynExpr.Sequential(expr2=body) -> capture context visited body
+            | SynExpr.Match(clauses=clauses) | SynExpr.MatchBang(clauses=clauses) ->
+                for SynMatchClause(resultExpr=body) in clauses do capture context visited body
+            | _ ->
+                let target = dataHead expression
+                for part in uses do
+                    if not part.IsFromDefinition && contains target part.Range && target.End = part.Range.End then
+                        let actual = context @ part.GenericArguments
+                        match part.Symbol with
+                        | :? FSharpMemberOrFunctionOrValue as source ->
+                            let typ = if source.IsFunction || source.IsMethod then source.ReturnParameter.Type else source.FullType
+                            publish (instantiate actual typ)
+                            // Follow the original value before an object argument or alias erases its type.
+                            match (source :> FSharpSymbol).DeclarationLocation with
+                            | Some declared when not(List.contains declared visited) ->
+                                for bindings,body in inputProducers actual part do capture bindings (declared::visited) body
+                            | _ -> ()
+                            if source.CompiledName = "Box" &&
+                               (source.DeclaringEntity |> Option.exists(fun owner ->
+                                   owner.Assembly.QualifiedName = core.QualifiedName && owner.TryFullName = Some "Microsoft.FSharp.Core.Operators")) then
+                                for _,typ in part.GenericArguments do publish typ
+                        | :? FSharpField as field -> publish (instantiate actual field.FieldType)
+                        | _ -> ()
+        for context,input in constructionScopes do
+            for part in uses do
+                if not part.IsFromDefinition && contains input part.Range then
+                    match part.Symbol with
+                    | :? FSharpMemberOrFunctionOrValue as factory when factory.CompiledName = "Constant" &&
+                        (factory.DeclaringEntity |> Option.exists(fun owner -> owner.TryFullName = Some "System.Linq.Expressions.Expression")) ->
+                        for parameter,value in selectedArguments factory part do
+                            if parameter.Name = Some "value" then capture (context @ part.GenericArguments) [] value
                     | _ -> ()
         for useSite in uses do
             match useSite.Symbol with

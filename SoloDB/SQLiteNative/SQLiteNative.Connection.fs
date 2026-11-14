@@ -12,7 +12,7 @@ open SoloDatabase.RawSqliteFunctions
 
 /// An explicitly owned native transaction. Disposing an unfinished transaction rolls it back.
 [<Sealed>]
-type NativeSqliteTransaction internal (database: NativeDatabase, isolationLevel: IsolationLevel, execute: string -> unit, completed: unit -> unit) =
+type NativeSqliteTransaction internal (database: NativeDatabase, isolationLevel: IsolationLevel, execute: struct (string * bool) -> unit, completed: unit -> unit) =
     let generation = database.Generation
     let mutable finished = false
     let lifetime = database.AdmitUse()
@@ -33,15 +33,15 @@ type NativeSqliteTransaction internal (database: NativeDatabase, isolationLevel:
     let ensureActive () =
         if finished || externallyCompleted() || not (isOpen()) then
             raise (InvalidOperationException("This transaction has completed; it is no longer usable."))
-    let finish sql =
+    let finish sql committing =
         ensureActive()
-        try execute sql
+        try execute(struct (sql, committing))
         finally
             if isOpen() && raw.sqlite3_get_autocommit(database.Handle) <> 0 then complete()
     let savepoint command (name: string) =
         if isNull name then nullArg "savepointName"
         ensureActive()
-        execute (command + " \"" + name.Replace("\"", "\"\"") + "\"")
+        execute(struct (command + " \"" + name.Replace("\"", "\"\"") + "\"", false))
     member internal _.IsActive = not finished && not (externallyCompleted()) && isOpen()
     member internal _.DatabaseOwner = database
     member _.IsolationLevel = isolationLevel
@@ -52,9 +52,9 @@ type NativeSqliteTransaction internal (database: NativeDatabase, isolationLevel:
     member _.Commit() =
         ensureActive()
         if not (isNull database.Observer) then database.Observer.After()
-        finish "COMMIT"
+        finish "COMMIT" true
     member _.Rollback() =
-        if externallyCompleted() && not finished then complete() else finish "ROLLBACK"
+        if externallyCompleted() && not finished then complete() else finish "ROLLBACK" false
     member this.Dispose() =
         if not finished then
             try if isOpen() && not (externallyCompleted()) then this.Rollback()
@@ -331,21 +331,22 @@ type NativeSqliteConnection internal (connectionString: string, storage: SqliteS
             | IsolationLevel.ReadUncommitted when database.SharedCache && deferred -> IsolationLevel.ReadUncommitted
             | IsolationLevel.ReadUncommitted | IsolationLevel.ReadCommitted | IsolationLevel.RepeatableRead | IsolationLevel.Unspecified | IsolationLevel.Serializable -> IsolationLevel.Serializable
             | _ -> invalidArg "isolationLevel" "Invalid SQLite transaction isolation level."
-        let execute sql =
+        let execute (struct (sql, committing)) =
             let mutable statement = this.OpenTransactionStatement(sql)
             try
-                statement.StepTransactionBoundary() |> ignore
+                if committing then statement.StepCommitBoundary() |> ignore
+                else statement.StepTransactionBoundary() |> ignore
                 statement.Dispose()
             with error -> statement.Abort(error); reraise()
-        if isolationLevel = IsolationLevel.ReadUncommitted then execute "PRAGMA read_uncommitted = 1"
-        try execute (if deferred then "BEGIN" else "BEGIN IMMEDIATE")
+        if isolationLevel = IsolationLevel.ReadUncommitted then execute(struct ("PRAGMA read_uncommitted = 1", false))
+        try execute(struct ((if deferred then "BEGIN" else "BEGIN IMMEDIATE"), false))
         with _ ->
             if isolationLevel = IsolationLevel.ReadUncommitted then
-                try execute "PRAGMA read_uncommitted = 0" with _ -> ()
+                try execute(struct ("PRAGMA read_uncommitted = 0", false)) with _ -> ()
             reraise()
         transaction <- new NativeSqliteTransaction(database, isolationLevel, execute, fun () ->
             try
-                if isolationLevel = IsolationLevel.ReadUncommitted && database.IsOpen then execute "PRAGMA read_uncommitted = 0"
+                if isolationLevel = IsolationLevel.ReadUncommitted && database.IsOpen then execute(struct ("PRAGMA read_uncommitted = 0", false))
             finally transaction <- Unchecked.defaultof<_>)
         transaction
     member this.BackupDatabase(destination: NativeSqliteConnection) = this.BackupDatabase(destination, "main", "main")

@@ -242,6 +242,8 @@ Console.WriteLine(articles.GetById(id).Title);
 
 The parent's file streams write the affected chunks. This usage does not copy the whole child database, reopen it for every update, or require a parent user transaction around each child operation. Keep the parent alive through the child's physical completion.
 
+Nested storage combines related SQLite writes into parent transactions. Filesystem reads and writes also avoid repeated chunk copies, compression and index maintenance; unchanged partial data can skip physical replacement while preserving write callbacks and modification tracking. Journal mode and synchronization remain application choices. See the [storage guide](docs/custom-storage.md#keep-a-database-in-another-solodb-filesystem) for nesting costs and measured limits.
+
 #### File coordination for separate participants
 
 For coherent independent views or same-host processes, a built-in implementation delegates locks and shared memory to the configured native SQLite filesystem:
@@ -841,6 +843,8 @@ public sealed class Node<T>
 ```
 
 A model requiring endlessly new closed types, such as each `Node<T>` containing a `Node<List<T>>`, instead receives a clear generation diagnostic (`SOLO001`). Generated helper inference through recursively expanding generic application calls reports its coverage boundary rather than silently claiming complete coverage.
+
+F# generation keeps expression construction and callable captures separate from JSON model discovery, reducing unnecessary generated metadata while preserving query data and explicit model requests.
 
 See [generated metadata setup](docs/generated-metadata.md) for project registration, F# source ordering and NativeAOT publishing.
 

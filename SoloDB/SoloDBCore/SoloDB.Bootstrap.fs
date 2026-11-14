@@ -272,13 +272,9 @@ module internal Bootstrap =
                 CREATE UNIQUE INDEX SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
 
                 CREATE INDEX SoloDBDirectoryHeaderParentIdIndex ON SoloDBDirectoryHeader(ParentId);
-                CREATE UNIQUE INDEX SoloDBDirectoryHeaderFullPathIndex ON SoloDBDirectoryHeader(FullPath);
                 CREATE UNIQUE INDEX SoloDBFileHeaderFullPathIndex ON SoloDBFileHeader(FullPath);
-                CREATE UNIQUE INDEX SoloDBDirectoryMetadataDirectoryIdAndKey ON SoloDBDirectoryMetadata(DirectoryId, Key);
 
                 CREATE INDEX SoloDBFileHeaderDirectoryIdIndex ON SoloDBFileHeader(DirectoryId);
-                CREATE UNIQUE INDEX SoloDBFileChunkFileIdAndNumberIndex ON SoloDBFileChunk(FileId, Number);
-                CREATE UNIQUE INDEX SoloDBFileMetadataFileIdAndKey ON SoloDBFileMetadata(FileId, Key);
                 CREATE INDEX SoloDBFileHashIndex ON SoloDBFileHeader(Hash);
 
                 INSERT INTO SoloDBDirectoryHeader (Name, ParentId, FullPath)
@@ -315,6 +311,37 @@ module internal Bootstrap =
             while statement.Step() do names.Add(statement.Row.GetString(0))
             statement.Dispose()
             names.ToArray()
+        with error -> statement.Abort(error); reraise()
+
+    let private redundantFileIndexes (connection: NativeSqliteConnection) =
+        // index_xinfo omits expression text, so it cannot prove those indexes equivalent.
+        let mutable statement = connection.OpenStatement("""
+            SELECT candidate.name
+            FROM main.sqlite_schema candidate
+            JOIN pragma_index_list(candidate.tbl_name,'main') named ON named.name=candidate.name
+            WHERE candidate.type='index' AND (candidate.name,candidate.tbl_name) IN (
+                ('SoloDBDirectoryHeaderFullPathIndex','SoloDBDirectoryHeader'),
+                ('SoloDBDirectoryMetadataDirectoryIdAndKey','SoloDBDirectoryMetadata'),
+                ('SoloDBFileChunkFileIdAndNumberIndex','SoloDBFileChunk'),
+                ('SoloDBFileMetadataFileIdAndKey','SoloDBFileMetadata'))
+            AND named.origin='c' AND named.[unique]=1 AND named.partial=0
+            AND NOT EXISTS (SELECT 1 FROM pragma_index_xinfo(named.name,'main') WHERE cid=-2)
+            AND EXISTS (
+                SELECT 1 FROM pragma_index_list(candidate.tbl_name,'main') retained
+                WHERE retained.name<>named.name AND retained.[unique]=1 AND retained.partial=0
+                AND NOT EXISTS (
+                    SELECT seqno,cid,name,[desc],coll,[key] FROM pragma_index_xinfo(named.name,'main')
+                    EXCEPT SELECT seqno,cid,name,[desc],coll,[key] FROM pragma_index_xinfo(retained.name,'main'))
+                AND NOT EXISTS (
+                    SELECT seqno,cid,name,[desc],coll,[key] FROM pragma_index_xinfo(retained.name,'main')
+                    EXCEPT SELECT seqno,cid,name,[desc],coll,[key] FROM pragma_index_xinfo(named.name,'main')))
+            """)
+        try
+            let sql = System.Text.StringBuilder()
+            while statement.Step() do
+                sql.Append("DROP INDEX main.\"").Append(statement.Row.GetString(0)).AppendLine("\";") |> ignore
+            statement.Dispose()
+            sql.ToString()
         with error -> statement.Abort(error); reraise()
 
     let initializeSchema (dbConnection: NativeCachingDbConnection) =
@@ -480,10 +507,11 @@ module internal Bootstrap =
 
         // Migration: version 6 -> 7. Catalog creation and admission advance together.
         if dbSchemaVersion = 6 then
-            SchemaMigration.run dbConnection
+            SchemaMigration.runWithAdditionalSql dbConnection
                 { Label = "v6->v7"; Setup = ""; Body = SearchCatalog.schema
                   FromVersion = 6; TargetVersion = 7; SupportedCeiling = currentSupportedSchemaVersion
                   LegacyTextPolicy = SchemaMigration.Strict }
+                redundantFileIndexes
             dbSchemaVersion <- SchemaMigration.readVersion dbConnection
             match SchemaMigration.classifyVersion dbSchemaVersion 7 currentSupportedSchemaVersion with
             | SchemaMigration.Established -> ()

@@ -90,6 +90,30 @@ type ISqliteStorageFile =
     abstract GetLength: unit -> StorageLengthResult
     abstract SetLength: length: int64 -> StorageFailure
 
+/// A short parent-filesystem transaction, owned by one native invocation.
+[<AllowNullLiteral>]
+type internal IStorageParentBatch =
+    abstract Write: auxiliary: bool * position: int64 * source: ReadOnlySpan<byte> -> unit
+    abstract Complete: unit -> unit
+    abstract Fail: exn -> unit
+
+[<AllowNullLiteral>]
+type internal IStorageParentBatchFactory =
+    abstract Begin: unit -> IStorageParentBatch
+
+/// A library filesystem stream supplies its sparse positional implementation.
+[<AllowNullLiteral>]
+type internal IStorageParentStream =
+    abstract ByteFile: ISqliteStorageFile
+    abstract PairWith: auxiliary: Stream -> IStorageParentBatchFactory
+
+[<Struct>]
+type internal StorageNativeCall =
+    { Invocation: int64
+      Previous: int64
+      PreviousCommit: bool
+      PreviousFence: bool }
+
 /// A Stream may use this exception to supply a known structured failure kind.
 [<Sealed>]
 type StorageIOException(kind: StorageFailureKind, message: string, cause: exn) =

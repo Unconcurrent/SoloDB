@@ -79,6 +79,7 @@ type internal NativePreparedStatement(database: NativeDatabase, handle: sqlite3_
     let mutable rowVersion = 0L
     let mutable columnCount = -1
     let mutable hasBindings = false
+    let mutable readOnly = isNull handle || handle.IsInvalid || raw.sqlite3_stmt_readonly(handle) <> 0
     let initializeNames () =
         names <- Array.init (raw.sqlite3_bind_parameter_count(handle)) (fun i -> raw.sqlite3_bind_parameter_name(handle, i + 1).utf8_to_string())
     let initializeParameters () =
@@ -113,6 +114,7 @@ type internal NativePreparedStatement(database: NativeDatabase, handle: sqlite3_
     member _.CacheEligible = cacheEligible
     member _.Generation = generation
     member _.HasStatement = not (isNull handle) && not handle.IsInvalid
+    member internal _.ReadOnly = readOnly
     member _.HasBindings with get() = hasBindings and set value = hasBindings <- value
     member _.ClearBindings() =
         if not hasBindings then raw.SQLITE_OK
@@ -157,6 +159,7 @@ type internal NativePreparedStatement(database: NativeDatabase, handle: sqlite3_
         if resultShapeVersion <> version then
             resultShapeVersion <- version
             columnCount <- -1
+            readOnly <- raw.sqlite3_stmt_readonly(handle) <> 0
     member private _.ReadColumnCount() =
         columnCount <- if isNull handle || handle.IsInvalid then 0 else raw.sqlite3_column_count handle
         columnCount

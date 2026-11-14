@@ -139,20 +139,34 @@ module internal QueryExpressionInputs =
             selected method useSite |> List.choose(fun (parameter,value) ->
                 if isExpression (instantiate (context @ useSite.GenericArguments) parameter.Type) then Some value.Range else None)
 
-        let rec origins context visited location =
-            [ yield! lambdas |> Seq.filter(contains location)
+        let rec expressionNode (typ: FSharpType) =
+            let typ = typ.StripAbbreviations()
+            isExpression typ ||
+            typ.HasTypeDefinition &&
+            (typ.TypeDefinition.TryFullName = Some "System.Linq.Expressions.Expression" ||
+             typ.TypeDefinition.IsArrayType && expressionNode typ.GenericArguments[0] ||
+             typ.BaseType |> Option.exists expressionNode)
+
+        let rec origins construction context visited location =
+            [ if construction then yield context,location
+              else for body in lambdas |> Seq.filter(contains location) do yield context,body
               for part in uses do
                 if contains location part.Range && not part.IsFromDefinition then
                     match part.Symbol with
                     | :? FSharpMemberOrFunctionOrValue as value when
-                        isExpression (instantiate (context @ part.GenericArguments) value.FullType) ||
-                        value.FullType.IsFunctionType && isExpression (instantiate (context @ part.GenericArguments) value.ReturnParameter.Type) ->
+                        let expression = if construction then expressionNode else isExpression
+                        expression (instantiate (context @ part.GenericArguments) value.FullType) ||
+                        value.FullType.IsFunctionType && expression (instantiate (context @ part.GenericArguments) value.ReturnParameter.Type) ->
                         match (value :> FSharpSymbol).DeclarationLocation with
                         | Some declared when not (visited |> List.exists((=) declared)) ->
                             for actual,body in producers (context @ part.GenericArguments) part do
-                                yield! origins actual (declared :: visited) body.Range
+                                yield! origins construction actual (declared :: visited) body.Range
                         | _ -> ()
                     | _ -> () ]
             |> List.distinct
 
-        arguments, (fun context method useSite -> expressionArguments context method useSite |> List.collect(origins (context @ useSite.GenericArguments) [])), selected, producers, constants.ToArray()
+        let selectedInputs construction context method useSite =
+            expressionArguments context method useSite
+            |> List.collect(origins construction (context @ useSite.GenericArguments) [])
+        arguments, (fun context method useSite -> selectedInputs false context method useSite |> List.map snd),
+        selected, producers, constants.ToArray(), selectedInputs true

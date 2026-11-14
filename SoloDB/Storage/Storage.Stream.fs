@@ -13,6 +13,11 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
     let gate = state.Gate
     let memory = stream.GetType().Equals(typeof<MemoryStream>)
     let directRead = memory || stream.GetType().Equals(typeof<FileStream>)
+    let parent =
+        match box stream with
+        | :? IStorageParentStream as parent -> parent
+        | _ -> null
+    let positional = if isNull parent then Unchecked.defaultof<ISqliteStorageFile> else parent.ByteFile
     let mutable disposed = false
     let mutable zeros = Array.empty<byte>
 #if NETSTANDARD2_0
@@ -64,6 +69,7 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
                 position <- position + int64 count
     member internal _.StreamIdentity = stream
     member internal _.Gate = gate
+    member internal _.Parent = parent
     interface ISqliteStorageFile with
         member _.ReadAt(position, destination) =
             Monitor.Enter gate
@@ -73,7 +79,9 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
                     StorageValidation.bounds position destination.Length
                     // Standard streams own EOF reads. Custom streams retain their
                     // length-before-seek contract; MemoryStream also bounds Position.
-                    if destination.IsEmpty || ((not directRead || memory && position > int64 Int32.MaxValue) && position >= length()) then StorageReadResult(0, null)
+                    if destination.IsEmpty then StorageReadResult(0, null)
+                    elif not(isNull (box positional)) then positional.ReadAt(position, destination)
+                    elif ((not directRead || memory && position > int64 Int32.MaxValue) && position >= length()) then StorageReadResult(0, null)
                     else
                         stream.Position <- position
 #if NETSTANDARD2_0
@@ -97,16 +105,17 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
                     check()
                     StorageValidation.bounds position source.Length
                     if not writable then readOnly()
+                    elif source.IsEmpty then null
+                    elif not(isNull (box positional)) then positional.WriteAt(position, source)
                     else
-                        if not source.IsEmpty then
-                            zeroFrom (length()) position
-                            stream.Position <- position
+                        zeroFrom (length()) position
+                        stream.Position <- position
 #if NETSTANDARD2_0
-                            ensureBuffer source.Length
-                            source.CopyTo(Span<byte>(buffer, 0, source.Length))
-                            stream.Write(buffer, 0, source.Length)
+                        ensureBuffer source.Length
+                        source.CopyTo(Span<byte>(buffer, 0, source.Length))
+                        stream.Write(buffer, 0, source.Length)
 #else
-                            stream.Write(source)
+                        stream.Write(source)
 #endif
                         null
                 with error -> failure error
@@ -114,7 +123,9 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
         member _.GetLength() =
             Monitor.Enter gate
             try
-                try check(); StorageLengthResult(length(), null)
+                try
+                    check()
+                    if isNull (box positional) then StorageLengthResult(length(), null) else positional.GetLength()
                 with error -> StorageLengthResult(0L, failure error)
             finally Monitor.Exit gate
         member _.SetLength(length) =
@@ -125,11 +136,13 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
                     if length < 0L then raise(ArgumentOutOfRangeException("length"))
                     if not writable then readOnly()
                     else
-                        let previous = stream.Length
-                        if previous < 0L then raise(InvalidDataException("The Stream returned a negative length."))
-                        stream.SetLength(length)
-                        zeroFrom previous length
-                        null
+                        if not(isNull (box positional)) then positional.SetLength(length)
+                        else
+                            let previous = stream.Length
+                            if previous < 0L then raise(InvalidDataException("The Stream returned a negative length."))
+                            stream.SetLength(length)
+                            zeroFrom previous length
+                            null
                 with error -> failure error
             finally Monitor.Exit gate
         member _.Flush() =
