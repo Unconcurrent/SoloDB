@@ -265,7 +265,7 @@ Every participant must use the same main/log bytes and coordination path. Indepe
 
 Implement five positional operations: `ReadAt`, `WriteAt`, `Flush`, `GetLength` and `SetLength`. They can return structured `StorageFailure` values with `IoError`, `Full` or `ReadOnly`, retaining the original exception as `Cause`. Thrown backend exceptions are also transported as failures.
 
-This file implementation demonstrates the public interface with each method contract beside its implementation. Ordinary file users can pass `FileStream` directly; the interface is useful when implementing another storage backend. Calls on one supplied object are serialized but can change threads. Do not retain spans or reenter SoloDB from these methods. Separate views must see committed byte and length changes; coordination does not supply that coherence or durability. This example lets file exceptions propagate as I/O failures; a backend that knows it is full or read-only can return the corresponding `StorageFailure` with its original cause.
+This file implementation demonstrates the public interface with each method contract beside its implementation. Ordinary file users can pass `FileStream` directly; the interface is useful when implementing another storage backend. Calls on one supplied object are serialized but can change threads. Do not retain spans or reenter SoloDB from these methods. Separate views must see committed byte and length changes; coordination does not supply that coherence or durability. This example returns file I/O and access failures with their original cause. A backend that knows it is full or read-only can return that specific kind instead. Thrown backend exceptions are also supported; unexpected exceptions and argument errors remain exceptions here.
 
 ```csharp
 using System;
@@ -274,8 +274,9 @@ using SoloDatabase;
 
 // SoloDB serializes calls on this object, but they may change threads. Never retain
 // spans or reenter SoloDB. Independent views must expose coherent bytes and lengths.
-// This example throws original file exceptions; a backend can instead return
-// StorageFailure with its known IoError/Full/ReadOnly kind and original cause.
+// Return expected file failures with their original cause. Use Full/ReadOnly
+// only when the backend knows that classification; exception text is not a code.
+// SoloDB also supports thrown exceptions; unexpected failures propagate here.
 public sealed class PositionalFile : ISqliteStorageFile, IDisposable
 {
     private readonly FileStream file;
@@ -306,13 +307,20 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     // Report actual bytes read: short reads are valid and SoloDB retries them.
     // For a nonempty request, success with Count=0 means EOF, never an I/O error.
     // SoloDB supplies SQLite's EOF zero-fill; this method does not report padding as data.
-    // Validate even empty ranges; errors here propagate with their original exception.
+    // Validate even empty ranges. A failed result is never a successful EOF.
     public StorageReadResult ReadAt(long position, Span<byte> destination)
     {
         CheckRange(position, destination.Length);
         if (destination.IsEmpty) return new StorageReadResult(0, null);
-        file.Position = position;
-        return new StorageReadResult(file.Read(destination), null);
+        try
+        {
+            file.Position = position;
+            return new StorageReadResult(file.Read(destination), null);
+        }
+        catch (Exception cause) when (cause is IOException || cause is UnauthorizedAccessException)
+        {
+            return new StorageReadResult(0, new StorageFailure(StorageFailureKind.IoError, cause));
+        }
     }
 
     // Success writes the entire span; empty writes must not extend the file.
@@ -323,15 +331,29 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     {
         CheckRange(position, source.Length);
         if (source.IsEmpty) return null;
-        if (position > file.Length) ExtendWithZeros(position);
-        file.Position = position;
-        file.Write(source);
-        return null;
+        try
+        {
+            if (position > file.Length) ExtendWithZeros(position);
+            file.Position = position;
+            file.Write(source);
+            return null;
+        }
+        catch (Exception cause) when (cause is IOException || cause is UnauthorizedAccessException)
+        {
+            return new StorageFailure(StorageFailureKind.IoError, cause);
+        }
     }
 
     // Return the current logical length, not capacity or a stale private value.
     // Length is meaningful only on success; report or throw a real query failure.
-    public StorageLengthResult GetLength() => new(file.Length, null);
+    public StorageLengthResult GetLength()
+    {
+        try { return new StorageLengthResult(file.Length, null); }
+        catch (Exception cause) when (cause is IOException || cause is UnauthorizedAccessException)
+        {
+            return new StorageLengthResult(0, new StorageFailure(StorageFailureKind.IoError, cause));
+        }
+    }
 
     // Reject negative lengths. Preserve the retained prefix, discard a shortened
     // tail, and zero every extension so shrink/regrow cannot reveal old bytes.
@@ -339,9 +361,16 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     public StorageFailure? SetLength(long length)
     {
         if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
-        if (length > file.Length) ExtendWithZeros(length);
-        else file.SetLength(length);
-        return null;
+        try
+        {
+            if (length > file.Length) ExtendWithZeros(length);
+            else file.SetLength(length);
+            return null;
+        }
+        catch (Exception cause) when (cause is IOException || cause is UnauthorizedAccessException)
+        {
+            return new StorageFailure(StorageFailureKind.IoError, cause);
+        }
     }
 
     // A persistent backend's success is an fsync-like ordered barrier: finish all
@@ -352,8 +381,15 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     // still belong to the backing system. A volatile backend cannot promise this.
     public StorageFailure? Flush()
     {
-        file.Flush(true);
-        return null;
+        try
+        {
+            file.Flush(true);
+            return null;
+        }
+        catch (Exception cause) when (cause is IOException || cause is UnauthorizedAccessException)
+        {
+            return new StorageFailure(StorageFailureKind.IoError, cause);
+        }
     }
 
     public void Dispose() => file.Dispose();

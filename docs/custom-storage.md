@@ -150,6 +150,8 @@ Each database owns its transactions. Use the child's transaction API for child u
 
 Each nesting edge stores child SQLite writes as compressed 16 KiB filesystem chunks in its parent. A small write can require reading and decompressing an affected chunk, patching it, recompressing it and committing a parent transaction. Only affected chunks are rewritten. Parent page, index and journal/WAL writes then repeat the path at the next level, with checkpoint work later. Child transaction batching does not guarantee one ancestor transaction, and tenants sharing an ancestor still share its SQLite writer. Compression, dirty pages, journal mode and synchronization determine actual bytes and latency; depth alone gives no fixed multiplier.
 
+A bounded Linux x64 measurement on `/tmp` (tmpfs), using .NET 10.0.14 and SQLite 3.53.3, compared one live root → first child → second child chain. All levels used WAL, `synchronous=FULL`, 4 KiB SQLite pages and 256 rows with 512-character payloads. The root used unbuffered FileStreams; children used their parent filesystem streams. Median latency for a transaction updating 32 rows was **0.1048 ms at the root, 0.8688 ms at the first child (+728.6%), and 12.5310 ms at the second child (+11,852.0%)**, with percentages relative to the root. These are three rotated samples of eight transactions after warmup, with setup, final checkpoints and disposal excluded. Complete-read medians with warm SQLite caches were 0.2123, 0.2038 and 0.1746 ms respectively; those short noisy reads do not measure backing I/O. Exact read and committed-value checks passed. This example shows substantial nested write latency for this workload; tmpfs supplies no durable disk barrier, and these timings measure neither physical bytes written nor a universal multiplier.
+
 When dirty, a database filesystem stream's `Flush` performs parent metadata maintenance through a transaction; its earlier byte writes already used parent transactions. Persistence comes from the complete chain's commit and backing-storage guarantees. A child's `FULL` synchronization cannot strengthen a parent configured for weaker persistence, and a memory-backed root remains volatile.
 
 ## Implement coordination
@@ -290,8 +292,9 @@ using SoloDatabase;
 
 // SoloDB serializes calls on this object, but they may change threads. Never retain
 // spans or reenter SoloDB. Independent views must expose coherent bytes and lengths.
-// This example throws original file exceptions; a backend can instead return
-// StorageFailure with its known IoError/Full/ReadOnly kind and original cause.
+// Return expected file failures with their original cause. Use Full/ReadOnly
+// only when the backend knows that classification; exception text is not a code.
+// SoloDB also supports thrown exceptions; unexpected failures propagate here.
 public sealed class PositionalFile : ISqliteStorageFile, IDisposable
 {
     private readonly FileStream file;
@@ -322,13 +325,20 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     // Report actual bytes read: short reads are valid and SoloDB retries them.
     // For a nonempty request, success with Count=0 means EOF, never an I/O error.
     // SoloDB supplies SQLite's EOF zero-fill; this method does not report padding as data.
-    // Validate even empty ranges; errors here propagate with their original exception.
+    // Validate even empty ranges. A failed result is never a successful EOF.
     public StorageReadResult ReadAt(long position, Span<byte> destination)
     {
         CheckRange(position, destination.Length);
         if (destination.IsEmpty) return new StorageReadResult(0, null);
-        file.Position = position;
-        return new StorageReadResult(file.Read(destination), null);
+        try
+        {
+            file.Position = position;
+            return new StorageReadResult(file.Read(destination), null);
+        }
+        catch (Exception cause) when (cause is IOException || cause is UnauthorizedAccessException)
+        {
+            return new StorageReadResult(0, new StorageFailure(StorageFailureKind.IoError, cause));
+        }
     }
 
     // Success writes the entire span; empty writes must not extend the file.
@@ -339,15 +349,29 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     {
         CheckRange(position, source.Length);
         if (source.IsEmpty) return null;
-        if (position > file.Length) ExtendWithZeros(position);
-        file.Position = position;
-        file.Write(source);
-        return null;
+        try
+        {
+            if (position > file.Length) ExtendWithZeros(position);
+            file.Position = position;
+            file.Write(source);
+            return null;
+        }
+        catch (Exception cause) when (cause is IOException || cause is UnauthorizedAccessException)
+        {
+            return new StorageFailure(StorageFailureKind.IoError, cause);
+        }
     }
 
     // Return the current logical length, not capacity or a stale private value.
     // Length is meaningful only on success; report or throw a real query failure.
-    public StorageLengthResult GetLength() => new(file.Length, null);
+    public StorageLengthResult GetLength()
+    {
+        try { return new StorageLengthResult(file.Length, null); }
+        catch (Exception cause) when (cause is IOException || cause is UnauthorizedAccessException)
+        {
+            return new StorageLengthResult(0, new StorageFailure(StorageFailureKind.IoError, cause));
+        }
+    }
 
     // Reject negative lengths. Preserve the retained prefix, discard a shortened
     // tail, and zero every extension so shrink/regrow cannot reveal old bytes.
@@ -355,9 +379,16 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     public StorageFailure? SetLength(long length)
     {
         if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
-        if (length > file.Length) ExtendWithZeros(length);
-        else file.SetLength(length);
-        return null;
+        try
+        {
+            if (length > file.Length) ExtendWithZeros(length);
+            else file.SetLength(length);
+            return null;
+        }
+        catch (Exception cause) when (cause is IOException || cause is UnauthorizedAccessException)
+        {
+            return new StorageFailure(StorageFailureKind.IoError, cause);
+        }
     }
 
     // A persistent backend's success is an fsync-like ordered barrier: finish all
@@ -368,15 +399,22 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     // still belong to the backing system. A volatile backend cannot promise this.
     public StorageFailure? Flush()
     {
-        file.Flush(true);
-        return null;
+        try
+        {
+            file.Flush(true);
+            return null;
+        }
+        catch (Exception cause) when (cause is IOException || cause is UnauthorizedAccessException)
+        {
+            return new StorageFailure(StorageFailureKind.IoError, cause);
+        }
     }
 
     public void Dispose() => file.Dispose();
 }
 ```
 
-Return a null failure on success, or a `StorageFailure` with `IoError`, `Full` or `ReadOnly` and the original exception when available. A Stream implementation can throw `StorageIOException` to supply the same classification. Other exceptions become I/O errors; exception text does not determine the category.
+Return a null failure on success, or a `StorageFailure` with `IoError`, `Full` or `ReadOnly` and the original exception when available. A Stream implementation can throw `StorageIOException` to supply the same classification. Thrown backend exceptions also retain their cause through SQLite's error channel; exception text does not determine the category.
 
 Check the requested position and end, including on a read beyond EOF. A successful read can return fewer bytes than requested; zero means EOF. SoloDB repeats fragmented reads and fills the remaining destination with zeros only after successful EOF. Do not report a failed read as EOF.
 
