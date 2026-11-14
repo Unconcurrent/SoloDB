@@ -19,6 +19,6 @@ Within `Contract`, `Type` identifies the CLR family and `Shape` describes the se
 
 These are recorded possibilities, not a complete inventory of rows. Several types may acquire the same collection, such as a full model and a projection. Older writers, raw SQL and partial updates can leave values that no retained contract explains completely. Unknown subtypes and information already lost by serialization are not guessed. The descriptions neither replace codecs nor control materialization, and recording one does not construct a model or execute its property getters.
 
-Existing writable databases gain the missing field without changing `user_version` or rewriting documents. NULL means no facts have been recorded. Acquisition through read-only custom storage leaves the catalogue and database bytes unchanged. Dropping a collection removes its recorded descriptions with its row; recreating it starts empty.
+Adding the missing field and recording descriptions do not independently advance `user_version` or rewrite documents; normal database opening still performs any required schema migration. NULL means no facts have been recorded. Acquisition through read-only custom storage leaves the catalogue and database bytes unchanged. Dropping a collection removes its recorded descriptions with its row; recreating it starts empty.
 
 Normal and generated C# and F# delivery use the same description policy. NativeAOT applications use their normal generated registration.
