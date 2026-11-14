@@ -2,7 +2,7 @@
 
 Declare the stored string fields to search, then use `Search` or `SearchIn` with ordinary LINQ. SoloDB maintains the index when documents change.
 
-The first successful `EnsureSearchIndex` advances the database to schema 7. **SoloDB 1.4.1 and earlier then refuse to open that database.** Upgrade every process that uses it before declaring an index.
+Opening a writable database with SoloDB 1.4.2 upgrades it to schema 7, including the search catalog. **SoloDB 1.4.1 and earlier then refuse to open that database.** Stop older processes and upgrade every process that uses the database before opening it with 1.4.2.
 
 ## Declare fields and search
 
@@ -167,7 +167,7 @@ Never sweep the reserved prefix or change owned search objects manually. This ex
 
 Document changes and search maintenance commit or roll back together. Lifecycle operations inside an existing transaction use its savepoint behavior. A running WAL reader can finish its old snapshot while a replacement is committed.
 
-The first successful Ensure advances the database schema from 6 to 7. An ordinary open alone does not adopt search. Do not lower the database version or manually edit owned search objects. An adopted database missing its catalog is damage and is never treated as a fresh adoption.
+The search catalog is installed during normal database initialization and migration. `EnsureSearchIndex` declares and maintains an index within that catalog. Do not lower the database version or manually edit owned search objects. A current database missing its catalog is damaged; declaring an index does not recreate the catalog.
 
 ## Storage and cost
 

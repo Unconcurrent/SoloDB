@@ -340,8 +340,8 @@ module internal Bootstrap =
             raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
         let readOnly = dbConnection.IsReadOnly
-        if dbConnection.DatabaseOwner.IsStorageReadOnly && dbSchemaVersion < 6 then
-            raise (NotSupportedException("ReadOnly storage requires a current SoloDB image. Upgrade a writable copy before opening it as immutable storage."))
+        if dbConnection.DatabaseOwner.IsStorageReadOnly && dbSchemaVersion < currentSupportedSchemaVersion then
+            raise (NotSupportedException("Read-only access requires a current SoloDB image. Upgrade the database through a writable open first."))
 
         // Schema creation: version 0 -> 1
         if dbSchemaVersion = 0 then
@@ -463,7 +463,7 @@ module internal Bootstrap =
 
         let fileSystemEvents = if readOnly then "" else FileSystemEventSchema.forExistingTables dbConnection
         if dbSchemaVersion = 5 || fileSystemEvents.Length <> 0 then
-            let targetVersion = max 6 dbSchemaVersion
+            let targetVersion = if dbSchemaVersion = 5 then 6 else dbSchemaVersion
             let label = if dbSchemaVersion = 5 then "v5->v6" else "filesystem event initialization"
             SchemaMigration.run dbConnection
                 { Label = label
@@ -476,6 +476,18 @@ module internal Bootstrap =
             match SchemaMigration.classifyVersion dbSchemaVersion targetVersion currentSupportedSchemaVersion with
             | SchemaMigration.Established -> ()
             | SchemaMigration.NotApplied -> raise (migrationVerificationError label targetVersion dbSchemaVersion)
+            | SchemaMigration.BeyondSupported -> raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
+
+        // Migration: version 6 -> 7. Catalog creation and admission advance together.
+        if dbSchemaVersion = 6 then
+            SchemaMigration.run dbConnection
+                { Label = "v6->v7"; Setup = ""; Body = SearchCatalog.schema
+                  FromVersion = 6; TargetVersion = 7; SupportedCeiling = currentSupportedSchemaVersion
+                  LegacyTextPolicy = SchemaMigration.Strict }
+            dbSchemaVersion <- SchemaMigration.readVersion dbConnection
+            match SchemaMigration.classifyVersion dbSchemaVersion 7 currentSupportedSchemaVersion with
+            | SchemaMigration.Established -> ()
+            | SchemaMigration.NotApplied -> raise (migrationVerificationError "v6->v7" 7 dbSchemaVersion)
             | SchemaMigration.BeyondSupported -> raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
         // https://www.sqlite.org/pragma.html#pragma_optimize

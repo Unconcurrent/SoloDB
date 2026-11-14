@@ -179,8 +179,8 @@ module internal SchemaMigration =
                 $"Error: migration {label} failed and could not be cleaned up.\nReason: {failure.Message}\nCleanup: {joined}.\nFix: do not reuse this connection; investigate the migration step.",
                 failure)))
 
-    /// Applies feature adoption inside the caller's existing transaction.
-    let internal applyInTransaction (connection: NativeSqliteConnection) (plan: Plan) =
+    /// Applies one versioned step inside the migration owner's transaction.
+    let private applyInTransaction (connection: NativeSqliteConnection) (plan: Plan) =
         if inAutocommit connection then invalidOp "A schema change requires an owned transaction."
         // The caller read the version before taking this lock, so another process may have
         // applied this very step in between. Re-reading under the lock is what makes the step

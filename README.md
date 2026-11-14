@@ -4,6 +4,8 @@ Store your C# and F# objects, query them with LINQ, and keep related documents a
 
 Upgrading to 1.4 requires manual migration of existing Decimal and BigInteger data. Follow the [upgrade instructions](https://github.com/Unconcurrent/SoloDB/blob/master/docs/numeric-migration.md).
 
+See the [changelog](https://github.com/Unconcurrent/SoloDB/blob/master/CHANGELOG.md) for versioned changes and usage examples, starting with 1.4.2.
+
 ## Core Features
 
 SoloDB is packed with features that provide a seamless and powerful developer experience.
@@ -65,7 +67,7 @@ Install SoloDB from NuGet:
 dotnet add package SoloDB
 ```
 
-Before upgrading a database to 1.4, stop every older SoloDB process using it. Opening the file advances its database version to 6; SoloDB 1.3 then refuses to reopen it. Do not lower `PRAGMA user_version` to bypass that protection. See [numerical storage and migration](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md#numerical-storage-and-migration).
+Before upgrading a database to 1.4.2, stop every older SoloDB process using it. A normal writable opening migrates the file to schema 7; SoloDB 1.4.1 and earlier then refuse to reopen it. Upgrade every participating application before reopening the database. Do not lower `PRAGMA user_version` to bypass that protection. See [numerical storage and migration](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md#numerical-storage-and-migration).
 
 ## Generated Metadata Registration
 

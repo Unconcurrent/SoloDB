@@ -26,24 +26,14 @@ module internal SearchCatalog =
             statement.Dispose()
             found
         with error -> statement.Abort(error); reraise()
-    let version (connection: NativeSqliteConnection) =
-        let mutable statement = connection.OpenStatement("PRAGMA user_version")
-        try
-            if not(statement.Step()) then invalidOp "The database schema version was not returned."
-            let version = statement.Row.GetInt32(0)
-            statement.Dispose()
-            version
-        with error -> statement.Abort(error); reraise()
-    let private available connection =
-        if exists connection then true
-        elif version connection >= 7 then
-            invalidOp "The adopted search catalog is missing. Restore the database catalog before administering search indexes."
-        else false
+    let private requireCatalog connection =
+        if not(exists connection) then
+            invalidOp "The search catalog is missing. Restore the database catalog before administering search indexes."
     let private readRow collection (row: SqlRow) =
         { Id = row.GetInt64(0); Collection = collection; Name = row.GetString(1)
           Version = row.GetInt32(2); Definition = SearchDefinition.decode(row.GetString(3)); Objects = row.GetString(4) }
     let load (connection: NativeSqliteConnection) collection =
-        if not(available connection) then Array.empty else
+        requireCatalog connection
         let mutable statement = connection.OpenStatement($"SELECT Id,Name,Version,Definition,Objects FROM {table} WHERE Collection=@collection ORDER BY Name")
         try
             statement.BindText(1,collection)
@@ -54,7 +44,7 @@ module internal SearchCatalog =
         with error -> statement.Abort(error); reraise()
     let tryFind (connection: NativeSqliteConnection) collection name =
         validateName name
-        if not(available connection) then ValueNone else
+        requireCatalog connection
         let mutable statement = connection.OpenStatement($"SELECT Id,Name,Version,Definition,Objects FROM {table} WHERE Collection=@collection AND Name=@name")
         try
             statement.BindText(1,collection)
@@ -136,18 +126,18 @@ module internal SearchCatalog =
 
     let unowned (connection: NativeSqliteConnection) =
         let owned = HashSet<string>(StringComparer.Ordinal)
-        if available connection then
-            let mutable statement = connection.OpenStatement($"SELECT Id,Definition FROM {table}")
-            try
-                while statement.Step() do
-                    let definition = SearchDefinition.decode(statement.Row.GetString(1))
-                    let name = SearchArtifactNames.table (statement.Row.GetInt64(0)) definition.Fields
-                    owned.Add(name) |> ignore
-                    for suffix in [|"_source";"_insert";"_delete";"_update";"_config";"_data";"_idx";"_docsize"|] do
-                        owned.Add(name+suffix) |> ignore
-                    if definition.Storage = SearchTextStorage.Copied then owned.Add(name+"_content") |> ignore
-                statement.Dispose()
-            with error -> statement.Abort(error); reraise()
+        requireCatalog connection
+        let mutable statement = connection.OpenStatement($"SELECT Id,Definition FROM {table}")
+        try
+            while statement.Step() do
+                let definition = SearchDefinition.decode(statement.Row.GetString(1))
+                let name = SearchArtifactNames.table (statement.Row.GetInt64(0)) definition.Fields
+                owned.Add(name) |> ignore
+                for suffix in [|"_source";"_insert";"_delete";"_update";"_config";"_data";"_idx";"_docsize"|] do
+                    owned.Add(name+suffix) |> ignore
+                if definition.Storage = SearchTextStorage.Copied then owned.Add(name+"_content") |> ignore
+            statement.Dispose()
+        with error -> statement.Abort(error); reraise()
         let mutable statement = connection.OpenStatement("SELECT name FROM sqlite_schema WHERE name GLOB 'SoloDB.Search_*' ORDER BY name")
         try
             let findings = ResizeArray<SearchVerificationFinding>()

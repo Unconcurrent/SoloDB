@@ -35,12 +35,6 @@ module internal SearchLifecycle =
         SearchSchema.create connection index
         updateObjects connection index
     let private remove = SearchSchema.remove
-    let private adopt connection =
-        SchemaMigration.applyInTransaction connection
-            { Label = "search metadata adoption"; Setup = ""; Body = SearchCatalog.schema
-              FromVersion = 6; TargetVersion = 7; SupportedCeiling = 7; LegacyTextPolicy = SchemaMigration.Strict }
-        // A missing catalog after adoption is damage, never a new identity sequence.
-        if not(SearchCatalog.exists connection) then invalidOp "The adopted search catalog is missing."
     let private sameCurrent connection collection name version definition =
         match SearchCatalog.tryFind connection collection name with
         | ValueSome index when index.Version = version && index.Definition = definition ->
@@ -63,7 +57,6 @@ module internal SearchLifecycle =
                 error.Data.["SoloDB.TransactionCleanupException"] <- cleanup
             reraise()
     let private ensureLocked connection collection name version definition =
-        adopt connection
         match SearchCatalog.tryFind connection collection name with
         | ValueNone -> insert connection collection name version definition |> ignore
         | ValueSome index when index.Version > version ->

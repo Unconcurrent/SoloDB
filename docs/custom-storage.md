@@ -305,7 +305,7 @@ For a source with another page size, you can choose a rollback-mode destination 
 
 Use `VacuumTo(path)` to export to an ordinary native file. Do not assume a transaction writing both your supplied database and an attached database commits atomically across the two. Some combinations need a super-journal, an extra file coordinating multiple rollback journals; these layouts do not supply that file, so those combinations are refused.
 
-For `ReadOnly`, supply a complete supported SoloDB main image. Finish WAL checkpointing or export a complete image first, and leave its bytes unchanged while it is open. SoloDB retains its usual read functions and metadata, but does not migrate schema, add indexes or create missing collections.
+For `ReadOnly`, supply a complete SoloDB main image at the current schema version (7 in SoloDB 1.4.2). Upgrade older images through a writable SoloDB open before supplying them as immutable storage. Finish WAL checkpointing or export a complete image first, and leave its bytes unchanged while it is open. SoloDB retains its usual read functions and metadata, but does not migrate schema, add indexes or create missing collections.
 
 Write-only administration, such as `Optimize`, `Vacuum`, index changes and search-index maintenance, throws `InvalidOperationException` on `ReadOnly` storage. An `EnsureIndex` or `EnsureSearchIndex` call that finds its existing index unchanged can succeed without writing. `DropCollectionIfExists`, `DropIndexIfExists` and `DropSearchIndexIfExists` also succeed when their target is absent; they still refuse to remove an existing target. Raw write SQL instead keeps SQLite's READONLY error; it is not converted into an administration error.
 
