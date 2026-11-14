@@ -144,6 +144,14 @@ var title = articles.GetById(2L).Title;
 
 Here `tenant` is an open parent `SoloDB` and `Article` is the model from the first example. Keep the parent alive until the child storage has physically closed. This choice needs no coordination file and supplies no multiprocess guarantee. Separate child views still need coherent bytes and matching suitable coordination if you share them.
 
+The same pattern composes through three nested levels: retain each level's main/log streams and storage, then close the deepest database before its parents. Reuse that storage for additional live roots of the same child. Opening the same child path again creates different stream objects, so `SingleProcessInMemory` does not automatically join those independent views. Use shared coordination and coherent bytes for that case. Different child databases can use the same built-in provider without sharing their private locks or WAL memory.
+
+Each database owns its transactions. Use the child's transaction API for child updates; wrapping normal child work in a parent write transaction can make its root-owned backing streams wait on that same parent writer through another connection. A parent transaction does not make all open nested databases one atomic transaction.
+
+Each nesting edge stores child SQLite writes as compressed 16 KiB filesystem chunks in its parent. A small write can require reading and decompressing an affected chunk, patching it, recompressing it and committing a parent transaction. Only affected chunks are rewritten. Parent page, index and journal/WAL writes then repeat the path at the next level, with checkpoint work later. Child transaction batching does not guarantee one ancestor transaction, and tenants sharing an ancestor still share its SQLite writer. Compression, dirty pages, journal mode and synchronization determine actual bytes and latency; depth alone gives no fixed multiplier.
+
+When dirty, a database filesystem stream's `Flush` performs parent metadata maintenance through a transaction; its earlier byte writes already used parent transactions. Persistence comes from the complete chain's commit and backing-storage guarantees. A child's `FULL` synchronization cannot strengthen a parent configured for weaker persistence, and a memory-backed root remains volatile.
+
 ## Implement coordination
 
 `ISqliteStorageCoordination.Open(main, profile)` returns a distinct `ISqliteStorageCoordinationSession` for each physical main-file open. The provider is borrowed, and its Open calls may run concurrently. A session owns only that open's locks and mappings, and SoloDB calls its `Close` after native completion or failed opening. Closing one root or the factory description must not release another live session's grants.
@@ -271,14 +279,101 @@ Custom storage's direct native operations and the selected provider must use the
 
 ## Implement your own byte files
 
-Implement these five synchronous methods on `ISqliteStorageFile`:
+This complete example implements the five synchronous methods using an unbuffered `FileStream`. Ordinary file users can pass `FileStream` directly; use the interface when supplying another backend. The comments describe the contract your implementation must satisfy.
+
+SoloDB serializes calls on each supplied object, but calls can change threads. Consume each span before returning, never retain it, and do not call back into the database. Independent views must expose coherent bytes and lengths; coordination supplies locks, not byte coherence or durability.
 
 ```csharp
-StorageReadResult ReadAt(long position, Span<byte> destination);
-StorageFailure? WriteAt(long position, ReadOnlySpan<byte> source);
-StorageFailure? Flush();
-StorageLengthResult GetLength();
-StorageFailure? SetLength(long length);
+using System;
+using System.IO;
+using SoloDatabase;
+
+// SoloDB serializes calls on this object, but they may change threads. Never retain
+// spans or reenter SoloDB. Independent views must expose coherent bytes and lengths.
+// This example throws original file exceptions; a backend can instead return
+// StorageFailure with its known IoError/Full/ReadOnly kind and original cause.
+public sealed class PositionalFile : ISqliteStorageFile, IDisposable
+{
+    private readonly FileStream file;
+    private readonly byte[] zeros = new byte[8192];
+
+    public PositionalFile(string path)
+    {
+        file = new FileStream(path, FileMode.OpenOrCreate,
+            FileAccess.ReadWrite, FileShare.ReadWrite, bufferSize: 1);
+    }
+
+    private static void CheckRange(long position, int count)
+    {
+        if (position < 0 || position > long.MaxValue - count)
+            throw new ArgumentOutOfRangeException(nameof(position));
+    }
+
+    private void ExtendWithZeros(long length)
+    {
+        file.Position = file.Length;
+        while (file.Position < length)
+        {
+            int count = (int)Math.Min(zeros.Length, length - file.Position);
+            file.Write(zeros, 0, count);
+        }
+    }
+
+    // Report actual bytes read: short reads are valid and SoloDB retries them.
+    // For a nonempty request, success with Count=0 means EOF, never an I/O error.
+    // SoloDB supplies SQLite's EOF zero-fill; this method does not report padding as data.
+    // Validate even empty ranges; errors here propagate with their original exception.
+    public StorageReadResult ReadAt(long position, Span<byte> destination)
+    {
+        CheckRange(position, destination.Length);
+        if (destination.IsEmpty) return new StorageReadResult(0, null);
+        file.Position = position;
+        return new StorageReadResult(file.Read(destination), null);
+    }
+
+    // Success writes the entire span; empty writes must not extend the file.
+    // New gaps read as zeros. Failure may change the requested range, but must
+    // preserve existing bytes outside it, never shrink, and never grow beyond
+    // max(previous length, requested end). Do not turn a partial write into success.
+    public StorageFailure? WriteAt(long position, ReadOnlySpan<byte> source)
+    {
+        CheckRange(position, source.Length);
+        if (source.IsEmpty) return null;
+        if (position > file.Length) ExtendWithZeros(position);
+        file.Position = position;
+        file.Write(source);
+        return null;
+    }
+
+    // Return the current logical length, not capacity or a stale private value.
+    // Length is meaningful only on success; report or throw a real query failure.
+    public StorageLengthResult GetLength() => new(file.Length, null);
+
+    // Reject negative lengths. Preserve the retained prefix, discard a shortened
+    // tail, and zero every extension so shrink/regrow cannot reveal old bytes.
+    // On failure, preserve the prefix common to the old and requested lengths.
+    public StorageFailure? SetLength(long length)
+    {
+        if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
+        if (length > file.Length) ExtendWithZeros(length);
+        else file.SetLength(length);
+        return null;
+    }
+
+    // A persistent backend's success is an fsync-like ordered barrier: finish all
+    // earlier byte/length writes and their promised persistence before returning.
+    // Merely queuing or draining a userspace buffer is insufficient. Surface a
+    // failed barrier even if WriteAt succeeded. FileStream.Flush(true) requests
+    // the OS disk barrier; device guarantees and new-name/directory durability
+    // still belong to the backing system. A volatile backend cannot promise this.
+    public StorageFailure? Flush()
+    {
+        file.Flush(true);
+        return null;
+    }
+
+    public void Dispose() => file.Dispose();
+}
 ```
 
 Return a null failure on success, or a `StorageFailure` with `IoError`, `Full` or `ReadOnly` and the original exception when available. A Stream implementation can throw `StorageIOException` to supply the same classification. Other exceptions become I/O errors; exception text does not determine the category.

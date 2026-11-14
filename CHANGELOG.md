@@ -265,12 +265,21 @@ Every participant must use the same main/log bytes and coordination path. Indepe
 
 Implement five positional operations: `ReadAt`, `WriteAt`, `Flush`, `GetLength` and `SetLength`. They can return structured `StorageFailure` values with `IoError`, `Full` or `ReadOnly`, retaining the original exception as `Cause`. Thrown backend exceptions are also transported as failures.
 
-This small file implementation demonstrates the public interface. Ordinary file users can pass `FileStream` directly; the interface is useful when implementing another storage backend.
+This file implementation demonstrates the public interface with each method contract beside its implementation. Ordinary file users can pass `FileStream` directly; the interface is useful when implementing another storage backend. Calls on one supplied object are serialized but can change threads. Do not retain spans or reenter SoloDB from these methods. Separate views must see committed byte and length changes; coordination does not supply that coherence or durability. This example lets file exceptions propagate as I/O failures; a backend that knows it is full or read-only can return the corresponding `StorageFailure` with its original cause.
 
 ```csharp
+using System;
+using System.IO;
+using SoloDatabase;
+
+// SoloDB serializes calls on this object, but they may change threads. Never retain
+// spans or reenter SoloDB. Independent views must expose coherent bytes and lengths.
+// This example throws original file exceptions; a backend can instead return
+// StorageFailure with its known IoError/Full/ReadOnly kind and original cause.
 public sealed class PositionalFile : ISqliteStorageFile, IDisposable
 {
     private readonly FileStream file;
+    private readonly byte[] zeros = new byte[8192];
 
     public PositionalFile(string path)
     {
@@ -284,6 +293,20 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
             throw new ArgumentOutOfRangeException(nameof(position));
     }
 
+    private void ExtendWithZeros(long length)
+    {
+        file.Position = file.Length;
+        while (file.Position < length)
+        {
+            int count = (int)Math.Min(zeros.Length, length - file.Position);
+            file.Write(zeros, 0, count);
+        }
+    }
+
+    // Report actual bytes read: short reads are valid and SoloDB retries them.
+    // For a nonempty request, success with Count=0 means EOF, never an I/O error.
+    // SoloDB supplies SQLite's EOF zero-fill; this method does not report padding as data.
+    // Validate even empty ranges; errors here propagate with their original exception.
     public StorageReadResult ReadAt(long position, Span<byte> destination)
     {
         CheckRange(position, destination.Length);
@@ -292,18 +315,47 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
         return new StorageReadResult(file.Read(destination), null);
     }
 
+    // Success writes the entire span; empty writes must not extend the file.
+    // New gaps read as zeros. Failure may change the requested range, but must
+    // preserve existing bytes outside it, never shrink, and never grow beyond
+    // max(previous length, requested end). Do not turn a partial write into success.
     public StorageFailure? WriteAt(long position, ReadOnlySpan<byte> source)
     {
         CheckRange(position, source.Length);
         if (source.IsEmpty) return null;
+        if (position > file.Length) ExtendWithZeros(position);
         file.Position = position;
         file.Write(source);
         return null;
     }
 
+    // Return the current logical length, not capacity or a stale private value.
+    // Length is meaningful only on success; report or throw a real query failure.
     public StorageLengthResult GetLength() => new(file.Length, null);
-    public StorageFailure? SetLength(long length) { file.SetLength(length); return null; }
-    public StorageFailure? Flush() { file.Flush(true); return null; }
+
+    // Reject negative lengths. Preserve the retained prefix, discard a shortened
+    // tail, and zero every extension so shrink/regrow cannot reveal old bytes.
+    // On failure, preserve the prefix common to the old and requested lengths.
+    public StorageFailure? SetLength(long length)
+    {
+        if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
+        if (length > file.Length) ExtendWithZeros(length);
+        else file.SetLength(length);
+        return null;
+    }
+
+    // A persistent backend's success is an fsync-like ordered barrier: finish all
+    // earlier byte/length writes and their promised persistence before returning.
+    // Merely queuing or draining a userspace buffer is insufficient. Surface a
+    // failed barrier even if WriteAt succeeded. FileStream.Flush(true) requests
+    // the OS disk barrier; device guarantees and new-name/directory durability
+    // still belong to the backing system. A volatile backend cannot promise this.
+    public StorageFailure? Flush()
+    {
+        file.Flush(true);
+        return null;
+    }
+
     public void Dispose() => file.Dispose();
 }
 ```
