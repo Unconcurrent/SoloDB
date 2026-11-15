@@ -12,7 +12,7 @@ This version adds collection full-text search, databases backed by caller-suppli
 - [Query improvements](#more-query-expressions-run-inside-sqlite)
 - [C#, F# and generated operations](#c-f-and-generated-operations)
 - [Other fixes](#other-correctness-and-runtime-improvements)
-- [Upgrade notes](#upgrade-and-operating-notes)
+- [Existing databases](#existing-databases)
 
 ### Full-text search
 
@@ -54,7 +54,7 @@ public sealed class Article
 
 The title has a larger search weight than the body. Search fields must be fixed stored string-member paths. Store computed searchable text in a string field rather than placing a computation in the field declaration.
 
-**Upgrade requirement:** normal writable initialization runs the schema migration, including installation of the search catalog, before application features use the database. For 1.4.2, the completed schema is version 7. Stop older processes and upgrade every participating application before opening the database with the new version: SoloDB 1.4.1 and earlier refuse a schema-7 database. `EnsureSearchIndex` declares an index; it does not perform a deferred global schema migration.
+SoloDB prepares the search catalog automatically when you open the database. Call `EnsureSearchIndex` to choose which fields to search; no separate schema-upgrade command is needed.
 
 #### Ranked results, filters, text and snippets
 
@@ -901,12 +901,12 @@ See [generated metadata setup](docs/generated-metadata.md) for project registrat
   Console.WriteLine(command.ExecuteScalar()); // 1
   ```
 
-### Upgrade and operating notes
+### Existing databases
 
 - Keep ordinary path-based construction when you want an ordinary SQLite file: `new SoloDB("app.db")`. Supplying storage is an additional choice.
 - New writable storage factories require explicit coordination. Choose `SingleProcessInMemory` for its documented same-object, one-process scope; choose suitable coordination and coherent bytes for other sharing arrangements.
 - Preserve the main image together with its matching journal/WAL. Do not substitute an empty auxiliary file when reopening a database that may require recovery.
-- Normal schema migration requires all participating readers and writers to support schema 7. Collection type recording alone does not advance `user_version`.
-- Schema migration does not perform the explicit Decimal/BigInteger data migration. Applications upgrading older numerical storage still follow the [numerical migration guide](docs/numeric-migration.md).
+- Database schema changes happen automatically on opening. The manual data-conversion step is for Decimal and BigInteger values written before 1.4; see the [numerical migration example](docs/numeric-migration.md).
+- For an optional return to 1.4.1 without FTS indexes, see [using an older version](docs/full-text-search.md#using-141-again-without-search-indexes).
 - Synchronization depends on the backing storage, runtime, filesystem and device. Making newly created file names/directories durable remains an application deployment responsibility. Supplied-byte storage does not redirect SQLite's ordinary native temporary files.
 - Existing reference-depth, native engine feature requirements, numeric representations and per-database SQLite transaction guarantees remain in effect. This version does not introduce arbitrary custom comparer execution or an automatic document migration engine.

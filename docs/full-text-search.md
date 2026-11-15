@@ -2,8 +2,6 @@
 
 Declare the stored string fields to search, then use `Search` or `SearchIn` with ordinary LINQ. SoloDB maintains the index when documents change.
 
-Opening a writable database with SoloDB 1.4.2 upgrades it to schema 7, including the search catalog. **SoloDB 1.4.1 and earlier then refuse to open that database.** Stop older processes and upgrade every process that uses the database before opening it with 1.4.2.
-
 ## Declare fields and search
 
 ```csharp
@@ -167,7 +165,7 @@ Never sweep the reserved prefix or change owned search objects manually. This ex
 
 Document changes and search maintenance commit or roll back together. Lifecycle operations inside an existing transaction use its savepoint behavior. A running WAL reader can finish its old snapshot while a replacement is committed.
 
-The search catalog is installed during normal database initialization and migration. `EnsureSearchIndex` declares and maintains an index within that catalog. Do not lower the database version or manually edit owned search objects. A current database missing its catalog is damaged; declaring an index does not recreate the catalog.
+The search catalog is installed during normal database initialization and migration. `EnsureSearchIndex` declares and maintains an index within that catalog. Manage declared indexes through the search APIs. A current database missing its catalog is damaged; declaring an index does not recreate the catalog.
 
 ## Storage and cost
 
@@ -176,3 +174,17 @@ Shared stores the selected text only in the documents and reads it there for tex
 Search can use both its text index and ordinary member indexes. Ordering by Score can require scoring every match before returning a page. When you order by another field, SoloDB can choose the page first and score only its rows, although this may read the matches twice. Text and snippets can also be fetched after choosing the page. Matching, sorting and large `Skip` values still take work; a small `Take` does not make a broad search cheap.
 
 `Union` and `Distinct` may need to retain many candidates before removing duplicates. Use `ExplainQueryPlan` to check index use, and measure the actual `ToArray` or `ToList`, including the fields you request, on representative data. Retain a compiled query to avoid translating it and reading its index declaration again on each execution.
+
+
+## Using 1.4.1 again without search indexes
+
+If you have not created FTS indexes and want to return to 1.4.1, close the SoloDB instances and run this with SQLite:
+
+```sql
+BEGIN EXCLUSIVE;
+DROP TABLE IF EXISTS "SoloDB.SearchIndexes";
+PRAGMA user_version = 6;
+COMMIT;
+```
+
+The unused search catalog is removed so a later 1.4.2 opening can create it again. This does not reverse numerical data conversion. Use it at your own risk, or ask your AI agent to check your database and perform it.

@@ -2,8 +2,6 @@
 
 Store your C# and F# objects, query them with LINQ, and keep related documents and files together in one SQLite database. SoloDB runs inside your application, with transactions and SQL available when you need them.
 
-Upgrading to 1.4 requires manual migration of existing Decimal and BigInteger data. Follow the [upgrade instructions](https://github.com/Unconcurrent/SoloDB/blob/master/docs/numeric-migration.md).
-
 See the [changelog](https://github.com/Unconcurrent/SoloDB/blob/master/CHANGELOG.md) for versioned changes and usage examples, starting with 1.4.2.
 
 ## Core Features
@@ -23,7 +21,7 @@ SoloDB is packed with features that provide a seamless and powerful developer ex
 - **Events API**: Subscribe to collection lifecycle events (`OnInserting`, `OnInserted`, `OnUpdating`, `OnUpdated`, `OnDeleting`, `OnDeleted`) with full transactional guarantees via SQLite triggers.
 - **Thread-Safe**: A built-in connection pool ensures safe, concurrent access from multiple threads.
 - **Customizable ID Generation**: Use the default long primary key, or implement your own custom ID generation strategy (e.g., string, Guid).
-- **.NET Standard 2.0 & 2.1**: Broad compatibility with .NET Framework, .NET Core, and modern .NET runtimes.
+- **.NET 6 and .NET Standard 2.0 / 2.1**: Three package targets, selected automatically by NuGet for modern .NET and compatible older runtimes.
 - **Open Source**: Licensed under LGPLv3 with a [distribution exception](https://github.com/Unconcurrent/SoloDB/blob/master/LICENSE.SPECIAL.txt) for applications and independent libraries.
 - **Documentation**: See the [official documentation](https://solodb.org/docs.html) for detailed guides.
 
@@ -67,7 +65,7 @@ Install SoloDB from NuGet:
 dotnet add package SoloDB
 ```
 
-Before upgrading a database to 1.4.2, stop every older SoloDB process using it. A normal writable opening migrates the file to schema 7; SoloDB 1.4.1 and earlier then refuse to reopen it. Upgrade every participating application before reopening the database. Do not lower `PRAGMA user_version` to bypass that protection. See [numerical storage and migration](https://github.com/Unconcurrent/SoloDB/blob/master/docs/generated-metadata.md#numerical-storage-and-migration).
+SoloDB handles database schema changes when you open it. For Decimal or BigInteger data written before 1.4, run the [one-time numerical conversion](https://github.com/Unconcurrent/SoloDB/blob/master/docs/numeric-migration.md) before using those fields. Other existing data needs no manual migration step.
 
 ## Generated Metadata Registration
 
@@ -452,7 +450,7 @@ teamsR.Insert(teamR) |> ignore
 
 **No silent fallback:** SoloDB does not silently downgrade unsupported relation operations to generic JSON scanning behavior.
 
-#### Compatibility and Migration Notes
+#### Reference shapes and limits
 
 - Existing `DBRef<TTarget>` / `DBRefMany<TTarget>` persistence model remains relation-first (`SoloDBRelLink_*`, `SoloDBRelation`).
 - Relation query expressions support up to 10 reference hops. Write admission separately checks the final stored paths affected by newly introduced edges: a document starts at depth zero, 10 hops are allowed, and an 11th hop or directed cycle is rejected. Existing-ID `To` references count, including paths through previously stored ancestors. Shared targets and repeated CLR types on distinct rows are permitted when those paths remain within the limit and acyclic.

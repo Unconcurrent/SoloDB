@@ -2,7 +2,7 @@
 
 To generate operations, build with .NET SDK 8 or later. The `SoloDB` package includes a C# source generator, an F# type provider and their build integration. Keep the package's build assets enabled; no separate generator package or manual build-target import is required for package consumers.
 
-You can use your existing model classes and records in JIT and NativeAOT applications. Models do not need `partial` declarations or a separate generated version. Both builds use the same database format; see the [numerical storage upgrade](#numerical-storage-and-migration) when upgrading existing data.
+You can use your existing model classes and records in JIT and NativeAOT applications. Models do not need `partial` declarations or a separate generated version. Both builds use the same database format.
 
 ## Conditional activation
 
@@ -249,7 +249,7 @@ Typed document persistence stores Decimal and BigInteger values as canonical com
 
 Collection persistence passes floating JSON through SQLite JSONB, which [interprets a `NaN` number token as JSON null](https://www.sqlite.org/json1.html#json5). Nonnullable `double` and `float` readers materialize that null as NaN; nullable floating values and Object-valued members materialize it as null. List elements follow their declared element type. Original NaN and genuine null cannot be distinguished after this normalization. A quoted `"NaN"` remains a String. Typed floating-point infinity remains infinity. Raw SQL parameter binding has its [own conversion rules](native-sql.md#typed-arguments-and-direct-mapping).
 
-Before upgrading, stop every older SoloDB process using the database. A writable opening with SoloDB 1.4.2 advances `PRAGMA user_version` to 7 through normal schema migration, so SoloDB 1.4.1 and earlier refuse a later opening. This does not revoke connections already held by an older process. Do not lower the version stamp to bypass the check. The database version is established at opening; numerical fields are converted separately by explicit `MigrateDecimal<T>()` or `MigrateDecimal<T>(name)` calls.
+Schema changes happen automatically when the database opens. Converting legacy Decimal and BigInteger data is explicit; use `MigrateDecimal<T>()` or `MigrateDecimal<T>(name)` as shown in the [numerical conversion guide](numeric-migration.md).
 
 Call `db.MigrateDecimal<T>()` for the default collection or `db.MigrateDecimal<T>(name)` for an existing named collection before reading legacy Decimal or BigInteger fields. The operation converts the declared numerical fields atomically. A root call starts a transaction; a transactional call uses a savepoint, and a failure rolls back the conversion. A missing collection raises `KeyNotFoundException`. Collection acquisition performs no numerical checks or conversion. Stored numerical reads use the current representation; they do not retry a legacy representation. Canonical storage retains numerical value rather than Decimal scale bits.
 

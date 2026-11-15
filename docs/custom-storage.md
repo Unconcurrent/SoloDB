@@ -150,14 +150,13 @@ Each database owns its transactions. Use the child's transaction API for child u
 
 Direct parent filesystem streams can combine related child writes in a parent transaction. Each nesting edge stores the bytes in compressed 16 KiB chunks; a partial write can still read and decompress an affected chunk, patch it and recompress it. Only affected chunks are rewritten. Parent page, index and journal/WAL writes repeat the path at the next level, with checkpoint work later. A child transaction does not guarantee one ancestor transaction, and tenants sharing an ancestor still share its SQLite writer. Journal mode and synchronization remain application choices. Compression, dirty pages and those settings determine actual bytes and latency; depth alone gives no fixed multiplier.
 
-A bounded Linux x64 comparison on `/dev/shm` (tmpfs), using .NET 10.0.14 and SQLite 3.53.3, measured the same live root → first child → second child workload before and after these storage optimizations. All levels used WAL, `synchronous=FULL`, 4 KiB SQLite pages and 256 rows with 512-character payloads. The root used unbuffered FileStreams; children used their parent filesystem streams. Median latency for one transaction updating 32 rows was:
+A bounded SoloDB 1.4.2 measurement on Linux x64 `/dev/shm` (tmpfs), using .NET 10.0.14 and SQLite 3.53.3, used a live root → first child → second child workload. All levels used WAL, `synchronous=FULL`, 4 KiB SQLite pages and 256 rows with 512-character payloads. The root used unbuffered FileStreams; children used their parent filesystem streams. Median latency for one transaction updating 32 rows was:
 
 | Storage | Root | First child | Second child |
 | --- | ---: | ---: | ---: |
-| Before optimizations | 0.1173 ms | 0.9057 ms | 12.9816 ms |
-| With optimizations | 0.1143 ms | 0.4317 ms | 1.9257 ms |
+| SoloDB 1.4.2 | 0.1143 ms | 0.4317 ms | 1.9257 ms |
 
-First-child latency fell by **52.3%** and second-child latency by **85.2%** in this comparison. With the optimizations, nesting overhead relative to the measured root was **+277.8%** and **+1,585.2%** respectively. Each median covers three rotated samples of eight transactions after warmup, excluding setup, final checkpoints and disposal. Read-count/payload-sentinel checks and the aggregate committed-sum check passed. Warm-cache query reads were noisy and do not measure backing I/O. These timings show this workload, not a universal multiplier; tmpfs supplies no durable disk barrier and the timings do not measure physical bytes written.
+Nesting overhead relative to the measured root was **+277.8%** and **+1,585.2%** respectively. Each median covers three rotated samples of eight transactions after warmup, excluding setup, final checkpoints and disposal. Warm-cache query reads were noisy and do not measure backing I/O. These timings show this workload, not a universal multiplier; tmpfs supplies no durable disk barrier and the timings do not measure physical bytes written.
 
 When dirty, a database filesystem stream's `Flush` performs parent metadata maintenance through a transaction; its earlier byte writes already used parent transactions. Persistence comes from the complete chain's commit and backing-storage guarantees. A child's `FULL` synchronization cannot strengthen a parent configured for weaker persistence, and a memory-backed root remains volatile.
 

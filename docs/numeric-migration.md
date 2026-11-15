@@ -2,7 +2,7 @@
 
 SoloDB 1.3 stores typed Decimal and BigInteger values as JSON numbers. SoloDB 1.4 stores them as encoded JSON strings for exact numerical queries. Public JSON output still uses numbers.
 
-Stop every older SoloDB process before opening a database with SoloDB 1.4.2. A writable open advances `PRAGMA user_version` to 7; SoloDB 1.4.1 and earlier then refuse to reopen it. Do not lower that stamp. Numerical conversion is a separate, explicit operation. Collection acquisition does not inspect or convert numerical values.
+For an existing collection containing those older numerical fields, call `MigrateDecimal<T>()` before using them. It covers both Decimal and BigInteger. Other schema changes happen automatically when you open the database.
 
 ## Explicit conversion
 
