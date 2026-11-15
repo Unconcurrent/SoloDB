@@ -16,6 +16,11 @@ module internal StorageFileSync =
 
     let private macOS = RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
     let private affected =
+        // .NET 6-10's Unix SystemNative_FSync returns the Boolean comparison
+        // instead of the syscall result, so Flush(true) can hide native errors.
+        // .NET 11 fixes this; keep older affected releases on our checked barrier.
+        // https://github.com/dotnet/runtime/issues/135201
+        // https://github.com/dotnet/runtime/pull/124725
         let major = Environment.Version.Major
         major >= 6 && major < 11 &&
         (macOS || RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
