@@ -313,6 +313,11 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
 
     private static readonly bool MacOS = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
         System.Runtime.InteropServices.OSPlatform.OSX);
+
+    // On Linux and macOS, .NET 6-10 FileStream.Flush(true) can report success even
+    // when fsync fails, because the runtime returns a comparison instead of the
+    // native result (dotnet/runtime#135201, fixed in .NET 11). On those runtimes,
+    // call the native barrier directly and check it; elsewhere use Flush(true).
     private static readonly bool CheckedUnixSync = Environment.Version.Major >= 6 &&
         Environment.Version.Major < 11 && (MacOS ||
         System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
@@ -433,8 +438,7 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     // A persistent backend's success is an fsync-like ordered barrier: finish all
     // earlier byte/length writes and their promised persistence before returning.
     // Merely queuing or draining a userspace buffer is insufficient. Surface a
-    // failed barrier even if WriteAt succeeded. The helper checks native errors
-    // on Linux/macOS .NET 6-10; elsewhere it uses FileStream.Flush(true).
+    // failed barrier even if WriteAt succeeded.
     // Device and new-name/directory durability still belong to the backing system.
     // A volatile backend cannot promise this persistence.
     public StorageFailure? Flush()
