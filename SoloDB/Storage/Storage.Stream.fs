@@ -52,7 +52,7 @@ type internal StreamStorageFile(stream: Stream, leaveOpen: bool, writable: bool)
             | _ -> searching <- false
 #endif
         match backing with
-        | :? FileStream as file when file.CanWrite -> file.Flush(true)
+        | :? FileStream as file when file.CanWrite -> StorageFileSync.flushToDisk file
         | _ -> ()
     let zeroFrom start ending =
         if start < ending then

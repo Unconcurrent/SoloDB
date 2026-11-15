@@ -284,6 +284,39 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     private readonly FileStream file;
     private readonly byte[] zeros = new byte[8192];
 
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "fsync", SetLastError = true)]
+    private static extern int SyncFile(int descriptor);
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+    private static extern int SyncFull(int descriptor, int command);
+
+    private static readonly bool MacOS = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+        System.Runtime.InteropServices.OSPlatform.OSX);
+    private static readonly bool CheckedUnixSync = Environment.Version.Major >= 6 &&
+        Environment.Version.Major < 11 && (MacOS ||
+        System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+            System.Runtime.InteropServices.OSPlatform.Linux));
+
+    private void FlushToDisk()
+    {
+        if (!CheckedUnixSync) { file.Flush(true); return; }
+        file.Flush(false); // Drain managed bytes before the one checked native barrier.
+        var handle = file.SafeFileHandle;
+        bool held = false;
+        try
+        {
+            handle.DangerousAddRef(ref held);
+            int descriptor = handle.DangerousGetHandle().ToInt32();
+            while ((MacOS ? SyncFull(descriptor, 51) : SyncFile(descriptor)) != 0)
+            {
+                int error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                if (error != 4) // EINTR; Darwin command 51 is F_FULLFSYNC.
+                    throw new IOException("File synchronization failed.",
+                        new System.ComponentModel.Win32Exception(error));
+            }
+        }
+        finally { if (held) handle.DangerousRelease(); }
+    }
+
     public PositionalFile(string path)
     {
         file = new FileStream(path, FileMode.OpenOrCreate,
@@ -378,14 +411,15 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     // A persistent backend's success is an fsync-like ordered barrier: finish all
     // earlier byte/length writes and their promised persistence before returning.
     // Merely queuing or draining a userspace buffer is insufficient. Surface a
-    // failed barrier even if WriteAt succeeded. FileStream.Flush(true) requests
-    // the OS disk barrier; device guarantees and new-name/directory durability
-    // still belong to the backing system. A volatile backend cannot promise this.
+    // failed barrier even if WriteAt succeeded. The helper checks native errors
+    // on Linux/macOS .NET 6-10; elsewhere it uses FileStream.Flush(true).
+    // Device and new-name/directory durability still belong to the backing system.
+    // A volatile backend cannot promise this persistence.
     public StorageFailure? Flush()
     {
         try
         {
-            file.Flush(true);
+            FlushToDisk();
             return null;
         }
         catch (Exception cause) when (cause is IOException || cause is UnauthorizedAccessException)
@@ -496,7 +530,7 @@ The existing `source.BackupTo(destination)` API also works with supplied storage
 
 #### Buffered file flushing and original errors
 
-On the .NET Standard 2.1 and .NET 6 library assets, a supplied `BufferedStream` is drained before the underlying writable `FileStream` receives `Flush(true)`. Known nested `BufferedStream` layers are supported:
+On the .NET Standard 2.1 and .NET 6 library assets, a supplied `BufferedStream` is drained before the underlying writable `FileStream` receives its disk barrier. Known nested `BufferedStream` layers are supported:
 
 ```csharp
 using var main = new BufferedStream(new FileStream(
@@ -509,7 +543,9 @@ using var db = new SoloDB(storage);
 db.GetCollection<Article>().Insert(new Article { Title = "buffered files" });
 ```
 
-The .NET Standard 2.0 asset retains the supplied wrapper's normal `Flush` because that target does not expose `BufferedStream.UnderlyingStream`; direct writable `FileStream` inputs still receive `Flush(true)`. Custom wrappers supply their own persistence contract. Flushing is not a guarantee against a device ignoring synchronization, and independently buffered readers still need coherent bytes.
+On Linux/macOS with .NET 6 through 10, ordinary FileStreams use a checked native synchronization call after buffer draining, avoiding a runtime defect that hides some flush errors. Linux uses `fsync`; macOS uses `F_FULLFSYNC`. Interrupted calls retry, other errors retain their native cause, and no preliminary `Flush(true)` consumes the error. Other runtimes use the normal .NET API. Custom streams and FileStream subclasses retain their own virtual flushing contract.
+
+The .NET Standard 2.0 asset retains the supplied wrapper's normal `Flush` because that target does not expose `BufferedStream.UnderlyingStream`; direct ordinary writable `FileStream` inputs still receive their disk barrier. Custom wrappers supply their own persistence contract. Flushing is not a guarantee against a device ignoring synchronization, and independently buffered readers still need coherent bytes.
 
 Opening preserves its first native result and original cause even if an admission unlock or failed-open session close also fails. Additional cleanup failures are available through `ClosingFailure`:
 

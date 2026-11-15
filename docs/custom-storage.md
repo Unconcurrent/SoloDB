@@ -86,9 +86,9 @@ let run () =
 run ()
 ```
 
-For a writable `FileStream`, SoloDB drains its buffers and requests a disk flush through the normal .NET `FileStream.Flush(true)` API. The netstandard2.1 and net6.0 library assets also do this through any number of `BufferedStream` layers: the supplied stream's `Flush` drains the chain before the underlying file receives the disk-flush request. The runtime supplies its platform implementation; exceptions it throws keep their original cause.
+For an ordinary writable `FileStream`, SoloDB drains its buffers before requesting disk synchronization. On Linux and macOS running .NET 6 through 10, it uses a checked native barrier (`fsync` on Linux, `F_FULLFSYNC` on macOS), retrying interrupted calls and preserving other native errors as the cause of an `IOException`. This avoids a runtime defect that can hide synchronization failures. Elsewhere it uses `FileStream.Flush(true)`. It invokes only one disk barrier: calling the defective API first could consume an error that a second call would no longer report. The netstandard2.1 and net6.0 assets also reach this path through known nested `BufferedStream` layers, after the supplied stream has drained them.
 
-For other streams, including custom or encryption wrappers around a file, SoloDB calls the supplied stream's `Flush`. That implementation must provide the persistence guarantee you need. The netstandard2.0 asset also treats `BufferedStream` this way because that target does not expose its underlying stream; direct `FileStream` inputs still receive `Flush(true)`. A positional-file implementation can use its retained backing resource to supply a stronger barrier. SoloDB does not discover arbitrary wrapper internals or replace buffering or encryption. `MemoryStream` remains volatile. You must also make newly created file names and their parent directory durable before relying on recovery after power loss. A successful file synchronization call cannot establish that your filesystem or device honors its persistence contract. Flushing buffered writes does not make independently buffered readers coherent.
+Custom streams and FileStream subclasses retain their virtual flushing contract; SoloDB does not replace custom overrides with native calls. That implementation must provide the persistence guarantee you need, including handling runtime-specific synchronization errors when it delegates to .NET. The netstandard2.0 asset also treats `BufferedStream` this way because that target does not expose its underlying stream; direct ordinary `FileStream` inputs still receive the checked disk barrier where required. A positional-file implementation can use its retained backing resource to supply a stronger barrier. SoloDB does not discover arbitrary wrapper internals or replace buffering or encryption. `MemoryStream` remains volatile. You must also make newly created file names and their parent directory durable before relying on recovery after power loss. A successful file synchronization call cannot establish that your filesystem or device honors its persistence contract. Flushing buffered writes does not make independently buffered readers coherent.
 
 Generated and NativeAOT applications still need their [normal metadata registration](generated-metadata.md). Borrow connections from the database instance you opened; its diagnostic connection string cannot recreate the supplied streams or files.
 
@@ -113,7 +113,7 @@ using var storage = SqliteStorage.Wal(main, log, true, coordination);
 using var db = new SoloDB(storage);
 ```
 
-This uses the active SQLite engine's default filesystem for locks and shared memory on one host, and .NET's disk-flush API for the supplied FileStreams. It does not make arbitrary remote storage safe to share or establish your runtime, filesystem or device's power-loss behavior; file-name and directory durability still need your attention.
+This uses the active SQLite engine's default filesystem for locks and shared memory on one host, and the disk-synchronization path described above for the supplied FileStreams. It does not make arbitrary remote storage safe to share or establish your runtime, filesystem or device's power-loss behavior; file-name and directory durability still need your attention.
 
 When another `SqliteStorage` object has not finished with the files (`IsClosed` is false):
 
@@ -307,6 +307,39 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     private readonly FileStream file;
     private readonly byte[] zeros = new byte[8192];
 
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "fsync", SetLastError = true)]
+    private static extern int SyncFile(int descriptor);
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+    private static extern int SyncFull(int descriptor, int command);
+
+    private static readonly bool MacOS = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+        System.Runtime.InteropServices.OSPlatform.OSX);
+    private static readonly bool CheckedUnixSync = Environment.Version.Major >= 6 &&
+        Environment.Version.Major < 11 && (MacOS ||
+        System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+            System.Runtime.InteropServices.OSPlatform.Linux));
+
+    private void FlushToDisk()
+    {
+        if (!CheckedUnixSync) { file.Flush(true); return; }
+        file.Flush(false); // Drain managed bytes before the one checked native barrier.
+        var handle = file.SafeFileHandle;
+        bool held = false;
+        try
+        {
+            handle.DangerousAddRef(ref held);
+            int descriptor = handle.DangerousGetHandle().ToInt32();
+            while ((MacOS ? SyncFull(descriptor, 51) : SyncFile(descriptor)) != 0)
+            {
+                int error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                if (error != 4) // EINTR; Darwin command 51 is F_FULLFSYNC.
+                    throw new IOException("File synchronization failed.",
+                        new System.ComponentModel.Win32Exception(error));
+            }
+        }
+        finally { if (held) handle.DangerousRelease(); }
+    }
+
     public PositionalFile(string path)
     {
         file = new FileStream(path, FileMode.OpenOrCreate,
@@ -401,14 +434,15 @@ public sealed class PositionalFile : ISqliteStorageFile, IDisposable
     // A persistent backend's success is an fsync-like ordered barrier: finish all
     // earlier byte/length writes and their promised persistence before returning.
     // Merely queuing or draining a userspace buffer is insufficient. Surface a
-    // failed barrier even if WriteAt succeeded. FileStream.Flush(true) requests
-    // the OS disk barrier; device guarantees and new-name/directory durability
-    // still belong to the backing system. A volatile backend cannot promise this.
+    // failed barrier even if WriteAt succeeded. The helper checks native errors
+    // on Linux/macOS .NET 6-10; elsewhere it uses FileStream.Flush(true).
+    // Device and new-name/directory durability still belong to the backing system.
+    // A volatile backend cannot promise this persistence.
     public StorageFailure? Flush()
     {
         try
         {
-            file.Flush(true);
+            FlushToDisk();
             return null;
         }
         catch (Exception cause) when (cause is IOException || cause is UnauthorizedAccessException)
