@@ -43,16 +43,17 @@ The four reference types also work with custom document IDs and documents withou
 
 ## F#
 
+Use writable reference fields so SoloDB can load and track them. Other data fields can stay immutable.
+
 ```fsharp
 open SoloDatabase
 
-[<CLIMutable>]
 type Report = {
-    Id: int64
-    MainFile: FileRef
-    Folder: DirectoryRef
-    Attachments: FileRefMany
-    RelatedFolders: DirectoryRefMany
+    mutable Id: int64
+    mutable MainFile: FileRef
+    mutable Folder: DirectoryRef
+    mutable Attachments: FileRefMany
+    mutable RelatedFolders: DirectoryRefMany
 }
 
 use db = new SoloDB("reports.db")

@@ -24,19 +24,21 @@ module internal DBRefTypeHelpers =
     let internal isDBRefManyTypedDefinition (typ: Type) = shape typ = TypeShape.TypedManyReference
     let internal isFSharpOptionDefinition (typ: Type) = not(isNull typ) && TypeSupport.IsOption typ
 
+    // Cached target/cardinality facts also describe filesystem references.
+    // Document references have generic wrappers; filesystem references do not.
     let internal isDBRefType (t: Type) =
         match ReferenceTypeMetadata.TryGet(t) with
-        | ValueSome facts -> not facts.Many
+        | ValueSome facts -> t.IsGenericType && not facts.Many
         | ValueNone -> not (isNull t) && t.IsGenericType && isDBRefDefinition (t.GetGenericTypeDefinition())
 
     let internal isDBRefTypedType (t: Type) =
         match ReferenceTypeMetadata.TryGet(t) with
-        | ValueSome facts -> not facts.Many && not (isNull facts.Identity)
+        | ValueSome facts -> t.IsGenericType && not facts.Many && not (isNull facts.Identity)
         | ValueNone -> not (isNull t) && t.IsGenericType && isDBRefTypedDefinition (t.GetGenericTypeDefinition())
 
     let internal isDBRefManyType (t: Type) =
         match ReferenceTypeMetadata.TryGet(t) with
-        | ValueSome facts -> facts.Many
+        | ValueSome facts -> t.IsGenericType && facts.Many
         | ValueNone -> not (isNull t) && t.IsGenericType && isDBRefManyDefinition (t.GetGenericTypeDefinition())
 
     let internal isFileRefType (t: Type) =

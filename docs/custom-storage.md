@@ -70,8 +70,7 @@ Put F# disposal scopes inside a function or entry point:
 open System.IO
 open SoloDatabase
 
-[<CLIMutable>]
-type Article = { Id: int64; Title: string }
+type Article = { mutable Id: int64; Title: string }
 
 let run () =
     use main = new MemoryStream()

@@ -809,14 +809,13 @@ This is a limited compatibility layer, not a full ADO.NET provider. Stored proce
 
 ### F# Example
 
-SoloDB works seamlessly with F#.
+Use F# records directly, with a mutable `Id` for generated keys and record updates.
 
 ```fsharp
 open SoloDatabase
 open System.Linq
 
-[<CLIMutable>]
-type MyFSharpType = { Id: int64; Name: string; Data: string }
+type MyFSharpType = { mutable Id: int64; Name: string; Data: string }
 
 use db = new SoloDB("fsharp_demo.db")
 let collection = db.GetCollection<MyFSharpType>()

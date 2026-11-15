@@ -110,8 +110,7 @@ open System
 open System.Linq
 open SoloDatabase
 
-[<CLIMutable>]
-type Article = { Id: int64; Title: string; Body: string; Tenant: int }
+type Article = { mutable Id: int64; Title: string; Body: string; Tenant: int }
 
 type Supplied = SoloDBAOT<0>
 

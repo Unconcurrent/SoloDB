@@ -890,6 +890,7 @@ See [generated metadata setup](docs/generated-metadata.md) for project registrat
 
 ### Other correctness and runtime improvements
 
+- Generated registration preserves the distinction between document references and file/directory references when loading and updating records.
 - Read-only database initialization respects actual native access. It does not try to migrate or record collection descriptions on a read-only handle. Reopen an older image writable to migrate it before immutable use.
 - Removing an absent collection or index preserves its harmless absent-result behavior. Supplied read-only storage still refuses a real removal that would write.
 - Search declaration replacement, repair, document changes and rollback preserve their transactional ownership. Rebuild repairs owned structures without sweeping unrelated objects.
