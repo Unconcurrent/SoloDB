@@ -6,15 +6,16 @@
     <CheckEolTargetFramework>false</CheckEolTargetFramework>
     <SignAssembly>False</SignAssembly>
     <Title>SoloDB</Title>
-    <Description>SoloDB is a document database built on top of SQLite using the JSONB data type. It leverages the robustness and simplicity of SQLite to provide an efficient and lightweight database solution for handling JSON documents.</Description>
+    <Description>A .NET database that just works: an ACID document-relational database built on SQLite. Store C# and F# objects, query them with LINQ, link them with typed relations, search text with ranked full-text search, keep files in the same database, and ship with NativeAOT.</Description>
     <Copyright>Radu Sologub</Copyright>
     <Authors>Radu Sologub</Authors>
     <RootNamespace>SoloDatabase</RootNamespace>
-    <PackageProjectUrl>https://github.com/Unconcurrent/SoloDB</PackageProjectUrl>
+    <PackageProjectUrl>https://solodb.org/</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/Unconcurrent/SoloDB</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>database</PackageTags>
+    <PackageTags>database;sqlite;document-database;nosql;json;jsonb;linq;embedded;acid;relations;full-text-search;fts5;file-storage;nativeaot;csharp;fsharp</PackageTags>
+    <PackageReleaseNotes>See https://github.com/Unconcurrent/SoloDB/blob/master/CHANGELOG.md for the changes in each version.</PackageReleaseNotes>
     <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
     <PackageIcon>icon.png</PackageIcon>
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
