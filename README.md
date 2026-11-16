@@ -21,7 +21,7 @@ SoloDB is packed with features that provide a seamless and powerful developer ex
 - **Events API**: Subscribe to collection lifecycle events (`OnInserting`, `OnInserted`, `OnUpdating`, `OnUpdated`, `OnDeleting`, `OnDeleted`) with full transactional guarantees via SQLite triggers.
 - **Thread-Safe**: A built-in connection pool ensures safe, concurrent access from multiple threads.
 - **Customizable ID Generation**: Use the default long primary key, or implement your own custom ID generation strategy (e.g., string, Guid).
-- **.NET 6 and .NET Standard 2.0 / 2.1**: Three package targets, selected automatically by NuGet for modern .NET and compatible older runtimes.
+- **.NET 6+, .NET Framework 4.6.1+ and .NET Standard 2.0 / 2.1**: Three package targets, selected automatically by NuGet for modern .NET and compatible older runtimes.
 - **Open Source**: Licensed under LGPLv3 with a [distribution exception](https://github.com/Unconcurrent/SoloDB/blob/master/LICENSE.SPECIAL.txt) for applications and independent libraries.
 - **Documentation**: See the [official documentation](https://solodb.org/docs.html) for detailed guides.
 
